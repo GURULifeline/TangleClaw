@@ -6,7 +6,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Added
 
-- **Release-candidate certification: the state machine that judges a 72-hour soak** (#1949). `lib/release-certification/` decides, with no I/O, what each health sample means for a candidate pinned to one exact 40-character SHA.
+- **Release-candidate certification: the state machine that judges a 72-hour soak** (#1949). `lib/release-certification/` certifies a candidate pinned to one exact 40-character SHA. Its core (`state-machine.js`) decides, with no I/O, what each health sample means. Around that core are a private evidence store, a runner, publishing to the `metrics` branch and a verifier for it.
   - **States:** `not-started`, `running`, `extended`, `failed`, `awaiting-review`, `passed`, `cancelled`. Every reason is a closed code (`lib/release-certification/codes.js`); nothing is prose to parse.
   - **Earning time:** only an interval between two healthy samples from the same runner process and the same server process, at most 150 s long, with wall and monotonic time agreeing, earns its duration toward 259,200 qualified seconds. Earned time stops at the target. Sleep, a stepped clock, a runner restart, a server restart between samples (however quickly it came back), an unreachable probe, an unproven runtime SHA, GitHub being unreachable or a required check still running extends the run instead, and the lost wall time is recorded per reason.
   - **`extended` is reversible:** the next qualifying interval returns the run to `running` with its earned time kept. A run that has earned its time but not met the PTY-use target (25 attaches and 25 detaches spanning 6 hours) stays extended until it does.
