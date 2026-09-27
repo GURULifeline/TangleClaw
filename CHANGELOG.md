@@ -171,7 +171,7 @@ All notable changes to TangleClaw are documented in this file.
   - Informational only: nothing here pulls, checks out, restarts or gates anything. `lib/checkout-fleet.js`.
 
 ### Changed
--- **`./deploy/install.sh` now refreshes deploy assets on a caddy-mode host too** (#1901). It used to refuse there, and the only way to refresh the server plist, `~/.tmux.conf` or dependencies was `--to direct`, then install.sh, then `--to caddy`, with the dashboard unprotected in between. In caddy mode it now:
+- **`./deploy/install.sh` now refreshes deploy assets on a caddy-mode host too** (#1901). It used to refuse there, and the only way to refresh the server plist, `~/.tmux.conf` or dependencies was `--to direct`, then install.sh, then `--to caddy`, with the dashboard unprotected in between. In caddy mode it now:
   - **Checks before changing anything.** It first runs `ingress-cutover --to caddy --dry-run` and stops, with nothing changed, if the cutover would refuse. The one exception: when the only problem is a missing or stale ttyd runtime, it builds that runtime (which writes only `~/.tangleclaw/bin`), then runs the whole check again.
   - **Refreshes what it owns:** the server plist, `~/.tmux.conf`, the attach script and dependencies. It never writes the direct-mode ttyd plist.
   - **Restarts twice, confirming each.** It reloads the server so its new plist takes effect and waits for it to be healthy. Then `ingress-cutover --to caddy` re-applies the ttyd and Caddy plists and restarts the server again, and install.sh confirms it is healthy through Caddy. Each restart is bounded and announced.
@@ -180,7 +180,7 @@ All notable changes to TangleClaw are documented in this file.
 - **`ingress-cutover --dry-run` exits 3 when the real run would refuse** (#1901). A dry run that predicted a refusal used to exit 0 unless the refusal was the ungate one. That covers a hand-edited or unreadable Caddyfile, a gate it would drop, and a refused tailnet move. The reason is on stderr. Exit 1 still means the run could not be planned (for example the typed `ttyd-runtime-unavailable`), and 2 is a usage error.
 - The post-update notice, the update report, the README, the ttyd-runtime refusal text, the configuration reference, the user guide and the owned-ttyd runbook now name `./deploy/install.sh` for both modes. ADR 0018 carries a dated amendment note citing the #1901 ruling. Two `test/ttyd-runtime.test.js` assertions that pinned "never deploy/install.sh" were changed deliberately to the new wording, and the #1900 caddy-refusal test was replaced by the #1901 preflight tests.
 
- **Table cells on served plan pages no longer break words mid-way** (#1930). Issue numbers like `#1234` and short words like `enhancement` stay on one line; a wide table scrolls sideways inside its box instead.
+- **Table cells on served plan pages no longer break words mid-way** (#1930). Issue numbers like `#1234` and short words like `enhancement` stay on one line; a wide table scrolls sideways inside its box instead.
 
 - **A served plan page shows its "updated" time in the server's local time zone** (#1928). A plan read in Los Angeles now shows `2026-09-26 17:50:36 PDT` (or `PST` in winter) instead of `2026-09-27 00:50:36 UTC`. The zone is the host's own IANA zone, so no configuration is involved. The `<time datetime>` attribute still carries the ISO UTC value for machine readers, and hovering the stamp shows the UTC reading. The plan-list API is unchanged: `modifiedAt` stays ISO UTC.
 

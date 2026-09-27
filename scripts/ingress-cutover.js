@@ -391,6 +391,14 @@ function parseArgs(argv) {
 }
 
 /**
+ * Exit status of a `--dry-run` that predicts the real run would REFUSE (#1901).
+ * Distinct from 1, which stays "the run could not be planned" (a usage, runtime
+ * or generator failure), so a caller such as `deploy/install.sh` can abort on a
+ * predicted refusal before it changes anything, and say which of the two it was.
+ */
+const DRY_RUN_WOULD_REFUSE_EXIT = 3;
+
+/**
  * Outcome codes written to a `--result-file`. Stable strings: a caller branches
  * on these rather than on prose, so they are part of the contract and must not be
  * reworded to suit a message.
@@ -400,14 +408,6 @@ function parseArgs(argv) {
  * others mean an existing file must not be touched.
  * @type {Readonly<Record<string, string>>}
  */
-/**
- * Exit status of a `--dry-run` that predicts the real run would REFUSE (#1901).
- * Distinct from 1, which stays "the run could not be planned" (a usage, runtime
- * or generator failure), so a caller such as `deploy/install.sh` can abort on a
- * predicted refusal before it changes anything, and say which of the two it was.
- */
-const DRY_RUN_WOULD_REFUSE_EXIT = 3;
-
 const CUTOVER_CODES = Object.freeze({
   OK: 'ok',
   CADDY_MISSING: 'caddy-missing',

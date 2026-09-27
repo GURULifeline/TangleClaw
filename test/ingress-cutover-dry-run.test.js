@@ -171,6 +171,15 @@ describe('ingress-cutover --dry-run exit status (#1901)', () => {
     assert.match(refused.stdout, /gate change:.*`forward_auth`/, 'and the refused preview names it too, before any decision');
   });
 
+  it('exits 3 and names the reason when a --tailnet-host move would be refused', () => {
+    // A fresh sandbox is in direct mode, so the tailnet validator refuses the
+    // move, which is a predicted refusal like the others.
+    const box = sandbox('tailnet');
+    const r = cutover(box, ['--to', 'caddy', '--tailnet-host', 'nope.example.ts.net', '--dry-run']);
+    assert.equal(r.status, DRY_RUN_WOULD_REFUSE_EXIT, r.stderr);
+    assert.match(r.stderr, /--tailnet-host moves the site of an install already in caddy mode.*\(ingress untouched\)/);
+  });
+
   it('exits 1 with the typed ttyd-runtime-unavailable code when no runtime resolves', () => {
     const box = sandbox('no-runtime', { runtime: false });
     const r = cutover(box, ['--to', 'caddy', '--dry-run', '--result-file', box.resultFile]);

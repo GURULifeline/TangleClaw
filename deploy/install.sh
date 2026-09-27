@@ -140,8 +140,20 @@ fi
 # Only a passing preflight lets the rest of the script run.
 CUTOVER_SCRIPT="${REPO_DIR}/scripts/ingress-cutover.js"
 PREFLIGHT_STATUS=0
+PREFLIGHT_RESULT=""
+CUTOVER_RESULT=""
+# The cutover's result files are scratch: remove them however the run ends.
+# The run's own exit status is kept: a cleanup that failed must never be what
+# the caller reads as the outcome of the install.
+cleanup_results() {
+  local status=$?
+  if [ -n "$PREFLIGHT_RESULT$CUTOVER_RESULT" ]; then rm -f "$PREFLIGHT_RESULT" "$CUTOVER_RESULT" 2>/dev/null || true; fi
+  exit "$status"
+}
+trap cleanup_results EXIT
 BOOTSTRAPPED_RUNTIME=""
 run_cutover_preflight() {
+  [ -n "$PREFLIGHT_RESULT" ] && rm -f "$PREFLIGHT_RESULT"
   PREFLIGHT_RESULT="$(mktemp "${TMPDIR:-/tmp}/tc-install-preflight.XXXXXX")"
   set +e
   node "$CUTOVER_SCRIPT" --to caddy --dry-run --result-file "$PREFLIGHT_RESULT"

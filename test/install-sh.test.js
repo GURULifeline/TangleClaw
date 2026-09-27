@@ -944,6 +944,16 @@ describe('deploy/install.sh caddy-mode refresh (#1901, executed)', () => {
     assert.match(output, /which login gate is in force is above/);
   });
 
+  it('leaves none of the cutover\'s scratch result files behind, whether it succeeds or refuses', () => {
+    const leftovers = (box) => fs.readdirSync(box.root).filter((f) => /^tc-install-(preflight|cutover)\./.test(f));
+    const ok = sandbox(CLEAN);
+    assert.equal(runInstall(ok).code, 0);
+    assert.deepEqual(leftovers(ok), []);
+    const refused = sandbox({ dryRuns: [{ status: 3, reason: 'hand-edited' }] });
+    assert.equal(runInstall(refused).code, 1, 'the cleanup keeps the run\'s own exit status');
+    assert.deepEqual(leftovers(refused), []);
+  });
+
   it('fails, bounded, when restart 2 never confirms healthy', () => {
     const box = sandbox({ ...CLEAN, caddyHealth: '502', cutover: { status: 0, ok: true, code: 'ok', healthOk: false } });
     const { code, output } = runInstall(box);
