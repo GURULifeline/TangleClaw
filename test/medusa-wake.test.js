@@ -955,6 +955,7 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     assert.match(line, /tc message ack <message-id>/);
     assert.ok(line.indexOf('--in-reply-to') < line.indexOf('tc message ack'), 'reply comes before the ack');
     assert.match(line, /tc message owed/);
+    assert.match(line, /Never use \/clear as an acknowledgement/);
     assert.ok(!line.includes('\n'), 'still one line');
   });
 

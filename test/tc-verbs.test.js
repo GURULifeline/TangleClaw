@@ -400,7 +400,7 @@ describe('tc verb roster (lib/tc-verbs)', () => {
       });
       const none = await message.run(ctxFor([]));
       assert.equal(none.code, 0);
-      assert.equal(calls[1], '/api/sessions/p%20q/medusa/exchanges?direction=received&open=1');
+      assert.equal(calls[1], '/api/sessions/p%20q/medusa/exchanges?direction=received&open=1&limit=200');
       assert.match(none.stdout, /You owe nothing/);
 
       const some = await message.run(ctxFor([
@@ -435,6 +435,36 @@ describe('tc verb roster (lib/tc-verbs)', () => {
       assert.match(res.stdout, /You owe nothing/);
       assert.doesNotMatch(res.stdout, /h-u/);
       assert.match(res.stdout, /1 exchange this host cannot supervise is not counted/);
+    });
+
+    it('owed skips a send still in flight, which the recipient has not received', async () => {
+      const res = await message.run({
+        env: {}, argv: ['owed'], now: () => Date.parse('2026-09-27T12:00:00Z'),
+        getJson: async (p) => (p.startsWith('/api/tc/whoami') ? { project: { id: 1, name: 'p' } } : {
+          exchanges: [
+            { exchangeId: 'mx_p', hubId: null, tracking: 'tracked', replyRequired: true, state: 'send_pending', label: 'send pending', sender: { workspaceId: 'ws-a' }, createdAt: '2026-09-27T11:59:00Z' },
+            { exchangeId: 'mx_u', hubId: 'h-x', tracking: 'tracked', replyRequired: true, state: 'send_unknown', label: 'send unknown', sender: { workspaceId: 'ws-a' }, createdAt: '2026-09-27T11:59:00Z' }
+          ]
+        }),
+        postJson: async () => { throw new Error('owed must not POST'); }
+      });
+      assert.match(res.stdout, /You owe nothing/);
+      assert.doesNotMatch(res.stdout, /null/, 'no row without a Hub id is printed');
+    });
+
+    it('owed says when the page was full instead of claiming nothing is owed', async () => {
+      const rows = Array.from({ length: 200 }, (_, i) => ({
+        exchangeId: `mx_${i}`, hubId: `h-${i}`, tracking: 'untracked', replyRequired: false, state: 'untracked', label: 'untracked',
+        sender: { workspaceId: 'ws-a' }, createdAt: '2026-09-27T11:00:00Z'
+      }));
+      const res = await message.run({
+        env: {}, argv: ['owed'], now: () => Date.parse('2026-09-27T12:00:00Z'),
+        getJson: async (p) => (p.startsWith('/api/tc/whoami') ? { project: { id: 1, name: 'p' } } : { exchanges: rows }),
+        postJson: async () => { throw new Error('owed must not POST'); }
+      });
+      assert.doesNotMatch(res.stdout, /You owe nothing/, 'a truncated read cannot prove an empty debt');
+      assert.match(res.stdout, /Nothing owed among the exchanges read/);
+      assert.match(res.stdout, /Only the newest 200 open exchanges were read/);
     });
 
     it('read tells the recipient to reply before it acks, and where the debt list is', async () => {

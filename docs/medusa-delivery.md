@@ -113,7 +113,8 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   them. **Reply before acknowledging** (#1976). For a message that needs no
   reply, the acknowledgement closes the exchange. For one that does, an
   acknowledgement with no reply leaves the sender waiting. The wake nudge, the
-  prime and the engine config all state this order.
+  prime and the engine config all state this order. The nudge and the
+  engine config also say never to use `/clear` as an acknowledgement.
 - **Closing:** the original sender closes an exchange with
   `POST <base>/medusa/exchanges/<exchange-id>/close` (`tc message close`).
 - **Listing:** `GET <base>/medusa/exchanges?direction=sent|received&open=1`
@@ -121,7 +122,8 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   `tc message owed` shows the recipient what it still owes: replies first, then
   messages not yet handled. An `untracked` exchange (one this host cannot
   supervise) is counted aloud but never listed as owed, because its state
-  cannot show whether it was handled.
+  cannot show whether it was handled. A send still in flight is not listed,
+  and a full 200-row page is reported as possibly incomplete.
 
 ## Wakes and re-arms
 
