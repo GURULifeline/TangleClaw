@@ -253,7 +253,7 @@ describe('verifyHistory: a real metrics branch', () => {
     const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
     assert.equal(result.exists, true);
     assert.deepEqual(result.violations.map((v) => v.rule), [RULES.HISTORY_UNREADABLE]);
-    const notARepo = await verify.verifyHistory({ repoDir: tmp, ref: 'metrics' });
+    const notARepo = await verify.verifyHistory({ repoDir: tmp, ref: 'metrics', git: async () => ({ code: 128, stdout: '' }) });
     assert.deepEqual(notARepo.violations.map((v) => v.rule), [RULES.HISTORY_UNREADABLE], 'a wrong --repo is not "nothing published"');
   });
 
