@@ -369,6 +369,14 @@ function parseArgs(argv) {
  * others mean an existing file must not be touched.
  * @type {Readonly<Record<string, string>>}
  */
+/**
+ * Exit status of a `--dry-run` that predicts the real run would REFUSE (#1901).
+ * Distinct from 1, which stays "the run could not be planned" (a usage, runtime
+ * or generator failure), so a caller such as `deploy/install.sh` can abort on a
+ * predicted refusal before it changes anything, and say which of the two it was.
+ */
+const DRY_RUN_WOULD_REFUSE_EXIT = 3;
+
 const CUTOVER_CODES = Object.freeze({
   OK: 'ok',
   CADDY_MISSING: 'caddy-missing',
@@ -826,7 +834,8 @@ function main() {
     });
     if (!verdict.ok) {
       process.stderr.write(`ERROR: ${verdict.reason} (ingress untouched)\n`);
-      if (dryRun) { store.close(); process.exit(1); }
+      // A predicted refusal, so a dry run says so with its own status (#1901).
+      if (dryRun) { store.close(); process.exit(DRY_RUN_WOULD_REFUSE_EXIT); }
       finish(CUTOVER_CODES.TAILNET_REFUSED, verdict.reason, { tailnetReason: verdict.code });
     }
     ctx.tailnetHost = verdict.host;
@@ -847,6 +856,13 @@ function main() {
     // credential is handled, without that author having to know this write ends
     // up in a durable file. Cheap, and the alternative is finding out later.
     process.stderr.write(`ERROR: ${caddy.redactHashes(err.message)}\n`);
+    // A dry run that meets the ungate refusal is PREDICTING a refusal, which has
+    // its own status (#1901). Any other planning error stays a failure (1).
+    if (dryRun && err.cutoverCode === 'ungate-refused') {
+      process.stderr.write('REFUSE (dry run): the real cutover would refuse to replace a gated Caddyfile with an ungated one\n');
+      store.close();
+      process.exit(DRY_RUN_WOULD_REFUSE_EXIT);
+    }
     // Only the tagged refusal is `ungate-refused`. Everything else the generator
     // raises is a plain build failure, and must not be reported as a credential
     // problem — the two have completely different operator remedies.
@@ -854,6 +870,10 @@ function main() {
   }
 
   if (dryRun) {
+    // Why the real run would refuse, when it would. Collected while the preview
+    // prints, and turned into the exit status at the end, so the preview still
+    // shows the whole plan before saying it would stop.
+    const wouldRefuse = [];
     process.stdout.write(`\n[dry-run] ingress cutover → ${target}\n`);
     if (target === 'caddy') process.stdout.write(`  stage cert into: ${caddy.getStagedCertsDir()}\n`);
     if (ctx.tailnetHost !== undefined) {
@@ -874,10 +894,12 @@ function main() {
           `  ✗ would REFUSE: ${plan.caddyfile.path} cannot be READ, so it cannot be backed up\n`
           + '    --force does NOT apply here — fix permissions or move the file aside, then re-run\n'
         );
+        wouldRefuse.push(`the Caddyfile cannot be read: ${plan.caddyfile.path}`);
       } else if (!ingress.safeToWrite) {
         process.stdout.write(force
           ? `  ⚠ overwrite HAND-EDITED Caddyfile (--force; timestamped backup written first): ${plan.caddyfile.path}\n`
           : `  ✗ would REFUSE: ${plan.caddyfile.path} is hand-edited (timestamped backup + re-run with --force to replace)\n`);
+        if (!force) wouldRefuse.push(`the Caddyfile is hand-edited (re-run with --force to replace it): ${plan.caddyfile.path}`);
       }
       process.stdout.write(`  write Caddyfile: ${plan.caddyfile.path}\n`);
     }
@@ -894,6 +916,10 @@ function main() {
     // caller polling one must never see a dry run and conclude the ingress moved.
     if (resultFile) process.stdout.write('  note: --result-file is not written for a dry run\n');
     store.close();
+    if (wouldRefuse.length > 0) {
+      process.stderr.write(`REFUSE (dry run): the real cutover would refuse: ${wouldRefuse.join('; ')}\n`);
+      process.exit(DRY_RUN_WOULD_REFUSE_EXIT);
+    }
     return;
   }
 
@@ -1204,4 +1230,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { planCutover, runTailnetVerification, describeTtydRuntime, describeDirectBind, describeGeneratedGate, fillTemplate, parseArgs, resolveUpstreamPort, applyDryRunAdoptionPreview, writeCutoverResult, pollHealth, certHostUnion, CUTOVER_CODES };
+module.exports = { DRY_RUN_WOULD_REFUSE_EXIT, planCutover, runTailnetVerification, describeTtydRuntime, describeDirectBind, describeGeneratedGate, fillTemplate, parseArgs, resolveUpstreamPort, applyDryRunAdoptionPreview, writeCutoverResult, pollHealth, certHostUnion, CUTOVER_CODES };
