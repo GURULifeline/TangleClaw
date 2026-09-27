@@ -18,7 +18,7 @@ const HOUR = 60 * MIN;
  */
 function manifest(thresholds) {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
     worktreePath: '/tmp/rc-wt', ttydGeneration: GEN, host: 'test-host', thresholds
   });
 }
@@ -104,11 +104,12 @@ describe('buildManifest', () => {
     ['duplicate required checks', { requiredChecks: ['test', 'test'] }],
     ['an unknown threshold', { thresholds: { nope: 1 } }],
     ['a zero threshold', { thresholds: { maxIntervalMs: 0 } }],
-    ['a missing ttyd generation', { ttydGeneration: '' }]
+    ['a missing ttyd generation', { ttydGeneration: '' }],
+    ['a malformed repository', { repository: 'not a repo' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
-        candidateSha: SHA, version: '5.30.0', requiredChecks: [], createdAt: 1,
+        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: [], createdAt: 1,
         worktreePath: '/w', ttydGeneration: GEN, ...input
       }), REFUSAL.INVALID_MANIFEST);
     });

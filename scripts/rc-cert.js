@@ -5,7 +5,7 @@
  * Release-candidate certification CLI (#1949).
  *
  *   rc-cert start  --sha <40> --worktree <abs> [--required-check <name>]... [--repo owner/name]
- *   rc-cert run    --sha <40> [--interval <ms>]
+ *   rc-cert run    --sha <40> [--interval <ms>]   (the repository and checks come from the manifest)
  *   rc-cert status --sha <40> [--json]
  *   rc-cert accept --sha <40> --actor <id>
  *   rc-cert cancel --sha <40> --actor <id>
@@ -35,7 +35,15 @@ const probesLib = require('../lib/release-certification/probes');
 const runnerLib = require('../lib/release-certification/runner');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
-const USAGE = 'usage: rc-cert <start|run|status|accept|cancel|list> [--sha <40>] [--worktree <abs>] [--actor <id>] [--base <abs>] [--api <url>] [--json]';
+const USAGE = [
+  'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>]',
+  '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
+  '       rc-cert status --sha <40> [--json]',
+  '       rc-cert accept --sha <40> --actor <id>',
+  '       rc-cert cancel --sha <40> --actor <id>',
+  '       rc-cert list',
+  'common: [--base <abs>] [--api <url>] [--token <t>] [--ca <file>]'
+].join('\n');
 const REPEATABLE = new Set(['required-check']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
@@ -96,17 +104,32 @@ function _absolute(p, what) {
 }
 
 /**
- * Parse a JSON flag.
+ * Parse a flag that must be a JSON object.
  * @param {string} text - Flag value
  * @param {string} what - Flag name
- * @returns {object} Parsed value
+ * @returns {object} Parsed object
  */
-function _json(text, what) {
+function _jsonObject(text, what) {
+  let value;
   try {
-    return JSON.parse(text);
+    value = JSON.parse(text);
   } catch {
-    throw new UsageError(`${what} must be JSON`);
+    throw new UsageError(`${what} must be a JSON object`);
   }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new UsageError(`${what} must be a JSON object`);
+  return value;
+}
+
+/**
+ * Parse an optional integer flag.
+ * @param {string|undefined} text - Flag value
+ * @param {string} what - Flag name
+ * @returns {number|undefined} The integer, or undefined when absent
+ */
+function _int(text, what) {
+  if (text === undefined) return undefined;
+  if (!/^\d+$/.test(text)) throw new UsageError(`${what} must be a whole number`);
+  return Number(text);
 }
 
 /**
@@ -145,7 +168,7 @@ function _probeCtx(flags, env, spec) {
 /**
  * Run a command.
  * @param {string[]} argv - Command and flags
- * @param {object} [io] - `{stdout, stderr, env, deps: {probes, runner, repository, requiredChecks}}`
+ * @param {object} [io] - `{stdout, stderr, env, configFile, signal, deps: {probes, runner, repository, requiredChecks}}`
  * @returns {Promise<number>} Exit code
  */
 async function main(argv, io = {}) {
@@ -185,6 +208,7 @@ async function main(argv, io = {}) {
       return 0;
     }
     if (command === 'start') {
+      const thresholds = flags.thresholds ? _jsonObject(flags.thresholds, '--thresholds') : undefined;
       const worktreePath = _absolute(_need(flags, 'worktree'), '--worktree');
       const repo = flags.repo || await (deps.repository || probesLib.repository)(worktreePath);
       if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
@@ -192,28 +216,34 @@ async function main(argv, io = {}) {
       if (!requiredChecks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
       const version = runnerLib.worktreeVersion(worktreePath);
       if (!version) throw new UsageError('the worktree has no readable version.json');
-      const thresholds = flags.thresholds ? _json(flags.thresholds, '--thresholds') : undefined;
       const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
       const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
       const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
-      const state = await runner.start({ version, worktreePath, requiredChecks, thresholds });
+      const state = await runner.start({ version, repository: repo, worktreePath, requiredChecks, thresholds });
       out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
       return 0;
     }
+    const intervalMs = _int(flags.interval, '--interval');
+    if (intervalMs !== undefined) {
+      try {
+        runnerLib.resolveInterval(intervalMs);
+      } catch (e) {
+        throw new UsageError(e.message);
+      }
+    }
     const { manifest } = store.readRun(base, sha);
     const worktreePath = manifest.private.worktreePath;
-    const repo = flags.repo || await (deps.repository || probesLib.repository)(worktreePath);
-    if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
     const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, {
-      sha, worktreePath, repo, requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
+      sha, worktreePath, repo: manifest.repository, requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
     }));
     const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
     const controller = new AbortController();
     const stop = () => controller.abort();
+    if (io.signal) io.signal.addEventListener('abort', stop, { once: true });
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
     try {
-      const state = await runner.run({ intervalMs: flags.interval === undefined ? undefined : Number(flags.interval), signal: controller.signal });
+      const state = await runner.run({ intervalMs, signal: controller.signal });
       out.write(`${JSON.stringify({ state: state.state })}\n`);
     } finally {
       process.removeListener('SIGINT', stop);

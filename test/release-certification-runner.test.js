@@ -56,7 +56,7 @@ function fakes(script) {
   let i = 0;
   return {
     clock: { wall: () => wall, mono: () => mono },
-    probes: { collect: async () => script[Math.min(i++, script.length - 1)] },
+    probes: { collect: async () => ({ observations: script[Math.min(i++, script.length - 1)], diagnostics: {} }) },
     advance: (ms) => { wall += ms; mono += ms; }
   };
 }
@@ -75,7 +75,7 @@ async function rejects(fn, code) {
   return caught;
 }
 
-const SPEC = { version: '5.30.0', worktreePath: '/tmp/rc-wt', requiredChecks: ['test'], host: 'h' };
+const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', requiredChecks: ['test'], host: 'h' };
 
 describe('probe observations', () => {
   it('reads a clean detached worktree, and counts untracked files as dirty', () => {
@@ -115,18 +115,20 @@ describe('probe observations', () => {
   });
 
   it('judges only required checks, by their newest run, falling back to commit statuses', () => {
-    const runs = { check_runs: [
-      { id: 1, name: 'test', status: 'completed', conclusion: 'failure' },
-      { id: 2, name: 'test', status: 'completed', conclusion: 'success' },
-      { id: 3, name: 'lint', status: 'completed', conclusion: 'failure' },
-      { id: 4, name: 'slow', status: 'in_progress', conclusion: null },
-      { id: 5, name: 'gone', status: 'completed', conclusion: 'cancelled' },
-      { id: 6, name: 'broke', status: 'completed', conclusion: 'timed_out' }
-    ] };
+    const runs = (...list) => ({ check_runs: list });
+    const byName = {
+      test: runs({ id: 1, name: 'test', status: 'completed', conclusion: 'failure' }, { id: 2, name: 'test', status: 'completed', conclusion: 'success' }),
+      slow: runs({ id: 4, name: 'slow', status: 'in_progress', conclusion: null }),
+      gone: runs({ id: 5, name: 'gone', status: 'completed', conclusion: 'cancelled' }),
+      broke: runs({ id: 6, name: 'broke', status: 'completed', conclusion: 'timed_out' }),
+      legacy: runs(),
+      absent: runs()
+    };
     const statuses = { statuses: [{ context: 'legacy', state: 'error' }] };
-    const o = probes.githubObservation(runs, statuses, ['test', 'slow', 'gone', 'broke', 'legacy', 'absent']);
+    const o = probes.githubObservation(byName, statuses, ['test', 'slow', 'gone', 'broke', 'legacy', 'absent']);
     assert.deepEqual(o, { state: 'ok', checks: { test: 'success', slow: 'pending', gone: 'pending', broke: 'failure', legacy: 'failure', absent: 'missing' } });
-    assert.deepEqual(probes.githubObservation(null, statuses, ['test']), { state: 'unavailable', checks: null });
+    assert.deepEqual(probes.githubObservation({ test: null }, statuses, ['test']), { state: 'unavailable', checks: null });
+    assert.deepEqual(probes.githubObservation(byName, null, ['test']), { state: 'unavailable', checks: null });
   });
 
   it('reads PTY activity', () => {
@@ -136,30 +138,45 @@ describe('probe observations', () => {
   });
 
   it('reads the required checks from branch protection', async () => {
-    const gh = async () => ({ contexts: ['b'], checks: [{ context: 'a' }, { context: 'b' }] });
+    const gh = async () => ({ body: { contexts: ['b'], checks: [{ context: 'a' }, { context: 'b' }] }, error: null });
     assert.deepEqual(await probes.requiredChecks('o/r', gh), ['a', 'b']);
-    assert.equal(await probes.requiredChecks('o/r', async () => null), null);
+    assert.equal(await probes.requiredChecks('o/r', async () => ({ body: null, error: 'gh-failed' })), null);
   });
 
-  it('collects every probe, asking GitHub about the candidate SHA only', async () => {
+  it('collects every probe, asking GitHub about each required check of the candidate SHA by name', async () => {
     const calls = [];
-    const set = probes.createProbes({ apiBase: 'http://x', worktreePath: '/wt', candidateSha: SHA, repo: 'o/r', requiredChecks: ['test'], maxReadingAgeMs: 150_000 }, {
+    const set = probes.createProbes({ apiBase: 'http://x', worktreePath: '/wt', candidateSha: SHA, repo: 'o/r', requiredChecks: ['test', 'e2e run'], maxReadingAgeMs: 150_000 }, {
       measure: async () => ({ state: 'measured', headSha: SHA, detached: true, dirtyTracked: 0, untracked: 0 }),
       fetchJson: async (_opts, route) => {
         calls.push(route);
-        if (route === '/api/server-info') return { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 };
-        if (route === '/api/system/health') return health('clear', fresh);
-        return { instance: 's', attaches: 0, detaches: 0, lastAt: null };
+        if (route === '/api/server-info') return { body: { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 }, error: null };
+        if (route === '/api/system/health') return { body: health('clear', fresh), error: null };
+        return { body: { instance: 's', attaches: 0, detaches: 0, lastAt: null }, error: null };
       },
       ghJson: async (args) => {
         calls.push(args[1]);
-        return args[1].includes('check-runs') ? { check_runs: [{ id: 1, name: 'test', status: 'completed', conclusion: 'success' }] } : { statuses: [] };
+        const name = new URLSearchParams(args[1].split('?')[1]).get('check_name');
+        return { body: name ? { check_runs: [{ id: 1, name, status: 'completed', conclusion: 'success' }] } : { statuses: [] }, error: null };
       }
     });
-    const o = await set.collect(T0);
-    assert.equal(o.github.checks.test, 'success');
-    assert.equal(o.ttyd.generation, GEN);
+    const { observations, diagnostics } = await set.collect(T0);
+    assert.deepEqual(observations.github.checks, { test: 'success', 'e2e run': 'success' });
+    assert.equal(observations.ttyd.generation, GEN);
+    assert.deepEqual(diagnostics, {});
+    assert.ok(calls.includes(`repos/o/r/commits/${SHA}/check-runs?check_name=e2e%20run&per_page=100`));
     assert.ok(calls.every((c) => !c.startsWith('repos/') || c.includes(`/commits/${SHA}/`)));
+  });
+
+  it('says why each source gave nothing', async () => {
+    const set = probes.createProbes({ apiBase: 'http://x', worktreePath: '/wt', candidateSha: SHA, repo: 'o/r', requiredChecks: ['test'], maxReadingAgeMs: 150_000 }, {
+      measure: async () => ({ state: 'unknown' }),
+      fetchJson: async (_opts, route) => ({ body: null, error: route === '/api/server-info' ? 'http-401' : 'connect-failed' }),
+      ghJson: async () => ({ body: null, error: 'gh-failed' })
+    });
+    const { observations, diagnostics } = await set.collect(T0);
+    assert.deepEqual(diagnostics, { worktree: 'worktree-unknown', server: 'http-401', ttyd: 'connect-failed', pty: 'connect-failed', github: 'gh-failed' });
+    assert.equal(observations.server, null);
+    assert.equal(observations.github.state, 'unavailable');
   });
 
   it('fetches JSON over HTTP with a bearer token, and reads a failure as null', async () => {
@@ -171,13 +188,14 @@ describe('probe observations', () => {
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const apiBase = `http://127.0.0.1:${server.address().port}`;
     try {
-      assert.deepEqual(await probes.fetchJson({ apiBase, token: 't' }, '/ok'), { a: 1 });
+      assert.deepEqual(await probes.fetchJson({ apiBase, token: 't' }, '/ok'), { body: { a: 1 }, error: null });
       assert.equal(seenAuth, 'Bearer t');
-      assert.equal(await probes.fetchJson({ apiBase }, '/denied'), null);
+      assert.deepEqual(await probes.fetchJson({ apiBase }, '/denied'), { body: null, error: 'http-401' });
     } finally {
       server.close();
     }
-    assert.equal(await probes.fetchJson({ apiBase }, '/ok'), null);
+    assert.deepEqual(await probes.fetchJson({ apiBase }, '/ok'), { body: null, error: 'connect-failed' });
+    assert.deepEqual(await probes.fetchJson({ apiBase: 'not a url' }, '/ok'), { body: null, error: 'bad-url' });
   });
 });
 
@@ -288,6 +306,52 @@ describe('runner', () => {
     assert.equal(store.readRun(base, SHA).state.sampleCount, 2);
   });
 
+  it('stops, rather than keeps sampling, when the evidence has been tampered with', async () => {
+    const base = path.join(tmp, 'v1');
+    const f = fakes([healthy()]);
+    const log = [];
+    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
+    await r.start(SPEC);
+    const p = store.runPaths(base, SHA);
+    let n = 0;
+    await rejects(() => r.run({ intervalMs: MIN, wait: async () => {
+      f.advance(MIN);
+      if (++n === 1) fs.writeFileSync(p.manifest, fs.readFileSync(p.manifest, 'utf8').replace('"5.30.0"', '"9.9.9"'));
+    } }), REFUSAL.MANIFEST_TAMPERED);
+    assert.equal(log.filter((e) => e.event === 'tick-failed').at(-1).code, REFUSAL.MANIFEST_TAMPERED);
+    assert.equal(fs.existsSync(p.runnerLock), false);
+  });
+
+  it('stops at once when signalled mid-interval, not after the interval', async () => {
+    const base = path.join(tmp, 'v1');
+    const f = fakes([healthy()]);
+    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock });
+    await r.start(SPEC);
+    const controller = new AbortController();
+    const began = Date.now();
+    const running = r.run({ intervalMs: 120_000, signal: controller.signal });
+    await new Promise((res) => setTimeout(res, 20));
+    controller.abort();
+    const state = await running;
+    assert.ok(Date.now() - began < 5000);
+    assert.equal(state.state, STATES.RUNNING);
+  });
+
+  it('records why a probe gave nothing with the sample', async () => {
+    const base = path.join(tmp, 'v1');
+    let first = true;
+    const probeSet = { collect: async () => {
+      if (first) { first = false; return { observations: healthy(), diagnostics: {} }; }
+      return { observations: healthy({ server: null }), diagnostics: { server: 'http-401' } };
+    } };
+    const f = fakes([]);
+    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: probeSet, clock: f.clock });
+    await r.start(SPEC);
+    f.advance(MIN);
+    await r.tick();
+    assert.deepEqual(store.readSamples(base, SHA).at(-1).diagnostics, { server: 'http-401' });
+  });
+
   it('bounds the sampling interval so one late tick stays inside the interval limit', () => {
     assert.equal(runnerLib.resolveInterval(undefined), MIN);
     assert.throws(() => runnerLib.resolveInterval(121_000), CertificationError);
@@ -349,6 +413,57 @@ describe('rc-cert CLI', () => {
     assert.equal((await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason'])).code, 3);
     assert.deepEqual(JSON.parse((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason'])).out), { state: 'cancelled' });
     assert.deepEqual(JSON.parse((await run(['list', '--base', base])).out), [SHA]);
+  });
+
+  it('runs from what the manifest pinned: repository, required checks and reading age', async () => {
+    const base = path.join(tmp, 'v1');
+    const wt = path.join(tmp, 'wt');
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
+    const f = fakes([healthy()]);
+    const probeCtxs = [];
+    let runArgs = null;
+    const deps = {
+      repository: async () => 'pinned/repo',
+      requiredChecks: async () => ['test'],
+      probes: (ctx) => { probeCtxs.push(ctx); return f.probes; },
+      runner: (ctx) => {
+        const real = runnerLib.createRunner({ ...ctx, clock: f.clock });
+        return { ...real, run: async (args) => { runArgs = args; return store.readRun(base, SHA).state; } };
+      }
+    };
+    const thresholds = '{"maxIntervalMs":30000}';
+    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--thresholds', thresholds], { deps })).code, 0);
+    const controller = new AbortController();
+    const ran = await run(['run', '--sha', SHA, '--base', base, '--api', 'http://x', '--interval', '20000'], {
+      deps: { ...deps, repository: async () => { throw new Error('run must not look the repository up'); } },
+      signal: controller.signal
+    });
+    assert.equal(ran.code, 0, ran.err);
+    const ctx = probeCtxs.at(-1);
+    assert.equal(ctx.repo, 'pinned/repo');
+    assert.deepEqual(ctx.requiredChecks, ['test']);
+    assert.equal(ctx.maxReadingAgeMs, 30000);
+    assert.equal(ctx.worktreePath, wt);
+    assert.equal(runArgs.intervalMs, 20000);
+    assert.equal(runArgs.signal.aborted, false);
+    controller.abort();
+    assert.equal(runArgs.signal.aborted, true);
+  });
+
+  it('treats a malformed --interval or --thresholds as a usage error', async () => {
+    const base = path.join(tmp, 'v1');
+    for (const interval of ['abc', '5', '999999']) {
+      assert.equal((await run(['run', '--sha', SHA, '--base', base, '--api', 'http://x', '--interval', interval])).code, 2, interval);
+    }
+    const wt = path.join(tmp, 'wt');
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
+    for (const t of ['null', '[1]', '7']) {
+      const r = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--repo', 'o/r', '--required-check', 't', '--thresholds', t]);
+      assert.equal(r.code, 2, t);
+      assert.match(r.err, /--thresholds must be a JSON object/);
+    }
   });
 
   it('marks a run with overridden thresholds as unable to certify', async () => {

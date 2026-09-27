@@ -63,7 +63,7 @@ function withUmask(mask, fn) {
 /** @returns {object} A manifest for the test candidate. */
 function manifest() {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
     worktreePath: '/tmp/rc-wt', ttydGeneration: GEN, host: 'h'
   });
 }
@@ -343,7 +343,7 @@ describe('store', () => {
   it('records an operator acceptance and its snapshot', () => {
     const base = path.join(tmp, 'v1');
     const m = sm.buildManifest({
-      candidateSha: SHA, version: '5.30.0', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', ttydGeneration: GEN,
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', ttydGeneration: GEN,
       thresholds: { targetQualifiedMs: MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 }
     });
     const s0 = sample(0);

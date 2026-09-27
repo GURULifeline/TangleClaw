@@ -257,6 +257,7 @@ function refreshSharedDocWatchers() {
 
 const system = require('./lib/system');
 const systemHealth = require('./lib/system-health');
+const ptyActivity = require('./lib/pty-activity');
 const engines = require('./lib/engines');
 const { isInsideProject } = require('./lib/project-paths');
 const gitHooks = require('./lib/git-hooks');
@@ -5607,6 +5608,14 @@ route('GET', '/api/system/health', async (_req, res) => {
   jsonResponse(res, 200, health);
 });
 
+// GET /api/system/pty-activity — terminal attaches and detaches through the
+// `/terminal` proxy since this process started (#1949). Release-candidate
+// certification reads it for its PTY-use target; `instance` changes with every
+// process, so a reader can tell a restart from a counter going backwards.
+route('GET', '/api/system/pty-activity', (_req, res) => {
+  jsonResponse(res, 200, ptyActivity.snapshot());
+});
+
 // GET /api/engines — `?refresh=1` re-reads the operator's login PATH before
 // probing, rather than reusing the cached one. That is what the setup wizard's
 // "Check again" calls: the operator has just installed an engine in another
@@ -10029,6 +10038,10 @@ function handleUpgrade(req, socket, head) {
   const proxySocket = target.socketPath
     ? net.connect(target.socketPath, onProxyConnect)
     : net.connect(target.port, target.host, onProxyConnect);
+
+  // Counts the terminal attach when ttyd accepts the upgrade, and its detach
+  // on close, for release-candidate certification's PTY-use target (#1949).
+  ptyActivity.trackTerminalConnection(socket, proxySocket);
 
   proxySocket.on('error', () => {
     socket.destroy();
