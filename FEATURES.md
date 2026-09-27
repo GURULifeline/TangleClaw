@@ -347,6 +347,8 @@ fails any auto-stub section older than 14 days.
 - **Medusa exchange watchdog** (#1839) — `lib/medusa-exchanges.js`. Tracks what happened to each Medusa message after the Hub stored it, so one that never reached its reader can be seen, aged and escalated. Facts are append-only and the exchange row is a projection ranked by fact kind (`replay` recomputes it); terminal outcomes (closed, retracted, undeliverable, recipient_retired) are decided inside one `BEGIN IMMEDIATE` transaction so exactly one wins.
 - **Medusa tracked send** (#1839) — `lib/medusa-send.js`. The one path every switchboard send takes: validate delivery metadata against what the caller can prove, record the intent after TangleClaw's own checks, then bind the Hub's id or record what the Hub answered (refused as undeliverable, lost as `send_unknown`, never re-sent). An exchange whose Hub answer is known but cannot be bound is still reported as sent, so a caller is not invited to send a second copy.
 
+- **Release-candidate certification state machine** (#1949) — `lib/release-certification/state-machine.js` (`#admit`, `#reduce`, `#accept`, `#cancel`, `#summarize`), closed codes in `lib/release-certification/codes.js`. Pure judgement of a 72-hour soak pinned to one candidate SHA: which intervals earn qualified time, what extends the run, what hard-fails it, and the PTY-use target. No I/O. Tests: `test/release-certification-state-machine.test.js`.
+
 ## Governance / Engines
 
 - **startupControl and the startup prompt** (#1825, the engine-neutral foundation). The operator's revisioned
