@@ -817,6 +817,28 @@ above should make the tree clean without deleting the generated file. If other
 files remain, inspect and commit or stash them rather than bypassing the
 updater's clean-tree guard.
 
+### Before Deleting a Branch, Resetting, or Removing a Worktree
+
+A local commit survives only while a named ref points at it. Before a session deletes a branch, runs `git reset --hard`, removes a worktree or "normalizes" a checkout, it should ask `tc branch check <branch>` from inside that checkout (#1878):
+
+```
+tc branch check feat/my-work          # human-readable report
+tc branch check feat/my-work --json   # the same assessment, for scripts
+tc branch check feat/my-work --repo /path/to/checkout
+```
+
+The check fetches and prunes the branch's remote, because a remote-tracking ref counts as evidence only straight after a fetch. It then reports the branch and its commit, its upstream and whether the fetch succeeded, the commits that exist on no other branch, tag or freshly fetched remote ref, and every worktree holding the branch with its staged, unstaged, unmerged and untracked paths. It never deletes, resets or removes anything.
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `safe` | 0 | Every commit is reachable elsewhere, no worktree holds the branch, and the fetch succeeded. |
+| `preserve` | 3 | Retiring the branch would lose commits or disrupt a live worktree. Keep it. |
+| `unknown` | 4 | Something could not be proven, such as a failed fetch, several remotes and no upstream, or a worktree missing from disk. Treat it as `preserve`. |
+
+Each reason carries a stable code (for example `UNIQUE_COMMITS`, `CHECKED_OUT`, `WORKTREE_DIRTY`, `FETCH_FAILED`). For anything but `safe`, the report's next step is the same: keep the branch and its worktree, and continue in a separate clean worktree made from the freshly fetched main. A merged PR does not make a branch safe, because a commit made after the merge (a wrap commit, say) is not in it. The reflog is not a recovery plan.
+
+This is a check and a rule. Nothing yet stops a raw `git branch -D` typed in a shell, and TangleClaw does not retire merged branches or worktrees for you (#1267).
+
 ### Update Blocked by Local Changes
 
 **Update now** never moves a checkout that has uncommitted changes someone may

@@ -86,6 +86,12 @@ Substantive work goes through a feature-branch PR (even solo) — the PR documen
 - The merge strategy (merge commit, squash or rebase) is the methodology layer's call — a project's governance sets it, and this file does not prescribe it.
 - Branch protection still gates: `--auto` waits for a required review, so it only removes the wait once gates clear — it never overrides protection. If auto-merge isn't enabled on the repo, `--auto` errors; enable it (Settings → Pull Requests) or fall back to `gh pr checks <PR#> --watch` + a manual merge.
 
+**Rule: Run `tc branch check <branch>` immediately before retiring a local branch, and proceed only on `safe`.** A local commit exists only while a named ref points at it. A merged PR does not prove that later local commits went upstream (a wrap commit lands after the merge). A remote-tracking ref is only as current as the last fetch. The reflog is not a recovery plan: it expires, and a fresh clone never had it.
+- **Covers:** deleting a local branch (`git branch -d/-D`), `git reset --hard` on a branch, removing a worktree (`git worktree remove`, or deleting its directory), and any checkout normalization that does one of these ("switch to main, fast-forward, delete the stale branch"). This includes instructions a coordinator gives you to do them.
+- **Run it immediately beforehand, in the checkout concerned.** It fetches and prunes the branch's remote, then reports the branch's commits that exist on no other branch, tag or freshly fetched remote ref, and any worktree holding the branch with its staged, unstaged or untracked dirt.
+- **Only `safe` (exit 0) permits the operation.** `preserve` (exit 3) and `unknown` (exit 4) both mean keep the branch and any worktree holding it. Report what the check found, and continue in a separate clean worktree created from the freshly fetched main. Never delete anyway and plan to recover from the reflog.
+- **Enforcement is honest, not universal.** `tc branch check` is an engine-neutral check plus this role contract. No shell-level interlock stops a raw `git branch -D` yet, so following this rule is on the session running the command.
+
 ## Releases & Versioning
 
 Substantive milestones become tagged GitHub Releases — permanent citeable URLs that feed public activity.
