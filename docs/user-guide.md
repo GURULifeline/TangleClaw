@@ -837,7 +837,9 @@ The check fetches and prunes the branch's remote, because a remote-tracking ref 
 
 Each reason carries a stable code (for example `UNIQUE_COMMITS`, `CHECKED_OUT`, `WORKTREE_DIRTY`, `FETCH_FAILED`). For anything but `safe`, the report's next step is the same: keep the branch and its worktree, and continue in a separate clean worktree made from the freshly fetched main. A merged PR does not make a branch safe, because a commit made after the merge (a wrap commit, say) is not in it. The reflog is not a recovery plan.
 
-This is a check and a rule. Nothing yet stops a raw `git branch -D` typed in a shell, and TangleClaw does not retire merged branches or worktrees for you (#1267).
+A branch that a worktree still holds always reads `preserve`. To retire both, check that the tree is clean first (`git -C <tree> status --porcelain --untracked-files=all` prints nothing). Then remove it with plain `git worktree remove <tree>`, never `--force`: git refuses a tree that has changes or untracked files. Only then check the branch. Before a `git reset --hard`, pin the current tip under a named branch (`git branch keep/<branch>-<date>`) so the reset drops nothing. Check and retire one branch at a time: two branches that each hold the only other copy of a commit both look safe until one of them is gone.
+
+This is a check and a rule. It runs from a TangleClaw-launched pane, because `tc` needs `TANGLECLAW_API`. Nothing yet stops a raw `git branch -D`, `reset --hard` or `worktree remove --force` typed in a shell, and TangleClaw does not retire merged branches or worktrees for you (#1267).
 
 ### Update Blocked by Local Changes
 

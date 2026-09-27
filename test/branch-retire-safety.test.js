@@ -326,6 +326,25 @@ describe('branch-retire-safety: against real git', () => {
     assert.deepEqual(codes(a), [REASONS.NOT_A_REPOSITORY]);
   });
 
+  it('the rule\'s worktree sequence holds: plain `worktree remove` refuses an untracked plan, then the branch checks safe', async () => {
+    const { dir } = makeClone();
+    git(dir, 'branch', 'feat');
+    git(dir, 'push', '-q', '-u', 'origin', 'feat');
+    const linked = path.join(path.dirname(dir), 'wt-retire');
+    git(dir, 'worktree', 'add', '-q', linked, 'feat');
+    fs.writeFileSync(path.join(linked, 'plan.md'), 'unsaved plan\n');
+
+    // The global rule leans on git refusing this without --force.
+    assert.throws(() => git(dir, 'worktree', 'remove', linked));
+    assert.ok(fs.existsSync(path.join(linked, 'plan.md')), 'the untracked plan survived the refused removal');
+    assert.equal((await check(dir, 'feat')).verdict, VERDICTS.PRESERVE);
+
+    fs.rmSync(path.join(linked, 'plan.md'));
+    git(dir, 'worktree', 'remove', linked);
+    const a = await check(dir, 'feat');
+    assert.equal(a.verdict, VERDICTS.SAFE, JSON.stringify(a.reasons));
+  });
+
   it('never deletes, resets or moves anything', async () => {
     const { dir } = makeClone();
     git(dir, 'checkout', '-q', '-b', 'feat');
@@ -427,6 +446,12 @@ describe('branch-retire-safety: failure paths (stubbed git)', () => {
     const a = await brs.assess({ repo: '/r', branch: 'feat', execFile: healthy({ 'worktree list': new Error('x') }) });
     assert.equal(a.verdict, VERDICTS.UNKNOWN);
     assert.ok(codes(a).includes(REASONS.WORKTREE_LIST_FAILED));
+  });
+
+  it('an empty worktree list is unknown: git always lists the main worktree, so nothing parsed means a bad read', async () => {
+    const a = await brs.assess({ repo: '/r', branch: 'feat', execFile: healthy({ 'worktree list': '' }) });
+    assert.equal(a.verdict, VERDICTS.UNKNOWN);
+    assert.deepEqual(codes(a), [REASONS.WORKTREE_LIST_FAILED]);
   });
 
   it('a status failure in the tree holding the branch is unknown', async () => {
