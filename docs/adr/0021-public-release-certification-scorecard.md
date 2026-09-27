@@ -28,8 +28,11 @@ to be able to trust it. That creates two problems:
 ## Decision
 
 1. **The host publishes, and GitHub guards.** The host builds the public documents and pushes them
-   to a dedicated `metrics` branch, with no shared history with `main`. A GitHub check on that
-   branch refuses any change that breaks the publishing rules. The most important rule is that an
+   to a dedicated `metrics` branch, with no shared history with `main`. A GitHub check re-verifies
+   the branch's whole history against the publishing rules (`scripts/scorecard-verify.js`). It runs
+   from `main`, every 30 minutes and on demand, not on push to `metrics`: GitHub runs a
+   push-triggered workflow from the pushed commit, and the data-only branch neither carries nor may
+   carry workflow files. One living on `metrics` could also be edited by whoever pushes there. The most important rule is that an
    admission record, once published, never changes. An owner-configured ruleset on `metrics` forbids
    force-pushes and deletion. Together these put the manifest digest somewhere the host user cannot
    quietly rewrite, which is what makes it binding. Release promotion (C04) runs the same
