@@ -166,6 +166,33 @@ describe('published documents (#1949 C02)', () => {
   });
 });
 
+describe('the certification section of the combined scorecard (#1949)', () => {
+  const m = manifest();
+  const newer = sc.scorecard(run(m, [sample(MIN)]).state, m, T0 + 5 * MIN, 2);
+  const older = { ...sc.scorecard(run(m, [sample(MIN)]).state, m, T0, 1), candidateSha: 'b'.repeat(40), updatedAt: 1 };
+
+  it('lists every candidate newest first and carries the newest scorecard', () => {
+    const summary = sc.certificationSummary([older, newer]);
+    assert.equal(summary.schema, 'tc.release-certification.summary/v1');
+    assert.deepEqual(summary.candidates.map((c) => c.candidateSha), [SHA, 'b'.repeat(40)]);
+    assert.deepEqual(summary.current, newer);
+    assert.deepEqual(sc.validateCertificationSummary(summary), []);
+    assert.deepEqual(sc.certificationSummary([]), { schema: sc.SCHEMAS.summary, candidates: [], current: null });
+    assert.deepEqual(sc.validateCertificationSummary(sc.certificationSummary([])), []);
+  });
+
+  it('refuses a summary whose current is not the newest candidate, is invalid, or carries extra fields', () => {
+    const good = () => sc.certificationSummary([older, newer]);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), current: older }), ['FIELD:current']);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), current: { ...newer, worktreePath: '/x' } }), ['FIELD:current']);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), current: null }), ['FIELD:current']);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), host: 'h' }), ['UNKNOWN_FIELD:host']);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), candidates: [{ candidateSha: SHA }] }), ['FIELD:candidates']);
+    assert.deepEqual(sc.validateCertificationSummary({ ...good(), candidates: [] }), ['FIELD:current'], 'a current scorecard needs a listed candidate');
+    assert.deepEqual(sc.validateCertificationSummary({ schema: 'tc.scorecard/v1' }), ['SCHEMA']);
+  });
+});
+
 describe('validators refuse what the builder would never emit', () => {
   const m = manifest();
   const good = () => sc.scorecard(run(m, [sample(MIN)]).state, m, T0 + MIN, 1);

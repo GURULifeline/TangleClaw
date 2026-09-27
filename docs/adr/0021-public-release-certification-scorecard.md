@@ -75,6 +75,15 @@ to be able to trust it. That creates two problems:
    who passed it. `rc-cert start --no-publish-actor` withholds it for that run, and only the time is published. Changing this
    default is a privacy decision and should come back here, not happen in code.
 
+7. **One public scorecard, derived from the per-candidate files (Architect ruling, 2026-09-27).** The
+   project publishes one combined `scorecard/v1.json`, with a `development` section (C03) and a
+   `certification` section. The certification section (`tc.release-certification.summary/v1`: the
+   candidate list and the newest candidate's scorecard) is a projection of the per-candidate files,
+   built by `certificationSummary` and checked by `validateCertificationSummary`. The per-candidate
+   admission, scorecard and event files stay the source of truth, because the write-once admission
+   is what makes the manifest digest binding. A later chunk schedules the producer that writes the
+   combined file.
+
 ## Consequences
 
 - Until the owner creates the `metrics` ruleset, the digest is published but not tamper-proof. The

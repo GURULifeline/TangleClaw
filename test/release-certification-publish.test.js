@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { initRepo } = require('./_temp-repo');
 
 const publisherLib = require('../lib/release-certification/publisher');
 const publicationLib = require('../lib/release-certification/publication');
@@ -29,7 +30,8 @@ let base;
 beforeEach(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rc-publish-')));
   remote = path.join(tmp, 'remote.git');
-  execFileSync('git', ['init', '-q', '--bare', remote]);
+  fs.mkdirSync(remote);
+  initRepo(remote, ['--bare']);
   base = path.join(tmp, 'v1');
 });
 
@@ -151,7 +153,8 @@ describe('publisher: git mechanics against a real remote', () => {
 
   it('keeps its clones private, one per remote', async () => {
     const other = path.join(tmp, 'other.git');
-    execFileSync('git', ['init', '-q', '--bare', other]);
+    fs.mkdirSync(other);
+    initRepo(other, ['--bare']);
     const a = publisher();
     const b = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: other, identity: ID });
     await a.publish(() => ({ [IDX]: 'a\n' }), 'a');
@@ -183,7 +186,8 @@ describe('publisher: git mechanics against a real remote', () => {
 
   it('reads the worktree origin and the operator identity', async () => {
     const wt = path.join(tmp, 'wt');
-    execFileSync('git', ['init', '-q', wt]);
+    fs.mkdirSync(wt);
+    initRepo(wt);
     execFileSync('git', ['-C', wt, 'remote', 'add', 'origin', remote]);
     execFileSync('git', ['-C', wt, 'config', 'user.name', 'Jay']);
     execFileSync('git', ['-C', wt, 'config', 'user.email', 'jay@example.invalid']);
