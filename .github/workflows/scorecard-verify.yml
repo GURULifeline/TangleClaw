@@ -41,9 +41,20 @@ jobs:
           node-version: 22
 
       - name: Fetch the whole metrics history
-        # A missing branch is not an error: nothing has been published yet,
-        # and the verifier reports that and passes.
-        run: git fetch --no-tags origin '+refs/heads/metrics:refs/remotes/origin/metrics' || echo 'no metrics branch yet'
+        # Only the remote saying the branch does not exist (ls-remote exit 2)
+        # passes as "nothing published yet". A network or auth failure fails
+        # the run: a check that could not read the branch has not verified it.
+        run: |
+          if git ls-remote --exit-code --heads origin metrics > /dev/null; then
+            git fetch --no-tags origin '+refs/heads/metrics:refs/remotes/origin/metrics'
+          else
+            status=$?
+            if [ "$status" -eq 2 ]; then
+              echo 'no metrics branch yet: nothing to verify'
+            else
+              exit "$status"
+            fi
+          fi
 
       - name: Verify every commit
         run: node scripts/scorecard-verify.js --ref origin/metrics

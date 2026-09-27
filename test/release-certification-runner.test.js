@@ -544,7 +544,7 @@ describe('rc-cert CLI', () => {
     const pub = fakePub();
     const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], publication: pub, probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, clock: f.clock }) };
     assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--no-publish-actor', '--required-check', 'test'], { deps })).code, 0);
-    assert.equal(pub.calls.admit[0].opts.publishActor, false);
+    assert.equal(pub.calls.admit[0].manifest.publishActor, false, 'the actor setting is pinned in the manifest');
     assert.equal(pub.calls.admit[0].manifest.requiredChecksSource, 'operator', 'hand-named checks are recorded as an operator override');
     const ok = await run(['publish', '--sha', SHA, '--base', base], { deps });
     assert.deepEqual([ok.code, JSON.parse(ok.out)], [0, { published: true }]);
@@ -553,7 +553,7 @@ describe('rc-cert CLI', () => {
     assert.deepEqual([bad.code, JSON.parse(bad.out)], [3, { published: false }]);
     assert.match(bad.err, /publish-failed/);
     const status = JSON.parse((await run(['status', '--sha', SHA, '--base', base, '--json'])).out);
-    assert.deepEqual(Object.keys(status.publication).sort(), ['admissionVerifiedAt', 'failures', 'lastError', 'lastPublishedAt', 'lastPublishedSeq', 'nextAttemptAt']);
+    assert.deepEqual(Object.keys(status.publication).sort(), ['admissionVerifiedAt', 'failures', 'lastError', 'lastMessage', 'lastPublishedAt', 'lastPublishedSeq', 'nextAttemptAt']);
   });
 
   it('refuses to start when main requires no checks', async () => {

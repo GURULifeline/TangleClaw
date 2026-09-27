@@ -93,7 +93,8 @@ describe('buildManifest', () => {
     const m = manifest();
     assert.equal(m.candidateSha, SHA);
     assert.equal(m.schema, 'tc.release-certification/v1');
-    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', baseline: { ttydGeneration: GEN } });
+    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, baseline: { ttydGeneration: GEN } });
+    assert.equal(m.publishActor, true);
     assert.equal(m.thresholds.targetQualifiedMs, 259_200_000);
     assert.equal(m.thresholds.maxIntervalMs, 150_000);
   });
@@ -108,6 +109,7 @@ describe('buildManifest', () => {
     ['a missing ttyd generation', { ttydGeneration: '' }],
     ['a malformed repository', { repository: 'not a repo' }],
     ['an unknown required-checks source', { requiredChecksSource: 'guess' }],
+    ['a publishActor that is not a boolean', { publishActor: 'no' }],
     ['no required checks, which would pass GitHub vacuously', { requiredChecks: [] }],
     ['a worktree id that is not a sha256', { worktreeId: 'abc' }]
   ]) {
@@ -286,6 +288,21 @@ describe('interval accrual', () => {
     assert.deepEqual(state.extensions, { SERVER_RESTARTED: { intervals: 1, lostMs: MIN } });
     assert.equal(events.at(-1).code, EXTEND.SERVER_RESTARTED);
     assert.equal(run(manifest(), [sample(MIN), sample(2 * MIN, restarted), sample(3 * MIN, restarted)]).state.state, STATES.RUNNING);
+  });
+
+  it('never moves updatedAt backwards when the wall clock is stepped back', () => {
+    const { state } = run(manifest(), [sample(MIN), sample(-5 * MIN, obs(), { mono: 2 * MIN })]);
+    assert.equal(state.updatedAt, 1_000_000 + MIN);
+    assert.deepEqual(Object.keys(state.extensions), [EXTEND.CLOCK_SKEW]);
+  });
+
+  it('asserts every transition it emits against the shared table', () => {
+    const codes = require('../lib/release-certification/codes');
+    assert.equal(codes.transitionAllowed('awaiting-review', 'passed', 'OPERATOR_ACCEPTED'), true);
+    assert.equal(codes.transitionAllowed('running', 'passed', 'OPERATOR_ACCEPTED'), false);
+    assert.equal(codes.reachable('running', 'passed'), true);
+    assert.equal(codes.reachable('awaiting-review', 'running'), false);
+    assert.equal(codes.reachable('passed', 'failed'), false);
   });
 
   it('does not mutate the state it is given', () => {

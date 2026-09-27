@@ -241,11 +241,10 @@ describe('publication: fail-closed admission and forward-only updates', () => {
     const { publication: p } = publication();
     const m = manifest();
     const digest = 'd'.repeat(64);
-    const r = await p.admit(m, digest, { remoteUrl: remote });
+    const r = await p.admit(m, digest);
     assert.equal(r.verifiedAt, T0);
     assert.equal(remoteFile(P.admission), sc.serialize(sc.admissionRecord(m, digest)));
     assert.deepEqual(p.readStatus().admission, { digest, verifiedAt: T0 });
-    assert.equal(p.readStatus().remoteUrl, remote);
   });
 
   it('reports the digest the metrics branch already holds for this candidate', async () => {
@@ -348,6 +347,87 @@ describe('publication: fail-closed admission and forward-only updates', () => {
     assert.equal(p.due({ transitioned: true, state: 'failed' }), false, 'a backoff holds even a transition');
     assert.equal(p.recordFailure(new Error('y')).nextAttemptAt, clock.t + 120_000);
     assert.equal(publicationLib.backoffMs(20), 30 * 60 * 1000);
+  });
+});
+
+describe('publication: never pushes what the branch verifier would reject', () => {
+  it('refuses an update that would change a published terminal state, and leaves the branch as it was', async () => {
+    const { publication: p } = publication();
+    const m = manifest();
+    await p.admit(m, 'd'.repeat(64));
+    const admitted = sm.admit(m, { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() });
+    const running = { ...admitted.state, manifestDigest: 'd'.repeat(64) };
+    const cancelled = sm.cancel(running, 'op', T0 + 1);
+    await p.update({ state: cancelled.state, manifest: m, events: [...admitted.events, ...cancelled.events] });
+    const before = remoteCommits();
+    const err = await rejects(() => p.update({ state: running, manifest: m, events: admitted.events }), REFUSAL.EVENTS_DIVERGED);
+    assert.ok(err);
+    const fakeRead = (rel) => remoteFile(rel);
+    assert.equal(remoteCommits(), before, 'nothing reached the branch');
+    assert.equal(JSON.parse(fakeRead(P.scorecard)).state, 'cancelled');
+  });
+
+  it('turns a would-be violation into WOULD_VIOLATE before anything is pushed', async () => {
+    const { publication: p } = publication();
+    const m = manifest();
+    await p.admit(m, 'd'.repeat(64));
+    const admitted = sm.admit(m, { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() });
+    const running = { ...admitted.state, manifestDigest: 'd'.repeat(64) };
+    await p.update({ state: running, manifest: m, events: admitted.events });
+    const forged = { ...running, state: 'awaiting-review' };
+    const err = await rejects(() => p.update({ state: forged, manifest: m, events: [...admitted.events, { type: 'transition', from: 'running', to: 'awaiting-review', code: 'TARGET_REACHED', at: T0 + 1, sampleSeq: 2 }] }), REFUSAL.WOULD_VIOLATE);
+    assert.ok(err.details.violations.some((v) => v.rule === 'UNEARNED_REVIEW'));
+    assert.equal(remoteCommits(), 2, 'only the admission and the honest update are on the branch');
+  });
+});
+
+describe('rc-cert publishing identity and failure records', () => {
+  const cli = require('../scripts/rc-cert');
+  /**
+   * Run the CLI with captured output.
+   * @param {string[]} argv - Arguments
+   * @param {object} deps - Seams
+   * @returns {Promise<{code: number, out: string, err: string}>} Result
+   */
+  async function run(argv, deps) {
+    let out = '';
+    let err = '';
+    const code = await cli.main(argv, { stdout: { write: (x) => { out += x; } }, stderr: { write: (x) => { err += x; } }, env: {}, configFile: path.join(tmp, 'none.json'), deps });
+    return { code, out, err };
+  }
+
+  it('commits as a neutral identity when the run withholds the operator id', async () => {
+    const wt = path.join(tmp, 'wt');
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
+    const wtid = runnerLib.worktreeId(wt);
+    const probesFake = () => ({ collect: async () => ({ observations: obs({ server: { checkoutId: wtid } }), diagnostics: {} }) });
+    const deps = {
+      repository: async () => 'o/r',
+      repoFacts: async () => ({ remoteUrl: remote, identity: { name: 'Jay Operator', email: 'jay@example.invalid' } }),
+      probes: probesFake
+    };
+    const r = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--required-check', 'test', '--no-publish-actor'], deps);
+    assert.equal(r.code, 0, r.err);
+    const authors = execFileSync('git', ['--git-dir', remote, 'log', '--format=%an <%ae>', 'metrics'], { encoding: 'utf8' });
+    assert.doesNotMatch(authors, /Jay|jay@/);
+    assert.match(authors, /TangleClaw release certification/);
+    const manifestOnDisk = store.readRun(base, SHA).manifest;
+    assert.equal(manifestOnDisk.publishActor, false);
+    assert.equal(manifestOnDisk.private.publishRemote, remote, 'the remote is pinned in the manifest');
+  });
+
+  it('records a publish failure even when no publisher could be built', async () => {
+    const m = manifest();
+    const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };
+    store.createRun(base, m, sm.admit(m, s0), s0);
+    const r = await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'op'], { repoFacts: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'no origin'); } });
+    assert.equal(r.code, 0);
+    assert.deepEqual(JSON.parse(r.out), { state: 'cancelled', published: false });
+    const status = publicationLib.readStatus(base, SHA);
+    assert.equal(status.lastError, REFUSAL.PUBLISH_FAILED);
+    assert.equal(status.lastMessage, 'no origin');
+    assert.equal(status.failures, 1);
   });
 });
 

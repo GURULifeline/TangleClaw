@@ -75,7 +75,10 @@ to be able to trust it. That creates two problems:
 
 6. **The operator's actor id is published by default.** An acceptance or cancellation publishes the
    identifier the operator chose (for example `jason`), because a public certification should say
-   who passed it. `rc-cert start --no-publish-actor` withholds it for that run, and only the time is published. Changing this
+   who passed it. `rc-cert start --no-publish-actor` withholds it for that run: only the time is
+   published, and the run's commits carry a neutral identity instead of the operator's git name.
+   The setting, and the remote the run publishes to, are pinned in the checksummed manifest, so no
+   later failure can reset them. Changing this
    default is a privacy decision and should come back here, not happen in code.
 
 7. **One public scorecard, derived from the per-candidate files (Architect ruling, 2026-09-27).** The
@@ -93,6 +96,13 @@ to be able to trust it. That creates two problems:
    never be mistaken for a certification. `requiredChecksSource` (`branch-protection` or
    `operator`) is published with the admission and every scorecard, so an auditor can tell a
    candidate judged by the repository's own rules from one judged by a hand-picked list.
+
+9. **Verification is by rule, and the publisher applies the same rules first** (cumulative review of
+   C02). One transition table in `codes.js` is shared by the state machine and the verifier. A
+   published `awaiting-review` or `passed` must show its targets met, and every state change and
+   transition line must be one the table allows, so a forged certification cannot pass
+   verification. The publisher runs the verifier on each commit before pushing it; a violation
+   fails the publish (`WOULD_VIOLATE`) instead of landing on a branch whose history is permanent.
 
 ## Consequences
 

@@ -183,24 +183,39 @@ function _probeCtx(flags, env, spec) {
 }
 
 /**
- * The publication for a candidate. It publishes to `remoteUrl` when given
- * (at start, from the worktree's origin), else to the remote its admission
- * recorded, so a run never changes where it publishes.
+ * The commit identity used when a run withholds the operator's id: the
+ * public branch's history must not name them either.
+ */
+const NEUTRAL_IDENTITY = Object.freeze({ name: 'TangleClaw release certification', email: 'release-certification@users.noreply.github.com' });
+
+/**
+ * The publication for a candidate. It publishes to the remote the run's
+ * manifest pinned (or, at start, the worktree's origin), as the operator's
+ * git identity unless the run withholds the operator's id.
  * @param {object} c - Command context
  * @param {string} sha - Candidate SHA
- * @param {string} worktreePath - Candidate worktree, for the operator's git identity
- * @param {string|null} remoteUrl - Where to publish, or null to use the recorded remote
+ * @param {{worktreePath: string, remoteUrl: string|null, publishActor: boolean}} where - Worktree, pinned remote, actor setting
  * @returns {Promise<object>} Publication
  */
-async function _publication(c, sha, worktreePath, remoteUrl) {
+async function _publication(c, sha, where) {
   if (c.deps.publication) return c.deps.publication;
-  const facts = await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
-  const target = remoteUrl || publicationLib.readStatus(c.base, sha).remoteUrl || facts.remoteUrl;
+  const facts = await (c.deps.repoFacts || publisherLib.repoFacts)(where.worktreePath);
   const publisher = publisherLib.createPublisher({
-    dir: path.join(c.base, '_metrics'), remoteUrl: target, identity: facts.identity,
+    dir: path.join(c.base, '_metrics'),
+    remoteUrl: where.remoteUrl || facts.remoteUrl,
+    identity: where.publishActor ? facts.identity : NEUTRAL_IDENTITY,
     onRecover: (fact) => c.emit({ event: 'recovered', ...fact })
   });
   return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
+}
+
+/**
+ * Where a committed run publishes, from its manifest.
+ * @param {object} manifest - The run's manifest
+ * @returns {{worktreePath: string, remoteUrl: string|null, publishActor: boolean}} Publishing settings
+ */
+function _pinned(manifest) {
+  return { worktreePath: manifest.private.worktreePath, remoteUrl: manifest.private.publishRemote || null, publishActor: manifest.publishActor !== false };
 }
 
 /**
@@ -211,7 +226,7 @@ async function _publication(c, sha, worktreePath, remoteUrl) {
 async function cmdPublish(c) {
   const sha = _need(c.flags, 'sha');
   const { manifest } = store.readRun(c.base, sha);
-  const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+  const publication = await _publication(c, sha, _pinned(manifest));
   const { published } = await publication.publishCurrent(c.emit);
   c.out.write(`${JSON.stringify({ published })}\n`);
   return published ? 0 : 3;
@@ -239,7 +254,7 @@ async function cmdStatus(c) {
   const publication = {
     admissionVerifiedAt: p.admission ? p.admission.verifiedAt : null,
     lastPublishedSeq: p.lastPublishedSeq, lastPublishedAt: p.lastPublishedAt,
-    failures: p.failures, lastError: p.lastError, nextAttemptAt: p.nextAttemptAt
+    failures: p.failures, lastError: p.lastError, lastMessage: p.lastMessage ?? null, nextAttemptAt: p.nextAttemptAt
   };
   const summary = { ...sm.summarize(state, manifest, Date.now()), publication };
   c.out.write(c.flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
@@ -261,10 +276,13 @@ async function cmdDecide(c, op) {
   const { manifest } = store.readRun(c.base, sha);
   let published = false;
   try {
-    const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+    const publication = await _publication(c, sha, _pinned(manifest));
     ({ published } = await publication.publishCurrent(c.emit));
   } catch (e) {
-    c.emit({ event: 'publish-failed', code: e.code || null });
+    // No publication could be built (no git identity or origin); ADR 0021
+    // still requires the failure to be recorded and retried.
+    const status = publicationLib.recordFailureFor(c.base, sha, e);
+    c.emit({ event: 'publish-failed', code: e.code || null, message: String(e.message || '').slice(0, 300), nextAttemptAt: status.nextAttemptAt });
   }
   c.out.write(`${JSON.stringify({ state: state.state, published })}\n`);
   return 0;
@@ -302,12 +320,13 @@ async function cmdStart(c) {
   if (!version) throw new UsageError('the worktree has no readable version.json');
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
   const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
+  const publishActor = !c.flags['no-publish-actor'];
   const facts = c.deps.publication ? { remoteUrl: null } : await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
-  const publication = await _publication(c, sha, worktreePath, facts.remoteUrl);
+  const publication = await _publication(c, sha, { worktreePath, remoteUrl: facts.remoteUrl, publishActor });
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const state = await runner.start({
     version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
-    publishActor: !c.flags['no-publish-actor'], remoteUrl: facts.remoteUrl
+    publishActor, remoteUrl: facts.remoteUrl
   });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
   return 0;
@@ -334,7 +353,7 @@ async function cmdRun(c) {
     sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
     requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
   }));
-  const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+  const publication = await _publication(c, sha, _pinned(manifest));
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const controller = new AbortController();
   const stop = () => controller.abort();

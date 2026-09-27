@@ -135,7 +135,55 @@ describe('verifyChange: the rules, one commit at a time (#1949 C02)', () => {
     assert.ok(judge(withFailed, { ...withFailed, [P.scorecard]: revived }).includes(RULES.TERMINAL_CHANGED));
     const reviewing = sc.serialize(sc.scorecard({ ...d.state2, state: 'awaiting-review' }, m, T0 + MIN, 3));
     const withReview = { [P.admission]: d.admission, [P.scorecard]: reviewing };
-    assert.ok(judge(withReview, { ...withReview, [P.scorecard]: revived }).includes(RULES.REVIEW_REOPENED));
+    assert.ok(judge(withReview, { ...withReview, [P.scorecard]: revived }).includes(RULES.ILLEGAL_STATE_CHANGE));
+  });
+});
+
+describe('verifyChange: a forged certification cannot go green', () => {
+  const d = documents();
+  const m = manifest();
+  const events = (...lines) => `${lines.map((l) => JSON.stringify({ schema: sc.SCHEMAS.event, sampleSeq: null, at: 1, ...l })).join('\n')}\n`;
+  const admitted = { from: 'not-started', to: 'running', code: 'ADMITTED' };
+
+  it('refuses a passed scorecard whose time and PTY targets were not met', () => {
+    const forged = sc.serialize(sc.scorecard({ ...d.state2, state: 'passed', acceptance: { actor: 'x', at: T0 + MIN } }, m, T0 + MIN, 3));
+    const log = events(admitted, { from: 'running', to: 'awaiting-review', code: 'TARGET_REACHED' }, { from: 'awaiting-review', to: 'passed', code: 'OPERATOR_ACCEPTED' });
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: forged, [P.events]: log }).includes(RULES.UNEARNED_REVIEW));
+  });
+
+  it('refuses a transition log that jumps straight to passed', () => {
+    const log = events(admitted, { from: 'running', to: 'passed', code: 'OPERATOR_ACCEPTED' });
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.events]: log }).includes(RULES.EVENTS_ILLEGAL_TRANSITION));
+    const wrongCode = events(admitted, { from: 'running', to: 'extended', code: 'LEAK_FIRED' });
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.events]: wrongCode }).includes(RULES.EVENTS_ILLEGAL_TRANSITION));
+  });
+
+  it('refuses a scorecard claiming thresholds other than its admission\'s', () => {
+    const card = JSON.parse(d.card1);
+    const bad = sc.serialize({ ...card, targetMs: 60_000, remainingMs: 0 });
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: bad, [P.events]: d.events1 }).includes(RULES.SCORECARD_MISMATCH));
+  });
+
+  for (const [field, value] of [['version', '9.9.9'], ['canonicalThresholds', false], ['requiredChecksSource', 'operator']]) {
+    it(`refuses a scorecard whose ${field} disagrees with its admission`, () => {
+      const bad = sc.serialize({ ...JSON.parse(d.card1), [field]: value });
+      assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: bad, [P.events]: d.events1 }).includes(RULES.SCORECARD_MISMATCH));
+    });
+  }
+
+  it('refuses a scorecard whose time goes backwards, or with no transition log behind it', () => {
+    const first = { [P.admission]: d.admission, [P.scorecard]: d.card2, [P.events]: d.events2 };
+    const earlier = sc.serialize({ ...JSON.parse(d.card2), publishSeq: 3, updatedAt: T0 });
+    assert.ok(judge(first, { ...first, [P.scorecard]: earlier }).includes(RULES.TIME_BACKWARDS));
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: d.card1 }).includes(RULES.EVENTS_SCORECARD_MISMATCH));
+  });
+
+  it('refuses a scorecard filed under another candidate, and invalid scorecards, logs and indexes', () => {
+    const other = sc.paths('b'.repeat(40));
+    assert.ok(judge({ [other.admission]: d.admission.replace(SHA, 'b'.repeat(40)) }, { [other.admission]: d.admission.replace(SHA, 'b'.repeat(40)), [other.scorecard]: d.card1 }).includes(RULES.WRONG_CANDIDATE));
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: '{"schema":"x"}' }).includes(RULES.INVALID_DOCUMENT));
+    assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.events]: 'not json\n' }).includes(RULES.INVALID_DOCUMENT));
+    assert.ok(judge({}, { [sc.INDEX_PATH]: '{"schema":"x"}' }).includes(RULES.INVALID_DOCUMENT));
   });
 });
 
@@ -198,6 +246,20 @@ describe('verifyHistory: a real metrics branch', () => {
 
   it('reports a branch that does not exist yet as nothing to verify', async () => {
     assert.deepEqual(await verify.verifyHistory({ repoDir: remote, ref: 'metrics' }), { exists: false, commits: 0, violations: [] });
+  });
+
+  it('reports a history it cannot read as a violation, never as a missing branch', async () => {
+    const git = async (dir, args) => (args[0] === 'rev-list' ? { code: 1, stdout: '' } : { code: 0, stdout: 'abc\n' });
+    const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
+    assert.equal(result.exists, true);
+    assert.deepEqual(result.violations.map((v) => v.rule), [RULES.HISTORY_UNREADABLE]);
+  });
+
+  it('keeps the workflow from passing a branch it could not fetch', () => {
+    const yml = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'scorecard-verify.yml'), 'utf8');
+    assert.doesNotMatch(yml, /\|\| echo/, 'a fetch failure must not be swallowed');
+    assert.match(yml, /ls-remote --exit-code --heads origin metrics/);
+    assert.match(yml, /"\$status" -eq 2/);
   });
 
   it('names the commit that rewrote an admission, even after later honest commits', async () => {
