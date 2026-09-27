@@ -163,7 +163,8 @@ check that could not run has not said the machine is healthy. The same verdicts 
 as JSON from `GET /api/system/health`, each condition in one of three states — `fired`, `clear`,
 or `unknown` with a reason. The ttyd row's `reading` also carries the counts as values —
 `wedged` (confirmed wedged children), `orphanGate` and `pool` (`{used, cap}`) — each `null` when it
-could not be measured, so a program can compare them without reading the `detail` text.
+could not be measured, so a program can compare them without reading the `detail` text. Off macOS
+the row also carries `applicable: false`.
 
 ### PortHub Lease Import Banner
 

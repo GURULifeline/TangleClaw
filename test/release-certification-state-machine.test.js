@@ -8,6 +8,7 @@ const { STATES, EXTEND, HARD_FAIL, TRANSITION, REFUSAL, CertificationError } = r
 
 const SHA = 'a'.repeat(40);
 const GEN = '4242@Sun Sep 27 09:00:00 2026';
+const WTID = 'c'.repeat(64);
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 
@@ -19,7 +20,7 @@ const HOUR = 60 * MIN;
 function manifest(thresholds) {
   return sm.buildManifest({
     candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
-    worktreePath: '/tmp/rc-wt', ttydGeneration: GEN, host: 'test-host', thresholds
+    worktreePath: '/tmp/rc-wt', worktreeId: WTID, ttydGeneration: GEN, host: 'test-host', thresholds
   });
 }
 
@@ -34,7 +35,7 @@ const FAST = { targetQualifiedMs: 3 * MIN, maxIntervalMs: 2 * MIN, ptyMinAttache
 function obs(over = {}) {
   const base = {
     worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500_000 },
+    server: { checkoutId: WTID, currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500_000 },
     ttyd: { managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 3 },
     github: { state: 'ok', checks: { test: 'success' } },
     pty: { instance: 'srv-1', attaches: 0, detaches: 0, lastAt: null }
@@ -92,7 +93,7 @@ describe('buildManifest', () => {
     const m = manifest();
     assert.equal(m.candidateSha, SHA);
     assert.equal(m.schema, 'tc.release-certification/v1');
-    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', host: 'test-host', baseline: { ttydGeneration: GEN } });
+    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', baseline: { ttydGeneration: GEN } });
     assert.equal(m.thresholds.targetQualifiedMs, 259_200_000);
     assert.equal(m.thresholds.maxIntervalMs, 150_000);
   });
@@ -105,12 +106,14 @@ describe('buildManifest', () => {
     ['an unknown threshold', { thresholds: { nope: 1 } }],
     ['a zero threshold', { thresholds: { maxIntervalMs: 0 } }],
     ['a missing ttyd generation', { ttydGeneration: '' }],
-    ['a malformed repository', { repository: 'not a repo' }]
+    ['a malformed repository', { repository: 'not a repo' }],
+    ['no required checks, which would pass GitHub vacuously', { requiredChecks: [] }],
+    ['a worktree id that is not a sha256', { worktreeId: 'abc' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
-        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: [], createdAt: 1,
-        worktreePath: '/w', ttydGeneration: GEN, ...input
+        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1,
+        worktreePath: '/w', worktreeId: WTID, ttydGeneration: GEN, ...input
       }), REFUSAL.INVALID_MANIFEST);
     });
   }
@@ -127,6 +130,10 @@ describe('classify', () => {
     ['worktree on a branch', { worktree: { detached: false } }, HARD_FAIL.WORKTREE_NOT_DETACHED],
     ['worktree dirty', { worktree: { dirty: true } }, HARD_FAIL.WORKTREE_DIRTY],
     ['runtime proven different', { server: { startupSha: 'c'.repeat(40) } }, HARD_FAIL.RUNTIME_SHA_MISMATCH],
+    ['the server runs from another checkout', { server: { checkoutId: 'd'.repeat(64) } }, HARD_FAIL.SERVER_NOT_IN_WORKTREE],
+    ['the server checkout moved under the running process', { server: { isStale: true } }, HARD_FAIL.RUNTIME_CHECKOUT_DRIFT],
+    ['the server checkout on disk is another commit', { server: { currentDiskSha: 'e'.repeat(40) } }, HARD_FAIL.RUNTIME_CHECKOUT_DRIFT],
+    ['this platform has no owned ttyd', { ttyd: { applicable: false } }, HARD_FAIL.TTYD_NOT_APPLICABLE],
     ['version differs', { server: { runningVersion: '5.29.0' } }, HARD_FAIL.VERSION_MISMATCH],
     ['ttyd not the owned binary', { ttyd: { managed: false } }, HARD_FAIL.TTYD_NOT_OWNED],
     ['ttyd generation changed', { ttyd: { generation: '999@later' } }, HARD_FAIL.TTYD_GENERATION_CHANGED],
@@ -150,6 +157,8 @@ describe('classify', () => {
     ['the runtime SHA baseline is missing', { server: { shaBaselineSource: null } }, EXTEND.RUNTIME_UNPROVEN, 'server'],
     ['a late SHA differs', { server: { shaBaselineSource: 'late', startupSha: 'c'.repeat(40) } }, EXTEND.RUNTIME_UNPROVEN, 'server'],
     ['the server start time is missing', { server: { startedAt: null } }, EXTEND.PROBE_UNKNOWN, 'server'],
+    ['the server checkout id is missing', { server: { checkoutId: null } }, EXTEND.PROBE_UNKNOWN, 'server'],
+    ['server staleness is unknown', { server: { isStale: null } }, EXTEND.PROBE_UNKNOWN, 'server'],
     ['ttyd ownership is unknown', { ttyd: { managed: null } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],
     ['the leak condition is unknown', { ttyd: { leakState: 'unknown' } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],
     ['the orphan gate is unknown', { ttyd: { orphanGate: null } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],

@@ -56,6 +56,12 @@ Train 30, C01 (Chunks 01–04). The PM dispatched it over Medusa; the Architect 
   - The system-health ttyd `reading` gains `wedged`, `orphanGate` and `pool` as values.
 - **Chunk 04: PTY counter** (`lib/pty-activity.js`, `GET /api/system/pty-activity`): an attach counts on ttyd's `101` for a `/terminal` upgrade; a detach counts on close. The instance id is per process.
 
+**Cross-PR Matrix fixes (Pilot-B2, relayed by the PM).**
+1. The server is now tied to the worktree: `server-info` reports `checkoutId` (sha256 of its checkout's real path), recorded as `worktreeId` at admission. A mismatch is `SERVER_NOT_IN_WORKTREE`, and `isStale` or a disk SHA other than the candidate is `RUNTIME_CHECKOUT_DRIFT`; both are hard fails.
+2. Locks carry a stable machine id, so a macOS host-name change no longer wedges a crashed run's lock.
+3. `start` retries admission while only unknowns block it (an idle server's cold health cache). Off macOS the health row says `applicable: false` and admission refuses at once with `TTYD_NOT_APPLICABLE`.
+4. An empty required-checks list is refused, in the manifest and in the CLI.
+
 **Reviews.** Chunk 01: R-1 blocking (a restart between samples earned time), fixed. Chunk 02: R-1 blocking (lock safety paths untested), fixed, plus the tamper-claim wording corrected. Chunk 03: 2 blocking (endpoint missing, `run` untested), fixed in the Chunk 04 commit. Every verify-resolutions pass came back clean.
 
 **Tests.** `test/release-certification-{state-machine,store,runner}.test.js`, `test/pty-activity.test.js`, and `test/system-health.test.js` extended. Full suite in the pilot checkout: 14,097 pass, 1 skip, 1 fail. The failure is `system-health.test.js:114`, a pre-existing load flake reproduced on base c5c05a70 at the same rate (1/5 passes at load average ~30), so the evidence is recorded as degraded. Not mutation-swept; not yet exercised against a live server (the scratch-server E2E smoke is pending).

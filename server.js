@@ -1466,6 +1466,9 @@ route('GET', '/api/server-info', (_req, res) => {
   // fetch, and the payload says which.
   info.liveCheckout = checkoutState.withUpstreamObservation(
     checkoutState.snapshot(serverInfo.getRepoRoot()), info.behindOrigin);
+  // #1949: which checkout this server runs from, as a digest of its real path,
+  // so release certification can prove the server is the worktree it certifies.
+  info.checkoutId = serverInfo.getCheckoutId();
   // #1678: whether a restart would load anything, for the commits the running
   // process has not loaded. Only asked when disk is known or suspected ahead.
   info.restartImpact = info.isStale === true

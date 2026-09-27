@@ -64,7 +64,7 @@ function withUmask(mask, fn) {
 function manifest() {
   return sm.buildManifest({
     candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
-    worktreePath: '/tmp/rc-wt', ttydGeneration: GEN, host: 'h'
+    worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, host: 'h'
   });
 }
 
@@ -77,7 +77,7 @@ function manifest() {
 function sample(t, over = {}) {
   const observations = {
     worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
+    server: { checkoutId: 'c'.repeat(64), currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
     ttyd: { managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 1 },
     github: { state: 'ok', checks: { test: 'success' } },
     pty: { instance: 's1', attaches: 0, detaches: 0, lastAt: null },
@@ -191,7 +191,7 @@ describe('lockfile', () => {
    * @param {object} [over] - Overrides
    * @returns {object} Deps
    */
-  const deps = (over = {}) => ({ hostname: () => 'this-host', isAlive: () => true, bootTime: () => 0, processStart: () => null, now: () => Date.now(), sleep: () => {}, ...over });
+  const deps = (over = {}) => ({ hostname: () => 'this-host', machine: () => 'darwin:M1', isAlive: () => true, bootTime: () => 0, processStart: () => null, now: () => Date.now(), sleep: () => {}, ...over });
   /**
    * Plant a lock record.
    * @param {object} record - Fields
@@ -199,7 +199,7 @@ describe('lockfile', () => {
    */
   const plant = (record) => {
     const file = path.join(tmp, 'lock');
-    fs.writeFileSync(file, JSON.stringify({ pid: 99999, host: 'this-host', writtenAt: 5000, token: 'old', ...record }));
+    fs.writeFileSync(file, JSON.stringify({ pid: 99999, machine: 'darwin:M1', host: 'this-host', writtenAt: 5000, token: 'old', ...record }));
     return file;
   };
 
@@ -255,12 +255,32 @@ describe('lockfile', () => {
     const file = plant({ pid: 777 });
     const reclaimed = [];
     lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }), onReclaim: (r) => reclaimed.push(r) });
-    assert.deepEqual(reclaimed, [{ pid: 777, host: 'this-host', writtenAt: 5000 }]);
+    assert.deepEqual(reclaimed, [{ pid: 777, machine: 'darwin:M1', host: 'this-host', writtenAt: 5000 }]);
   });
 
-  it('never reclaims a lock from another host', () => {
-    const file = plant({ host: 'elsewhere' });
+  it('never reclaims a lock from another machine', () => {
+    const file = plant({ machine: 'darwin:OTHER', host: 'this-host' });
     refuses(() => lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }) }), REFUSAL.LOCK_HELD);
+  });
+
+  it('still reclaims a dead lock after this machine was renamed', () => {
+    const file = plant({ host: 'old-name.local' });
+    const token = lockfile.acquire(file, { timeoutMs: 0, deps: deps({ hostname: () => 'new-name.local', isAlive: () => false }) });
+    assert.equal(lockfile.readRecord(file).token, token);
+    assert.equal(lockfile.readRecord(file).machine, 'darwin:M1');
+  });
+
+  it('falls back to the host name for a lock that names no machine', () => {
+    const file = path.join(tmp, 'lock');
+    fs.writeFileSync(file, JSON.stringify({ pid: 99999, host: 'elsewhere', writtenAt: 5000, token: 'old' }));
+    refuses(() => lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }) }), REFUSAL.LOCK_HELD);
+    fs.writeFileSync(file, JSON.stringify({ pid: 99999, host: 'this-host', writtenAt: 5000, token: 'old' }));
+    assert.equal(typeof lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }) }), 'string');
+  });
+
+  it('reads a stable machine id', () => {
+    assert.match(lockfile.machineId(), /^(darwin|linux|host):.+/);
+    assert.equal(lockfile.machineId(), lockfile.machineId());
   });
 
   it('reclaims an unreadable lock only once it is old enough to be a crash', () => {
@@ -343,7 +363,7 @@ describe('store', () => {
   it('records an operator acceptance and its snapshot', () => {
     const base = path.join(tmp, 'v1');
     const m = sm.buildManifest({
-      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', ttydGeneration: GEN,
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
       thresholds: { targetQualifiedMs: MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 }
     });
     const s0 = sample(0);
@@ -406,7 +426,7 @@ describe('store', () => {
     const p = store.runPaths(base, SHA);
     fs.mkdirSync(p.dir, { recursive: true });
     fs.writeFileSync(p.manifest, '{"half":');
-    fs.writeFileSync(p.lock, JSON.stringify({ pid: 424242, host: os.hostname(), writtenAt: 1, token: 'dead' }));
+    fs.writeFileSync(p.lock, JSON.stringify({ pid: 424242, machine: lockfile.machineId(), host: os.hostname(), writtenAt: 1, token: 'dead' }));
     const facts = [];
     const onRecover = (f) => facts.push(f.kind);
     const m = manifest();

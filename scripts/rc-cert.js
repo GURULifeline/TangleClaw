@@ -214,6 +214,7 @@ async function main(argv, io = {}) {
       if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
       const requiredChecks = flags['required-check'] || await (deps.requiredChecks || probesLib.requiredChecks)(repo);
       if (!requiredChecks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
+      if (requiredChecks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
       const version = runnerLib.worktreeVersion(worktreePath);
       if (!version) throw new UsageError('the worktree has no readable version.json');
       const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;

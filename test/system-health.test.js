@@ -99,6 +99,7 @@ describe('lib/system-health (#345)', () => {
       await systemHealth._settleTtyd();
       assert.equal(c.state, 'clear');
       assert.match(c.detail, /not applicable on linux/);
+      assert.equal(c.applicable, false, 'said as a value, so certification can refuse without reading detail');
       assert.equal(measured, false, 'no launchctl/ps on a platform that has neither');
     });
 
