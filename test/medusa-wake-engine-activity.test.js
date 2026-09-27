@@ -398,3 +398,121 @@ describe('medusa-wake — assessSessionIdle takes the engine\'s answer as an inp
     assert.equal(r.idle, true);
   });
 });
+
+describe('medusa-wake — a prolonged engine-thread-unknown alerts the operator (#1978)', () => {
+  let saved;
+  beforeEach(() => {
+    saved = { ...wake._internal };
+    wake.stop();
+  });
+  afterEach(() => {
+    wake.stop();
+    Object.assign(wake._internal, saved);
+  });
+
+  const UNKNOWN = { channel: 'present', state: 'unknown', reasonCode: 'thread-ambiguous' };
+
+  /**
+   * Tick through `ms` of server time in five-second steps, the monitor's own cadence.
+   * @param {object} world - The world whose clock advances.
+   * @param {number} ms - How long to run.
+   * @returns {Promise<void>}
+   */
+  async function runFor(world, ms) {
+    for (let t = 0; t < ms; t += 5000) {
+      world.clock += 5000;
+      await ticks(1);
+    }
+  }
+
+  it('says nothing before the threshold, then names the stalled session, its adapter reason and its age', async () => {
+    const world = installWorld({ activity: UNKNOWN });
+    await runFor(world, wake.WAKE_STALL_ALERT_MS - 60 * 1000);
+    assert.equal(wake.wakeStallSummary(), null);
+    await runFor(world, 2 * 60 * 1000);
+    const summary = wake.wakeStallSummary();
+    assert.equal(summary.count, 1);
+    assert.equal(summary.oldest.sessionId, 1);
+    assert.equal(summary.oldest.project, 'proj-cx');
+    assert.equal(summary.oldest.engineReason, 'thread-ambiguous');
+    assert.ok(summary.oldest.ageMinutes >= wake.WAKE_STALL_ALERT_MS / 60000);
+    assert.equal(summary.oldest.meaning, wake.peerReasonMeaning('engine-thread-unknown'));
+    assert.equal(world.injected.length, 0, 'the alert never types into the pane');
+  });
+
+  it('clears the moment the engine answers idle', async () => {
+    const world = installWorld({ activity: UNKNOWN });
+    await runFor(world, wake.WAKE_STALL_ALERT_MS + 60 * 1000);
+    assert.equal(wake.wakeStallSummary().count, 1);
+    world.activity = { channel: 'present', state: 'idle', reasonCode: 'thread-idle' };
+    await runFor(world, 10 * 1000);
+    assert.equal(wake.wakeStallSummary(), null);
+  });
+
+  it('clears when the mail is read, and a later stall starts its own clock', async () => {
+    const world = installWorld({ activity: UNKNOWN });
+    await runFor(world, wake.WAKE_STALL_ALERT_MS + 60 * 1000);
+    world.status = { ...world.status, unread: 0 };
+    world.inbox = [];
+    await runFor(world, 5000);
+    assert.equal(wake.wakeStallSummary(), null);
+    world.status = { ...world.status, unread: 1 };
+    world.inbox = [{ id: 'm2', from: 'peer', message: 'again' }];
+    await runFor(world, 60 * 1000);
+    assert.equal(wake.wakeStallSummary(), null, 'the old episode\'s age does not carry over');
+  });
+
+  it('a busy engine is not a stall — it is working, and the wake waits for it', async () => {
+    const world = installWorld({ activity: { channel: 'present', state: 'busy', reasonCode: 'thread-active' } });
+    await runFor(world, wake.WAKE_STALL_ALERT_MS + 60 * 1000);
+    assert.equal(wake.wakeStallSummary(), null);
+  });
+
+  it('renders the dashboard banner with text nodes only, and clears it when nothing is stalled', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const vm = require('node:vm');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'landing.js'), 'utf8');
+    const start = src.indexOf('function renderMedusaWakeStallBanner(');
+    assert.ok(start >= 0, 'the renderer exists');
+    let depth = 0;
+    let end = -1;
+    for (let i = src.indexOf('{', start); i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) { end = i + 1; break; }
+    }
+    const fn = src.slice(start, end);
+    const el = () => {
+      const o = { _hidden: true, children: [], replaceChildren(...kids) { o.children = kids; } };
+      o.classList = { add(c) { if (c === 'hidden') o._hidden = true; }, remove(c) { if (c === 'hidden') o._hidden = false; } };
+      return o;
+    };
+    const banner = el();
+    const text = el();
+    const document = {
+      getElementById: (id) => (id === 'medusaWakeStallBanner' ? banner : id === 'medusaWakeStallBannerText' ? text : null),
+      createElement: () => ({ textContent: '' }),
+      createTextNode: (t) => ({ textContent: t })
+    };
+    const ctx = vm.createContext({ document });
+    ctx.summary = { count: 2, oldest: { sessionId: 3, project: '<img src=x>', engineReason: 'thread-ambiguous', ageMinutes: 14 } };
+    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(summary);`, ctx);
+    assert.equal(banner._hidden, false);
+    const rendered = text.children.map((c) => c.textContent).join('');
+    assert.match(rendered, /^Medusa: 2 sessions are not being woken for new mail\. Oldest: <img src=x>, 14 min — its engine has not confirmed it is idle \(thread-ambiguous\)\./);
+    assert.equal(text.innerHTML, undefined, 'never written as HTML');
+    ctx.summary = { count: 1, oldest: { sessionId: 3, project: null, engineReason: null, ageMinutes: 10 } };
+    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(summary);`, ctx);
+    assert.match(text.children.map((c) => c.textContent).join(''), /^Medusa: 1 session is not being woken for new mail\. Oldest: session 3, 10 min — its engine has not confirmed it is idle\. /);
+    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(null);`, ctx);
+    assert.equal(banner._hidden, true);
+  });
+
+  it('clears when the session ends', async () => {
+    const world = installWorld({ activity: UNKNOWN });
+    await runFor(world, wake.WAKE_STALL_ALERT_MS + 60 * 1000);
+    wake._internal.listLiveAll = () => [];
+    await runFor(world, 5000);
+    assert.equal(wake.wakeStallSummary(), null);
+  });
+});

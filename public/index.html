@@ -420,6 +420,13 @@ Print the Instance Dir explicitly as an absolute path. Prefer a pinned image tag
     <div id="medusaEscalationBanner" class="orphan-banner medusa-escalation-banner hidden" role="alert">
       <span class="orphan-banner-text" id="medusaEscalationBannerText"></span>
     </div>
+    <!-- Medusa wake-stall banner (#1978). Hidden until /api/server-info reports
+         medusaWakeStalls: sessions whose wakes have been held for want of an
+         engine answer, with mail waiting, past the alert threshold. Same tone
+         as the escalation banner; it clears itself when the condition does. -->
+    <div id="medusaWakeStallBanner" class="orphan-banner medusa-escalation-banner hidden" role="alert">
+      <span class="orphan-banner-text" id="medusaWakeStallBannerText"></span>
+    </div>
     <!-- Live-checkout banner (#993). Hidden until /api/server-info reports that
          the served checkout is off main, detached, unpushed, or has uncommitted
          or untracked files, or that some of that could not be read. No button
