@@ -931,6 +931,18 @@ service worker's state) is gone the moment the condition clears, which it does
 on its own. The runbook also says why bumping the service worker's
 `CACHE_NAME` is not the fix.
 
+### Dashboard Still Looks Old After the Server Moved
+
+A dashboard tab left open for a long time can be running page code older than the server it talks to. TangleClaw keeps that from sticking in three ways (#411), and none of them needs you to open DevTools or unregister the service worker:
+
+- **The page scripts are fetched fresh.** `landing.js` and the other core scripts are served network-first, so any reload gets the server's current copy.
+- **The service worker checks for a new version** when the page loads, whenever the tab comes back to the foreground, and when the "TC server is out of date" banner first appears. When it finds one, the new worker takes over and the page reloads itself once onto the current assets.
+- **Restarting from the banner reloads the page** only after the new server process answers, so the reload cannot land on a dead server and fall back to a cached copy.
+
+If the page still looks old after that, reload it once. That is expected: a tab whose service worker has not changed keeps the code it loaded until something reloads it, and the dashboard does not show a separate "your page is older than the server" notice.
+
+**A restart that does not seem to take is a different problem.** If "Restart TangleClaw" appears to do nothing and the uptime keeps counting, the server process itself is not recycling, and nothing above addresses that. In the incident behind #411 that symptom was fixed from a terminal (`launchctl kickstart -k gui/$UID/com.tangleclaw.server`), and its cause was never found. If you see it, capture the server log (`~/.tangleclaw/logs/tangleclaw.log`) and the `startedAt` from `/api/server-info` before and after the click, and file an issue.
+
 ### Dashboard Constantly Refreshes After Enabling HTTPS
 
 Port 3102 serves either HTTP or HTTPS, not both. If HTTPS is enabled but the
