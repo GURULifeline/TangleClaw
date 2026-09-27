@@ -220,11 +220,14 @@ describe('resolve — an unsafe root fails closed, and nothing outside TangleCla
     assert.deepEqual(r.env, {});
   });
 
-  it('accepts a root exactly at the cap', () => {
+  it('accepts a root exactly at the cap', (t) => {
     // Pad one directory name so the socket path lands on 103 bytes exactly.
     const probe = path.join(scratch, 'X', 'run', 'claude-tmp', 'cc-socks', '4194304.sock');
     const pad = 103 - Buffer.byteLength(probe) + 1;
-    if (pad < 1) return; // the fixture root alone is already too long on this host
+    if (pad < 1) {
+      t.skip(`the fixture root alone is already ${Buffer.byteLength(probe) - 1} bytes on this host`);
+      return;
+    }
     const base = path.join(scratch, 'X'.repeat(pad));
     const r = tempRoot.resolve({ engineId: 'claude', profile: claudeProfile(), baseDir: base, env: {} });
     assert.equal(Buffer.byteLength(path.join(base, 'run', 'claude-tmp', 'cc-socks', '4194304.sock')), 103);

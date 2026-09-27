@@ -818,13 +818,16 @@ provisions nothing.
 **It fails closed, and it never repairs a system directory.** A root that does not pass is not
 handed to the engine. The launch goes ahead, and the server log records the failing path and a
 command for you to run by hand. It also records whether the engine's default location
-(`platformRootEnv`, else `defaultRoot`) will work, and if not, which ancestor fails. The launch
-result carries the same account as `privateTempRoot`. TangleClaw never changes the mode of `/tmp`,
+(`platformRootEnv`, else `defaultRoot`) will work, and if not, which ancestor fails. The launch response (`POST /api/sessions/:project`) carries the same account as
+`privateTempRoot`, or `null` for an engine that declares no root. TangleClaw never changes the mode of `/tmp`,
 `/private/tmp` or any directory it does not own. The only `chmod` it performs is tightening its own
 leaf back to `0700`.
 
 `CLAUDE_CODE_TMPDIR` also moves Claude's other temporary files (its scratchpad included) under the
-same private root. When `XDG_RUNTIME_DIR` is set, Claude still puts its sockets there, because that
+same private root. Unlike `/tmp`, which the OS clears periodically, nothing clears this root yet, so it
+grows with use. To reclaim the space, stop every Claude session TangleClaw runs, then run
+`rm -rf ~/.tangleclaw/run/claude-tmp/*`. TangleClaw recreates the root at the next launch. Do not
+clear it while sessions are running: their live sockets and scratchpads are inside it. When `XDG_RUNTIME_DIR` is set, Claude still puts its sockets there, because that
 variable ranks first. It is normally a safe per-user directory, and TangleClaw does not override it,
 because every other program in the pane reads it too.
 
