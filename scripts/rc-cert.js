@@ -199,7 +199,10 @@ const NEUTRAL_IDENTITY = Object.freeze({ name: 'TangleClaw release certification
  */
 async function _publication(c, sha, where) {
   if (c.deps.publication) return c.deps.publication;
-  const facts = await (c.deps.repoFacts || publisherLib.repoFacts)(where.worktreePath);
+  // Git facts are read only when needed: a pinned remote with the actor
+  // withheld needs none, so a runner without git config can still publish.
+  const needFacts = !where.remoteUrl || where.publishActor;
+  const facts = needFacts ? await (c.deps.repoFacts || publisherLib.repoFacts)(where.worktreePath) : null;
   const publisher = publisherLib.createPublisher({
     dir: path.join(c.base, '_metrics'),
     remoteUrl: where.remoteUrl || facts.remoteUrl,
@@ -207,6 +210,37 @@ async function _publication(c, sha, where) {
     onRecover: (fact) => c.emit({ event: 'recovered', ...fact })
   });
   return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
+}
+
+/**
+ * The publication for a committed run, built on first use. Building needs
+ * the operator's git identity and the worktree's origin, which a runner under
+ * launchd or cron may not have. A publish that cannot even build its
+ * publisher is recorded and backed off like any other publishing failure, and
+ * never stops sampling (ADR 0021 point 4).
+ * @param {object} c - Command context
+ * @param {string} sha - Candidate SHA
+ * @param {object} manifest - The run's manifest
+ * @returns {object} `{publishCurrent, due, recordFailure, readStatus}`
+ */
+function _runPublication(c, sha, manifest) {
+  let built = null;
+  const statusOnly = publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher: null });
+  return {
+    async publishCurrent(log = () => {}) {
+      try {
+        built = built || await _publication(c, sha, _pinned(manifest));
+      } catch (e) {
+        const status = publicationLib.recordFailureFor(c.base, sha, e);
+        log({ event: 'publish-failed', code: e.code || 'PUBLISH_FAILED', message: String(e.message || '').slice(0, 300), nextAttemptAt: status.nextAttemptAt });
+        return { published: false, code: e.code || 'PUBLISH_FAILED' };
+      }
+      return built.publishCurrent(log);
+    },
+    due: (hint) => statusOnly.due(hint),
+    recordFailure: (err) => publicationLib.recordFailureFor(c.base, sha, err),
+    readStatus: () => statusOnly.readStatus()
+  };
 }
 
 /**
@@ -226,8 +260,7 @@ function _pinned(manifest) {
 async function cmdPublish(c) {
   const sha = _need(c.flags, 'sha');
   const { manifest } = store.readRun(c.base, sha);
-  const publication = await _publication(c, sha, _pinned(manifest));
-  const { published } = await publication.publishCurrent(c.emit);
+  const { published } = await _runPublication(c, sha, manifest).publishCurrent(c.emit);
   c.out.write(`${JSON.stringify({ published })}\n`);
   return published ? 0 : 3;
 }
@@ -274,16 +307,7 @@ async function cmdDecide(c, op) {
   // The decision is committed; publishing it is best effort and a failure is
   // recorded for retry (`rc-cert publish`), never undoing the decision.
   const { manifest } = store.readRun(c.base, sha);
-  let published = false;
-  try {
-    const publication = await _publication(c, sha, _pinned(manifest));
-    ({ published } = await publication.publishCurrent(c.emit));
-  } catch (e) {
-    // No publication could be built (no git identity or origin); ADR 0021
-    // still requires the failure to be recorded and retried.
-    const status = publicationLib.recordFailureFor(c.base, sha, e);
-    c.emit({ event: 'publish-failed', code: e.code || null, message: String(e.message || '').slice(0, 300), nextAttemptAt: status.nextAttemptAt });
-  }
+  const { published } = await _runPublication(c, sha, manifest).publishCurrent(c.emit);
   c.out.write(`${JSON.stringify({ state: state.state, published })}\n`);
   return 0;
 }
@@ -353,7 +377,7 @@ async function cmdRun(c) {
     sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
     requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
   }));
-  const publication = await _publication(c, sha, _pinned(manifest));
+  const publication = c.deps.publication || _runPublication(c, sha, manifest);
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const controller = new AbortController();
   const stop = () => controller.abort();

@@ -5,8 +5,9 @@ name: Scorecard verify
 # could have made. That means allowlisted paths only, admissions never
 # rewritten, scorecards bound to their admission's manifest digest with a
 # rising publishSeq, terminal states never changing, and transition logs only
-# appended to. That is what makes a published admission's digest binding, and
-# release promotion runs the same verifier before it promotes.
+# appended to. That is what makes a published admission's digest binding. The
+# same verifier is exported for release promotion (#1949 C04) to run before it
+# promotes.
 #
 # Why a schedule and not `on: push` to metrics: GitHub runs a push-triggered
 # workflow from the workflow file IN the pushed commit. `metrics` is a

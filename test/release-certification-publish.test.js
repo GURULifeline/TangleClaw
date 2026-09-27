@@ -415,6 +415,49 @@ describe('rc-cert publishing identity and failure records', () => {
     assert.equal(manifestOnDisk.private.publishRemote, remote, 'the remote is pinned in the manifest');
   });
 
+  it('keeps sampling when the publisher cannot be built, recording the failure instead', async () => {
+    const m = sm.buildManifest({
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection',
+      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h'
+    });
+    const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };
+    store.createRun(base, m, sm.admit(m, s0), s0);
+    let t = T0;
+    const clock = { wall: () => t, mono: () => t - T0 };
+    const controller = new AbortController();
+    let ticks = 0;
+    const deps = {
+      repoFacts: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'no git identity under launchd'); },
+      probes: () => ({ collect: async () => ({ observations: obs(), diagnostics: {} }) }),
+      runner: (ctx) => {
+        const real = runnerLib.createRunner({ ...ctx, clock });
+        return { ...real, run: (args) => real.run({ ...args, wait: async () => { t += MIN; if (++ticks === 2) controller.abort(); } }) };
+      }
+    };
+    let err = '';
+    const code = await cli.main(['run', '--sha', SHA, '--base', base, '--api', 'http://x'], {
+      stdout: { write: () => {} }, stderr: { write: (x) => { err += x; } }, env: {}, configFile: path.join(tmp, 'none.json'), deps, signal: controller.signal
+    });
+    assert.equal(code, 0, err);
+    assert.ok(store.readRun(base, SHA).state.sampleCount >= 3, 'sampling went on');
+    assert.equal(publicationLib.readStatus(base, SHA).lastMessage, 'no git identity under launchd');
+    assert.match(err, /publish-failed/);
+  });
+
+  it('needs no git facts to publish a run whose remote is pinned and whose actor is withheld', async () => {
+    const m = sm.buildManifest({
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection',
+      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h', publishActor: false, publishRemote: remote
+    });
+    const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };
+    fs.mkdirSync(store.runPaths(base, SHA).dir, { recursive: true, mode: 0o700 });
+    await publicationLib.createPublication({ base, candidateSha: SHA, publisher: publisherLib.createPublisher({ dir: path.join(base, '_metrics'), remoteUrl: remote, identity: ID }) }).admit(m, store.manifestDigest(store.manifestText(m)));
+    store.createRun(base, m, sm.admit(m, s0), s0);
+    const r = await run(['publish', '--sha', SHA, '--base', base], { repoFacts: async () => { throw new Error('must not be asked'); } });
+    assert.equal(r.code, 0, r.err);
+    assert.ok(remoteFile(P.scorecard));
+  });
+
   it('records a publish failure even when no publisher could be built', async () => {
     const m = manifest();
     const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };

@@ -118,7 +118,8 @@ describe('verifyChange: the rules, one commit at a time (#1949 C02)', () => {
     ['a rewritten transition log', second, { ...second, [P.events]: d.events2.replace('PROBE_UNKNOWN', 'RECOVERED') }, RULES.EVENTS_REWRITTEN],
     ['a transition log that does not start at admission', { [P.admission]: d.admission }, { [P.admission]: d.admission, [P.events]: `${d.events2.split('\n')[1]}\n` }, RULES.EVENTS_BROKEN_CHAIN],
     ['a log that disagrees with its scorecard', { [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: d.card2, [P.events]: d.events1 }, RULES.EVENTS_SCORECARD_MISMATCH],
-    ['an index that disagrees with its scorecard', first, { ...second, [sc.INDEX_PATH]: d.index1 }, RULES.INDEX_MISMATCH]
+    ['an index that disagrees with its scorecard', first, { ...second, [sc.INDEX_PATH]: d.index1 }, RULES.INDEX_MISMATCH],
+    ['a scorecard whose admission does not validate', { [P.admission]: '{"schema":"tc.release-certification.admission/v1"}' }, { [P.admission]: '{"schema":"tc.release-certification.admission/v1"}', [P.scorecard]: d.card1, [P.events]: d.events1 }, RULES.SCORECARD_WITHOUT_ADMISSION]
   ];
   for (const [name, before, after, rule] of cases) {
     it(`refuses ${name}`, () => {
@@ -271,12 +272,34 @@ describe('verifyHistory: a real metrics branch', () => {
       return real(dir, args);
     };
     const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
-    assert.deepEqual(result.violations, [{ commit: failed, rule: RULES.HISTORY_UNREADABLE, path: null }]);
+    assert.deepEqual(result.violations.map((v) => [v.commit, v.rule, v.path]), [[failed, RULES.HISTORY_UNREADABLE, null]]);
+  });
+
+  it('judges a previous admission it cannot read as unreadable, never as absent', async () => {
+    await publishHonestly();
+    tamper((wc) => fs.writeFileSync(path.join(wc, P.admission), fs.readFileSync(path.join(wc, P.admission), 'utf8').replace('5.30.0', '5.30.9')));
+    const real = async (dir, args) => new Promise((resolve) => {
+      require('node:child_process').execFile('git', args, { cwd: dir }, (err, stdout, stderr) => resolve({ code: err ? 1 : 0, stdout: String(stdout), stderr: String(stderr) }));
+    });
+    const tamperParent = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'metrics~1'], { encoding: 'utf8' }).trim();
+    const git = async (dir, args) => {
+      // Fail only the read of the admission as it stood before the tampering commit.
+      if (args[0] === 'ls-tree' && args[2] === tamperParent && args.includes(P.admission)) return { code: 1, stdout: '', stderr: 'fatal: bad object' };
+      return real(dir, args);
+    };
+    const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
+    const rules = result.violations.map((v) => v.rule);
+    assert.ok(rules.length > 0 && rules.every((r) => r === RULES.HISTORY_UNREADABLE), 'judged unreadable, never as a new admission that would validate');
+    const tip = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'metrics'], { encoding: 'utf8' }).trim();
+    assert.ok(result.violations.some((v) => v.commit === tip), 'the tampering commit is named');
+    assert.equal(result.violations.find((v) => v.rule === RULES.HISTORY_UNREADABLE).detail, 'fatal: bad object');
   });
 
   it('writes a job summary even for a violation with no commit', () => {
     const md = cli.summaryMarkdown('origin/metrics', { exists: true, commits: 0, violations: [{ commit: null, rule: RULES.HISTORY_UNREADABLE, path: null }] });
     assert.match(md, /FAILED[\s\S]*\(history\)[\s\S]*HISTORY_UNREADABLE/);
+    const withDetail = cli.summaryMarkdown('origin/metrics', { exists: true, commits: 0, violations: [{ commit: null, rule: RULES.HISTORY_UNREADABLE, path: null, detail: 'fatal: bad object' }] });
+    assert.match(withDetail, /fatal: bad object/);
   });
 
   it('keeps the workflow from passing a branch it could not fetch', () => {
