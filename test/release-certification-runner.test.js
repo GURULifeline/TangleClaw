@@ -76,7 +76,7 @@ async function rejects(fn, code) {
   return caught;
 }
 
-const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], host: 'h' };
+const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h' };
 /**
  * A publication that always succeeds, recording what it was asked.
  * @param {object} [over] - Method overrides
@@ -436,6 +436,9 @@ describe('rc-cert CLI', () => {
 
   it('prints usage and exits 2 for a bad command line', async () => {
     assert.equal((await run(['frobnicate'])).code, 2);
+    const token = await run(['status', '--sha', SHA, '--token', 'secret']);
+    assert.equal(token.code, 2, 'a token on the command line would be visible in ps');
+    assert.match(token.err, /TANGLECLAW_SERVICE_TOKEN/);
     assert.equal((await run(['status'])).code, 2);
     assert.equal((await run(['status', '--sha'])).code, 2);
   });
@@ -461,6 +464,7 @@ describe('rc-cert CLI', () => {
     };
     const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1'], { deps });
     assert.equal(started.code, 0, started.err);
+    assert.equal(store.readRun(base, SHA).manifest.requiredChecksSource, 'branch-protection');
     assert.deepEqual(JSON.parse(started.out), { state: 'running', candidateSha: SHA });
     const status = await run(['status', '--sha', SHA, '--base', base, '--json']);
     assert.equal(JSON.parse(status.out).state, 'running');
@@ -539,8 +543,9 @@ describe('rc-cert CLI', () => {
     const f = fakes([healthy({ server: { checkoutId: runnerLib.worktreeId(wt) } })]);
     const pub = fakePub();
     const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], publication: pub, probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, clock: f.clock }) };
-    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--no-publish-actor'], { deps })).code, 0);
+    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--no-publish-actor', '--required-check', 'test'], { deps })).code, 0);
     assert.equal(pub.calls.admit[0].opts.publishActor, false);
+    assert.equal(pub.calls.admit[0].manifest.requiredChecksSource, 'operator', 'hand-named checks are recorded as an operator override');
     const ok = await run(['publish', '--sha', SHA, '--base', base], { deps });
     assert.deepEqual([ok.code, JSON.parse(ok.out)], [0, { published: true }]);
     const failing = fakePub({ publishCurrent: async (log) => { log({ event: 'publish-failed', code: 'PUBLISH_FAILED' }); return { published: false, code: 'PUBLISH_FAILED' }; } });

@@ -84,6 +84,13 @@ to be able to trust it. That creates two problems:
    is what makes the manifest digest binding. A later chunk schedules the producer that writes the
    combined file.
 
+8. **Only canonical thresholds certify, and the record says where the checks came from** (PR
+   review of #1962, relayed by the PM). `accept` refuses a run judged by non-canonical thresholds,
+   and a published `passed` scorecard must carry `canonicalThresholds: true`, so a smoke run can
+   never be mistaken for a certification. `requiredChecksSource` (`branch-protection` or
+   `operator`) is published with the admission and every scorecard, so an auditor can tell a
+   candidate judged by the repository's own rules from one judged by a hand-picked list.
+
 ## Consequences
 
 - Until the owner creates the `metrics` ruleset, the digest is published but not tamper-proof. The

@@ -63,7 +63,7 @@ function withUmask(mask, fn) {
 /** @returns {object} A manifest for the test candidate. */
 function manifest() {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
     worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, host: 'h'
   });
 }
@@ -397,10 +397,10 @@ describe('store', () => {
     assert.deepEqual(store.readSnapshots(base, SHA).map((s) => s.event.to), ['running', 'extended']);
   });
 
-  it('records an operator acceptance and its snapshot', () => {
+  it('refuses to pass a smoke run, and records an operator decision and its snapshot', () => {
     const base = path.join(tmp, 'v1');
     const m = sm.buildManifest({
-      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
       thresholds: { targetQualifiedMs: MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 }
     });
     const s0 = sample(0);
@@ -408,9 +408,11 @@ describe('store', () => {
     tick(base, sample(MIN, { pty: { instance: 's1', attaches: 1, detaches: 1, lastAt: 1_000_000 + 30_000 } }));
     tick(base, sample(2 * MIN, { pty: { instance: 's1', attaches: 2, detaches: 2, lastAt: 1_000_000 + 2 * MIN } }));
     assert.equal(store.readRun(base, SHA).state.state, STATES.AWAITING_REVIEW);
-    const passed = store.updateRun(base, SHA, (state) => sm.accept(state, 'jason', 7));
-    assert.equal(passed.state, STATES.PASSED);
-    assert.equal(store.readSnapshots(base, SHA).at(-1).event.code, 'OPERATOR_ACCEPTED');
+    refuses(() => store.updateRun(base, SHA, (state, man) => sm.accept(state, 'jason', 7, man)), REFUSAL.NOT_CANONICAL);
+    assert.equal(store.readRun(base, SHA).state.state, STATES.AWAITING_REVIEW, 'a smoke run reaches review but never passes');
+    const cancelled = store.updateRun(base, SHA, (state) => sm.cancel(state, 'jason', 7));
+    assert.equal(cancelled.state, STATES.CANCELLED);
+    assert.equal(store.readSnapshots(base, SHA).at(-1).event.code, 'OPERATOR_CANCELLED');
   });
 
   it('refuses a manifest changed after the run began', () => {

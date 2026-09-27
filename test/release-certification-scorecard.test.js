@@ -23,7 +23,7 @@ const T0 = 1_000_000;
  */
 function manifest(thresholds) {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: T0,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: T0,
     worktreePath: WORKTREE, worktreeId: WTID, ttydGeneration: GEN, host: HOST, thresholds
   });
 }
@@ -87,7 +87,8 @@ describe('published documents (#1949 C02)', () => {
 
   it('admits with the manifest digest and the rules the run is judged by', () => {
     const a = sc.admissionRecord(manifest(), DIGEST);
-    assert.deepEqual(Object.keys(a).sort(), ['admittedAt', 'candidateSha', 'canonicalThresholds', 'manifestDigest', 'repository', 'requiredChecks', 'schema', 'thresholds', 'version']);
+    assert.deepEqual(Object.keys(a).sort(), ['admittedAt', 'candidateSha', 'canonicalThresholds', 'manifestDigest', 'repository', 'requiredChecks', 'requiredChecksSource', 'schema', 'thresholds', 'version']);
+    assert.equal(a.requiredChecksSource, 'branch-protection');
     assert.equal(a.manifestDigest, DIGEST);
     assert.equal(a.canonicalThresholds, true);
     assert.equal(a.admittedAt, T0);
@@ -106,6 +107,7 @@ describe('published documents (#1949 C02)', () => {
     assert.deepEqual(c.extensions, { PROBE_UNKNOWN: { intervals: 1, lostMs: MIN } });
     assert.equal(c.publishSeq, 3);
     assert.equal(c.failure, null);
+    assert.equal(c.requiredChecksSource, 'branch-protection', 'readers can see where the required checks came from');
   });
 
   it('publishes only a failure code and time, not the per-probe reasons', () => {
@@ -120,9 +122,10 @@ describe('published documents (#1949 C02)', () => {
     const m = manifest(FAST);
     const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(2, 2 * MIN))]).state;
     assert.equal(reviewing.state, STATES.AWAITING_REVIEW);
-    const passed = sm.accept(reviewing, 'jason', T0 + 3 * MIN).state;
-    assert.deepEqual(sc.scorecard(passed, m, T0 + 3 * MIN, 1).acceptance, { actor: 'jason', at: T0 + 3 * MIN });
-    const quiet = sc.scorecard(passed, m, T0 + 3 * MIN, 1, { publishActor: false });
+    const passed = sm.accept(reviewing, 'jason', T0 + 3 * MIN, manifest()).state;
+    const canonical = manifest();
+    assert.deepEqual(sc.scorecard(passed, canonical, T0 + 3 * MIN, 1).acceptance, { actor: 'jason', at: T0 + 3 * MIN });
+    const quiet = sc.scorecard(passed, canonical, T0 + 3 * MIN, 1, { publishActor: false });
     assert.deepEqual(quiet.acceptance, { at: T0 + 3 * MIN });
     assert.deepEqual(sc.validateScorecard(quiet), []);
   });
@@ -207,6 +210,8 @@ describe('validators refuse what the builder would never emit', () => {
     ['a passed scorecard with no acceptance', (d) => { d.state = 'passed'; }, 'FIELD:acceptance'],
     ['a negative time', (d) => { d.qualifiedMs = -1; }, 'FIELD:qualifiedMs'],
     ['a publish sequence of zero', (d) => { d.publishSeq = 0; }, 'FIELD:publishSeq'],
+    ['a passed state under non-canonical thresholds', (d) => { d.state = 'passed'; d.acceptance = { actor: 'op', at: 1 }; d.canonicalThresholds = false; }, 'FIELD:canonicalThresholds'],
+    ['an unknown required-checks source', (d) => { d.requiredChecksSource = 'guess'; }, 'FIELD:requiredChecksSource'],
     ['failure reasons, which the builder drops', (d) => { d.state = 'failed'; d.failure = { code: 'LEAK_FIRED', at: 1, reasons: [{ probe: 'ttyd' }] }; }, 'FIELD:failure'],
     ['a PTY server instance id, which holds a pid', (d) => { d.pty.instance = '4242-1-ab'; }, 'FIELD:pty'],
     ['an extra field in the PTY target', (d) => { d.pty.target.host = HOST; }, 'FIELD:pty'],
@@ -232,6 +237,7 @@ describe('validators refuse what the builder would never emit', () => {
     assert.deepEqual(sc.validateAdmission(badDigest), ['FIELD:manifestDigest']);
     assert.deepEqual(sc.validateAdmission(missing), ['FIELD:thresholds', 'FIELD:canonicalThresholds']);
     assert.deepEqual(sc.validateAdmission({ ...a(), host: HOST }), ['UNKNOWN_FIELD:host']);
+    assert.deepEqual(sc.validateAdmission({ ...a(), requiredChecksSource: undefined }), ['FIELD:requiredChecksSource']);
     assert.deepEqual(sc.validateAdmission({ ...a(), requiredChecks: ['test', 'test'] }), ['FIELD:requiredChecks']);
     assert.deepEqual(sc.validateAdmission({ ...a(), requiredChecks: Array.from({ length: 65 }, (_, i) => `c${i}`) }), ['FIELD:requiredChecks']);
     assert.deepEqual(sc.validateAdmission({ ...a(), thresholds: { ...a().thresholds, extra: 1 } }), ['FIELD:thresholds', 'FIELD:canonicalThresholds']);

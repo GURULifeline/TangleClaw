@@ -203,7 +203,7 @@ describe('publisher: git mechanics against a real remote', () => {
  */
 function manifest() {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: T0,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: T0,
     worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h'
   });
 }
@@ -357,7 +357,7 @@ describe('runner: fail-closed start and background publishing', () => {
    * @returns {object} Probes
    */
   const probes = () => ({ collect: async () => ({ observations: obs(), diagnostics: {} }) });
-  const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/wt', worktreeId: WTID, requiredChecks: ['test'], host: 'h' };
+  const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h' };
 
   it('refuses to start with no publisher', async () => {
     await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: probes() }).start(SPEC), REFUSAL.ADMISSION_UNPUBLISHED);

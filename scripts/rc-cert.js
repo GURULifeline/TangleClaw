@@ -14,8 +14,9 @@
  *
  * Common flags: `--base <abs>` (evidence base; else config.json
  * `releaseCertification.baseDir`, else `<tangleclawHome>/release-certification/v1`),
- * `--api <url>` (the server under test; else `TANGLECLAW_API`), `--token <t>`
- * (else `TANGLECLAW_SERVICE_TOKEN`), `--ca <file>` (for an https API).
+ * `--api <url>` (the server under test; else `TANGLECLAW_API`), `--ca <file>`
+ * (for an https API). A gated API's token is read from `TANGLECLAW_SERVICE_TOKEN`
+ * only, never a flag, so it cannot show up in `ps`.
  *
  * `--thresholds <json>` on start overrides the judging thresholds for a smoke
  * run. Such a run reports `canonicalThresholds: false` and never certifies a
@@ -46,7 +47,7 @@ const USAGE = [
   '       rc-cert cancel --sha <40> --actor <id>',
   '       rc-cert publish --sha <40>',
   '       rc-cert list',
-  'common: [--base <abs>] [--api <url>] [--token <t>] [--ca <file>]'
+  'common: [--base <abs>] [--api <url>] [--ca <file>]; a gated API reads its token from TANGLECLAW_SERVICE_TOKEN'
 ].join('\n');
 const REPEATABLE = new Set(['required-check']);
 
@@ -65,6 +66,7 @@ function parseFlags(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new UsageError(`unexpected argument ${arg}`);
     const name = arg.slice(2);
+    if (name === 'token') throw new UsageError('--token is not accepted, because a flag is visible in `ps`; set TANGLECLAW_SERVICE_TOKEN');
     if (BOOLEAN.has(name)) {
       flags[name] = true;
       continue;
@@ -169,7 +171,8 @@ function _probeCtx(flags, env, spec) {
   if (!apiBase) throw new UsageError('--api or TANGLECLAW_API is required');
   return {
     apiBase,
-    token: flags.token || env.TANGLECLAW_SERVICE_TOKEN || null,
+    // Environment only: a token on the command line is visible to every user in `ps`.
+    token: env.TANGLECLAW_SERVICE_TOKEN || null,
     ca: flags.ca ? fs.readFileSync(flags.ca) : null,
     worktreePath: spec.worktreePath,
     candidateSha: spec.sha,
@@ -252,7 +255,7 @@ async function cmdStatus(c) {
 async function cmdDecide(c, op) {
   const sha = _need(c.flags, 'sha');
   const actor = _need(c.flags, 'actor');
-  const state = store.updateRun(c.base, sha, (s) => op(s, actor, Date.now()), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
+  const state = store.updateRun(c.base, sha, (s, manifest) => op(s, actor, Date.now(), manifest), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
   // The decision is committed; publishing it is best effort and a failure is
   // recorded for retry (`rc-cert publish`), never undoing the decision.
   const { manifest } = store.readRun(c.base, sha);
@@ -268,17 +271,19 @@ async function cmdDecide(c, op) {
 }
 
 /**
- * The required checks for `start`: the flags, else main's branch protection.
- * None at all is refused, since GitHub could then never fail the candidate.
+ * The required checks for `start`, with where they came from: the flags
+ * (`operator`), else main's branch protection. None at all is refused, since
+ * GitHub could then never fail the candidate.
  * @param {object} c - Command context
  * @param {string} repo - `owner/name`
- * @returns {Promise<string[]>} Check names
+ * @returns {Promise<{checks: string[], source: string}>} Check names and their provenance
  */
 async function _startChecks(c, repo) {
-  const checks = c.flags['required-check'] || await (c.deps.requiredChecks || probesLib.requiredChecks)(repo);
+  if (c.flags['required-check']) return { checks: c.flags['required-check'], source: 'operator' };
+  const checks = await (c.deps.requiredChecks || probesLib.requiredChecks)(repo);
   if (!checks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
   if (checks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
-  return checks;
+  return { checks, source: 'branch-protection' };
 }
 
 /**
@@ -292,7 +297,7 @@ async function cmdStart(c) {
   const worktreePath = _absolute(_need(c.flags, 'worktree'), '--worktree');
   const repo = c.flags.repo || await (c.deps.repository || probesLib.repository)(worktreePath);
   if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
-  const requiredChecks = await _startChecks(c, repo);
+  const { checks: requiredChecks, source: requiredChecksSource } = await _startChecks(c, repo);
   const version = runnerLib.worktreeVersion(worktreePath);
   if (!version) throw new UsageError('the worktree has no readable version.json');
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
@@ -301,7 +306,7 @@ async function cmdStart(c) {
   const publication = await _publication(c, sha, worktreePath, facts.remoteUrl);
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const state = await runner.start({
-    version, repository: repo, worktreePath, requiredChecks, thresholds,
+    version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
     publishActor: !c.flags['no-publish-actor'], remoteUrl: facts.remoteUrl
   });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);

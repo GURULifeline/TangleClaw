@@ -19,7 +19,7 @@ const HOUR = 60 * MIN;
  */
 function manifest(thresholds) {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
     worktreePath: '/tmp/rc-wt', worktreeId: WTID, ttydGeneration: GEN, host: 'test-host', thresholds
   });
 }
@@ -107,12 +107,13 @@ describe('buildManifest', () => {
     ['a zero threshold', { thresholds: { maxIntervalMs: 0 } }],
     ['a missing ttyd generation', { ttydGeneration: '' }],
     ['a malformed repository', { repository: 'not a repo' }],
+    ['an unknown required-checks source', { requiredChecksSource: 'guess' }],
     ['no required checks, which would pass GitHub vacuously', { requiredChecks: [] }],
     ['a worktree id that is not a sha256', { worktreeId: 'abc' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
-        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1,
+        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1,
         worktreePath: '/w', worktreeId: WTID, ttydGeneration: GEN, ...input
       }), REFUSAL.INVALID_MANIFEST);
     });
@@ -334,7 +335,8 @@ describe('target, PTY use and review', () => {
     const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
     assert.equal(state.state, STATES.AWAITING_REVIEW);
     assert.equal(events.at(-1).code, TRANSITION.TARGET_REACHED);
-    const passed = sm.accept(state, 'jason', 5);
+    refuses(() => sm.accept(state, 'jason', 5, m), REFUSAL.NOT_CANONICAL);
+    const passed = sm.accept(state, 'jason', 5, manifest());
     assert.equal(passed.state.state, STATES.PASSED);
     assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: 5 });
     assert.equal(passed.events[0].code, TRANSITION.OPERATOR_ACCEPTED);
@@ -361,8 +363,8 @@ describe('target, PTY use and review', () => {
 
   it('refuses every operation on a passed run', () => {
     const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]).state;
-    const passed = sm.accept(reviewing, 'jason', 5).state;
-    refuses(() => sm.accept(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
+    const passed = sm.accept(reviewing, 'jason', 5, manifest()).state;
+    refuses(() => sm.accept(passed, 'jason', 6, manifest()), REFUSAL.ALREADY_TERMINAL);
     refuses(() => sm.cancel(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
     refuses(() => sm.reduce(passed, m, sample(4 * MIN)), REFUSAL.ALREADY_TERMINAL);
   });
@@ -374,7 +376,7 @@ describe('target, PTY use and review', () => {
     for (const [name, terminal] of [['cancelled', cancelled], ['failed', failed]]) {
       for (const [op, fn] of [
         ['reduce', () => sm.reduce(terminal, m, sample(2 * MIN))],
-        ['accept', () => sm.accept(terminal, 'jason', 6)],
+        ['accept', () => sm.accept(terminal, 'jason', 6, manifest())],
         ['cancel', () => sm.cancel(terminal, 'jason', 6)]
       ]) {
         const err = refuses(fn, REFUSAL.ALREADY_TERMINAL);
@@ -390,8 +392,8 @@ describe('target, PTY use and review', () => {
 
   it('refuses acceptance before review and from a malformed actor', () => {
     const { state } = run(m, [sample(MIN)]);
-    refuses(() => sm.accept(state, 'jason', 5), REFUSAL.NOT_AWAITING_REVIEW);
-    refuses(() => sm.accept(state, 'has space', 5), REFUSAL.INVALID_ACTOR);
+    refuses(() => sm.accept(state, 'jason', 5, manifest()), REFUSAL.NOT_AWAITING_REVIEW);
+    refuses(() => sm.accept(state, 'has space', 5, manifest()), REFUSAL.INVALID_ACTOR);
   });
 
   it('holds extended at the target until the PTY target is met, then goes to review', () => {
