@@ -83,11 +83,12 @@ const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt',
  * @returns {object} Fake publication
  */
 function fakePub(over = {}) {
-  const calls = { admit: [], update: [] };
+  const calls = { admit: [], publish: 0 };
   return {
     calls,
+    publishedDigest: async () => null,
     admit: async (manifest, digest, opts) => { calls.admit.push({ manifest, digest, opts }); return { verifiedAt: 1 }; },
-    update: async (run) => { calls.update.push(run); return { seq: calls.update.length, changed: true }; },
+    publishCurrent: async () => { calls.publish += 1; return { published: true, seq: calls.publish }; },
     due: () => true,
     recordFailure: () => ({ nextAttemptAt: 99 }),
     readStatus: () => ({}),
@@ -467,7 +468,7 @@ describe('rc-cert CLI', () => {
     assert.match((await run(['status', '--sha', SHA, '--base', base])).out, /running/);
     assert.equal((await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).code, 3);
     assert.deepEqual(JSON.parse((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).out), { state: 'cancelled', published: true });
-    assert.equal(deps.publication.calls.update.at(-1).state.state, 'cancelled', 'the decision is published at once');
+    assert.equal(deps.publication.calls.publish, 1, 'the decision is published at once');
     assert.deepEqual(JSON.parse((await run(['list', '--base', base])).out), [SHA]);
   });
 
@@ -542,10 +543,12 @@ describe('rc-cert CLI', () => {
     assert.equal(pub.calls.admit[0].opts.publishActor, false);
     const ok = await run(['publish', '--sha', SHA, '--base', base], { deps });
     assert.deepEqual([ok.code, JSON.parse(ok.out)], [0, { published: true }]);
-    const failing = fakePub({ update: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'offline'); } });
+    const failing = fakePub({ publishCurrent: async (log) => { log({ event: 'publish-failed', code: 'PUBLISH_FAILED' }); return { published: false, code: 'PUBLISH_FAILED' }; } });
     const bad = await run(['publish', '--sha', SHA, '--base', base], { deps: { ...deps, publication: failing } });
     assert.deepEqual([bad.code, JSON.parse(bad.out)], [3, { published: false }]);
     assert.match(bad.err, /publish-failed/);
+    const status = JSON.parse((await run(['status', '--sha', SHA, '--base', base, '--json'])).out);
+    assert.deepEqual(Object.keys(status.publication).sort(), ['admissionVerifiedAt', 'failures', 'lastError', 'lastPublishedAt', 'lastPublishedSeq', 'nextAttemptAt']);
   });
 
   it('refuses to start when main requires no checks', async () => {

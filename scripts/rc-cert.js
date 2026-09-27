@@ -9,6 +9,7 @@
  *   rc-cert status --sha <40> [--json]
  *   rc-cert accept --sha <40> --actor <id>
  *   rc-cert cancel --sha <40> --actor <id>
+ *   rc-cert publish --sha <40>   (publish the run's standing to the metrics branch now)
  *   rc-cert list
  *
  * Common flags: `--base <abs>` (evidence base; else config.json
@@ -191,9 +192,11 @@ function _probeCtx(flags, env, spec) {
 async function _publication(c, sha, worktreePath, remoteUrl) {
   if (c.deps.publication) return c.deps.publication;
   const facts = await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
-  const draft = publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher: null });
-  const target = remoteUrl || draft.readStatus().remoteUrl || facts.remoteUrl;
-  const publisher = publisherLib.createPublisher({ dir: path.join(c.base, '_metrics'), remoteUrl: target, identity: facts.identity });
+  const target = remoteUrl || publicationLib.readStatus(c.base, sha).remoteUrl || facts.remoteUrl;
+  const publisher = publisherLib.createPublisher({
+    dir: path.join(c.base, '_metrics'), remoteUrl: target, identity: facts.identity,
+    onRecover: (fact) => c.emit({ event: 'recovered', ...fact })
+  });
   return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
 }
 
@@ -206,10 +209,9 @@ async function cmdPublish(c) {
   const sha = _need(c.flags, 'sha');
   const { manifest } = store.readRun(c.base, sha);
   const publication = await _publication(c, sha, manifest.private.worktreePath, null);
-  const runner = runnerLib.createRunner({ base: c.base, candidateSha: sha, probes: null, publication, log: c.emit });
-  const ok = await runner.publishNow();
-  c.out.write(`${JSON.stringify({ published: ok })}\n`);
-  return ok ? 0 : 3;
+  const { published } = await publication.publishCurrent(c.emit);
+  c.out.write(`${JSON.stringify({ published })}\n`);
+  return published ? 0 : 3;
 }
 
 /**
@@ -228,8 +230,15 @@ async function cmdList(c) {
  * @returns {Promise<number>} Exit code
  */
 async function cmdStatus(c) {
-  const { manifest, state } = store.readRun(c.base, _need(c.flags, 'sha'));
-  const summary = sm.summarize(state, manifest, Date.now());
+  const sha = _need(c.flags, 'sha');
+  const { manifest, state } = store.readRun(c.base, sha);
+  const p = publicationLib.readStatus(c.base, sha);
+  const publication = {
+    admissionVerifiedAt: p.admission ? p.admission.verifiedAt : null,
+    lastPublishedSeq: p.lastPublishedSeq, lastPublishedAt: p.lastPublishedAt,
+    failures: p.failures, lastError: p.lastError, nextAttemptAt: p.nextAttemptAt
+  };
+  const summary = { ...sm.summarize(state, manifest, Date.now()), publication };
   c.out.write(c.flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
   return 0;
 }
@@ -250,7 +259,7 @@ async function cmdDecide(c, op) {
   let published = false;
   try {
     const publication = await _publication(c, sha, manifest.private.worktreePath, null);
-    published = await runnerLib.createRunner({ base: c.base, candidateSha: sha, probes: null, publication, log: c.emit }).publishNow();
+    ({ published } = await publication.publishCurrent(c.emit));
   } catch (e) {
     c.emit({ event: 'publish-failed', code: e.code || null });
   }
@@ -401,6 +410,8 @@ function _human(s) {
   if (s.failure) lines.push(`failed ${s.failure.code} at sample ${s.failure.sampleSeq}`);
   if (s.acceptance) lines.push(`accepted by ${s.acceptance.actor}`);
   if (s.cancellation) lines.push(`cancelled by ${s.cancellation.actor}`);
+  const p = s.publication;
+  if (p) lines.push(p.lastError ? `publishing FAILING: ${p.lastError} (${p.failures} in a row), next attempt ${p.nextAttemptAt}` : `published #${p.lastPublishedSeq} at ${p.lastPublishedAt}`);
   return `${lines.join('\n')}\n`;
 }
 

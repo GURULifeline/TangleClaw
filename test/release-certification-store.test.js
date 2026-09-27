@@ -321,22 +321,41 @@ describe('store', () => {
     assert.deepEqual(store.listRuns(base), [SHA]);
   });
 
-  it('stages a manifest before the run exists, and reuses it rather than replacing it', () => {
+  it('stages by what the metrics branch holds: fresh when unpublished, reused when its admission is public', () => {
     const base = path.join(tmp, 'v1');
     const facts = [];
-    const first = store.stageManifest(base, manifest(), { onRecover: (f) => facts.push(f.kind) });
+    const onRecover = (f) => facts.push(f.kind);
+    const later = sm.buildManifest({ ...manifest(), worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, createdAt: 9999 });
+    const first = store.stageManifest(base, manifest(), null, { onRecover });
     assert.equal(first.reused, false);
     assert.equal(first.digest, store.manifestDigest(store.manifestText(manifest())));
-    const later = sm.buildManifest({ ...manifest(), worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, createdAt: 9999 });
-    const again = store.stageManifest(base, later, { onRecover: (f) => facts.push(f.kind) });
+    const unpublished = store.stageManifest(base, later, null, { onRecover });
+    assert.equal(unpublished.reused, false);
+    assert.notEqual(unpublished.digest, first.digest, 'an admission nobody published leaves no settings behind');
+    const again = store.stageManifest(base, manifest(), unpublished.digest, { onRecover });
     assert.equal(again.reused, true);
-    assert.equal(again.digest, first.digest, 'a retried start keeps the admission it may already have published');
-    assert.deepEqual(facts, ['staged-manifest-reused']);
+    assert.equal(again.digest, unpublished.digest, 'a public admission pins the staged manifest');
+    refuses(() => store.stageManifest(base, manifest(), 'e'.repeat(64)), REFUSAL.ADMISSION_CONFLICT);
+    assert.deepEqual(facts, ['unpublished-staged-manifest-replaced', 'staged-manifest-reused']);
     const s = sample(0);
-    const state = store.createRun(base, again.manifest, sm.admit(again.manifest, s), s, { onRecover: (f) => facts.push(f.kind) });
-    assert.equal(state.manifestDigest, first.digest);
-    assert.deepEqual(facts, ['staged-manifest-reused'], 'committing the staged bytes is not a recovery');
-    refuses(() => store.stageManifest(base, manifest()), REFUSAL.RUN_EXISTS);
+    const state = store.createRun(base, again.manifest, sm.admit(again.manifest, s), s, { onRecover });
+    assert.equal(state.manifestDigest, unpublished.digest);
+    assert.equal(facts.length, 2, 'committing the staged bytes is not a recovery');
+    refuses(() => store.stageManifest(base, manifest(), null), REFUSAL.RUN_EXISTS);
+  });
+
+  it('keeps a numbered transition log that the committed state counts', () => {
+    const { base } = created();
+    tick(base, sample(MIN, { server: null }));
+    tick(base, sample(2 * MIN));
+    tick(base, sample(3 * MIN));
+    const { state, paths: p } = store.readRun(base, SHA);
+    assert.equal(state.transitionCount, 3);
+    assert.deepEqual(store.readTransitions(base, SHA).map((e) => e.to), ['running', 'extended', 'running']);
+    privateFs.appendLine(p.transitions, JSON.stringify({ n: 4, event: { to: 'failed' } }));
+    fs.rmSync(p.snapshots, { recursive: true });
+    assert.deepEqual(store.readTransitions(base, SHA).map((e) => e.to), ['running', 'extended', 'running'], 'uncommitted lines are ignored and lost snapshots do not matter');
+    assert.equal(mode(p.transitions), 0o600);
   });
 
   it('refuses a second run for the same candidate', () => {

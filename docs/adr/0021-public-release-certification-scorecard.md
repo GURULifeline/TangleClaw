@@ -51,8 +51,10 @@ to be able to trust it. That creates two problems:
    identical record is then a no-op, not a collision with the write-once rule.
 
 4. **Publishing failures do not extend the soak (ruling Q3).** The scorecard is a view of the
-   evidence, not evidence. After admission, a failed publish is recorded, alerted and retried with
-   backoff, and qualified time is unaffected. Ruling A1's "GitHub failure extends" applies to the
+   evidence, not evidence. After admission, a failed publish is recorded in `publish.json`, emitted
+   as a `publish-failed` event (the runner's alert), shown by `rc-cert status`, and retried with
+   backoff. Qualified time is unaffected. A final publish that fails when the runner exits is
+   retried by hand with `rc-cert publish`. Ruling A1's "GitHub failure extends" applies to the
    GitHub *checks probe*, which judges the candidate, not to the push of our own scorecard. C04
    refuses promotion until every required fact is published.
 
@@ -60,15 +62,17 @@ to be able to trust it. That creates two problems:
    without an operator present during a 72-hour run.
    - **What it pushes:** only the allowlisted documents, only under `release-certification/v1/` on
      `metrics`, never to a source branch and never by force.
-   - **How it pushes:** from its own private clone of `metrics`, never from the candidate's
-     worktree (which must stay exactly the candidate). The repository's git hooks are off, because
+   - **How it pushes:** from its own private clone of `metrics` (one per remote, under one lock, so
+     runs of different candidates never share a working tree mid-publish), never from the
+     candidate's worktree (which must stay exactly the candidate). At most one publish a minute,
+     except a final state. The repository's git hooks are off, because
      they govern source work. Commits carry the operator's configured git identity.
    - **When the remote moved first:** a push rejected because another publisher got there first is
      rebuilt from the new tip and retried.
 
 6. **The operator's actor id is published by default.** An acceptance or cancellation publishes the
    identifier the operator chose (for example `jason`), because a public certification should say
-   who passed it. The builder can withhold it and publish only the time (`scorecard(…, { publishActor: false })`); the publisher's `--no-publish-actor` switch arrives with C02's publisher. Changing this
+   who passed it. `rc-cert start --no-publish-actor` withholds it for that run, and only the time is published. Changing this
    default is a privacy decision and should come back here, not happen in code.
 
 ## Consequences

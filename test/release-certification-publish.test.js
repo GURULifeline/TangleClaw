@@ -149,9 +149,36 @@ describe('publisher: git mechanics against a real remote', () => {
     await rejects(() => pub.publish(() => ({ [IDX]: 'x' }), 'x'), REFUSAL.PUBLISH_FAILED);
   });
 
-  it('keeps its clone private', async () => {
-    await publisher().publish(() => ({ [IDX]: 'x\n' }), 'x');
+  it('keeps its clones private, one per remote', async () => {
+    const other = path.join(tmp, 'other.git');
+    execFileSync('git', ['init', '-q', '--bare', other]);
+    const a = publisher();
+    const b = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: other, identity: ID });
+    await a.publish(() => ({ [IDX]: 'a\n' }), 'a');
+    await b.publish(() => ({ [IDX]: 'b\n' }), 'b');
+    assert.notEqual(a.cloneDir, b.cloneDir);
+    assert.equal(remoteFile(IDX), 'a\n', 'each candidate publishes to its own remote');
+    assert.equal(execFileSync('git', ['--git-dir', other, 'show', `metrics:${IDX}`], { encoding: 'utf8' }), 'b\n');
     assert.equal(fs.statSync(path.join(tmp, '_metrics')).mode & 0o777, 0o700);
+  });
+
+  it('serializes publishes that share a clone', async () => {
+    const a = publisher();
+    const b = publisher();
+    const [ra, rb] = await Promise.all([
+      a.publish(() => ({ [P.scorecard]: 'a\n' }), 'a'),
+      b.publish((read) => ({ [IDX]: `b after ${read(P.scorecard) === null ? 'nothing' : 'a'}\n` }), 'b')
+    ]);
+    assert.equal(ra.changed && rb.changed, true);
+    assert.equal(remoteCommits(), 2);
+    assert.equal(remoteFile(P.scorecard), 'a\n');
+  });
+
+  it('keeps an excerpt of git\'s error when a publish fails', async () => {
+    const pub = publisherLib.createPublisher({ dir: path.join(tmp, '_m'), remoteUrl: path.join(tmp, 'missing.git'), identity: ID });
+    const err = await rejects(() => pub.publish(() => ({ [IDX]: 'x' }), 'x'), REFUSAL.PUBLISH_FAILED);
+    assert.equal(typeof err.details.stderr, 'string');
+    assert.ok(err.details.stderr.length > 0 && err.details.stderr.length <= 300);
   });
 
   it('reads the worktree origin and the operator identity', async () => {
@@ -217,6 +244,13 @@ describe('publication: fail-closed admission and forward-only updates', () => {
     assert.equal(p.readStatus().remoteUrl, remote);
   });
 
+  it('reports the digest the metrics branch already holds for this candidate', async () => {
+    const { publication: p } = publication();
+    assert.equal(await p.publishedDigest(), null);
+    await p.admit(manifest(), 'd'.repeat(64));
+    assert.equal(await p.publishedDigest(), 'd'.repeat(64));
+  });
+
   it('re-admits the identical record as a no-op, and refuses a different one', async () => {
     const { publication: p } = publication();
     await p.admit(manifest(), 'd'.repeat(64));
@@ -269,6 +303,29 @@ describe('publication: fail-closed admission and forward-only updates', () => {
     await rejects(() => p.update(run), REFUSAL.EVENTS_DIVERGED);
   });
 
+  it('never throws from publishCurrent, and survives an unreadable publish.json', async () => {
+    const { publication: p } = publication();
+    const log = [];
+    assert.deepEqual(await p.publishCurrent((e) => log.push(e)), { published: false, code: REFUSAL.RUN_NOT_FOUND });
+    assert.equal(log.at(-1).event, 'publish-failed');
+    fs.writeFileSync(store.runPaths(base, SHA).publish, '{broken');
+    assert.equal(p.readStatus().lastError, 'STATUS_UNREADABLE');
+    assert.equal(p.due({ transitioned: true, state: 'running' }), true);
+  });
+
+  it('publishes at most once a minute unless the run is final', async () => {
+    const { publication: p, clock } = publication();
+    const m = manifest();
+    await p.admit(m, 'd'.repeat(64));
+    const { state, events } = sm.admit(m, { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() });
+    await p.update({ state: { ...state, manifestDigest: 'd'.repeat(64) }, manifest: m, events });
+    clock.t += 30_000;
+    assert.equal(p.due({ transitioned: true, state: 'extended' }), false, 'a flapping run does not push every tick');
+    assert.equal(p.due({ transitioned: false, state: 'failed' }), true, 'a final state is never held back');
+    clock.t += 30_000;
+    assert.equal(p.due({ transitioned: true, state: 'running' }), true);
+  });
+
   it('is due after a transition, a terminal state or the heartbeat, but never inside a backoff', async () => {
     const { publication: p, clock } = publication();
     await p.admit(manifest(), 'd'.repeat(64));
@@ -277,6 +334,7 @@ describe('publication: fail-closed admission and forward-only updates', () => {
     const { state, events } = sm.admit(m, { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() });
     await p.update({ state: { ...state, manifestDigest: 'd'.repeat(64) }, manifest: m, events });
     assert.equal(p.due({ transitioned: false, state: 'running' }), false);
+    clock.t += publicationLib.MIN_INTERVAL_MS;
     assert.equal(p.due({ transitioned: true, state: 'extended' }), true);
     assert.equal(p.due({ transitioned: false, state: 'failed' }), true);
     clock.t += publicationLib.HEARTBEAT_MS;
@@ -302,27 +360,39 @@ describe('runner: fail-closed start and background publishing', () => {
     assert.deepEqual(store.listRuns(base), []);
   });
 
-  it('commits no run when the admission cannot be published, and reuses the staged manifest on retry', async () => {
-    const digests = [];
-    let fail = true;
-    const pub = {
-      admit: async (m, digest) => {
-        digests.push(digest);
-        if (fail) throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'offline');
-        return { verifiedAt: 1 };
-      },
-      update: async () => ({ seq: 1, changed: true }), due: () => false, recordFailure: () => ({}), readStatus: () => ({})
-    };
+  it('commits no run when the admission cannot be published, and starts fresh when it never became public', async () => {
     let t = T0;
     const clock = { wall: () => t, mono: () => t - T0 };
-    await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: pub }).start(SPEC), REFUSAL.PUBLISH_FAILED);
+    const offline = { publish: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'offline'); }, read: async () => null };
+    await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: publication(offline).publication }).start(SPEC), REFUSAL.PUBLISH_FAILED);
     assert.deepEqual(store.listRuns(base), [], 'no run began unpublished');
-    fail = false;
+    const staleDigest = store.manifestDigest(fs.readFileSync(store.runPaths(base, SHA).manifest, 'utf8'));
     t += 10 * MIN;
-    const state = await runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: pub }).start(SPEC);
+    const state = await runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: publication().publication }).start(SPEC);
     assert.equal(state.state, STATES.RUNNING);
-    assert.equal(digests[0], digests[1], 'the retry published the same admission');
-    assert.equal(store.readRun(base, SHA).state.manifestDigest, digests[0]);
+    assert.notEqual(state.manifestDigest, staleDigest, 'the unpublished attempt left no settings behind');
+    assert.equal(JSON.parse(remoteFile(P.admission)).manifestDigest, state.manifestDigest);
+  });
+
+  it('reuses the staged manifest when a crashed start had already made its admission public', async () => {
+    let t = T0;
+    const clock = { wall: () => t, mono: () => t - T0 };
+    const real = publisher();
+    let crash = true;
+    const crashAfterPublish = {
+      publish: real.publish,
+      read: async (rel) => {
+        const text = await real.read(rel);
+        if (crash && text !== null) { crash = false; throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'crashed before read-back'); }
+        return text;
+      }
+    };
+    await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: publication(crashAfterPublish).publication }).start(SPEC), REFUSAL.PUBLISH_FAILED);
+    const published = JSON.parse(remoteFile(P.admission)).manifestDigest;
+    t += 10 * MIN;
+    const state = await runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: publication().publication }).start(SPEC);
+    assert.equal(state.manifestDigest, published, 'the retry kept the public admission');
+    assert.equal(remoteCommits(), 1);
   });
 
   it('admits end to end through a real remote, then publishes each transition without delaying the tick', async () => {
@@ -346,26 +416,42 @@ describe('runner: fail-closed start and background publishing', () => {
   });
 
   it('records a failed publish with a backoff and never changes certification state', async () => {
-    const recorded = [];
-    const pub = {
-      admit: async () => ({ verifiedAt: 1 }),
-      update: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'offline'); },
-      due: () => true,
-      recordFailure: (e) => { recorded.push(e.code); return { nextAttemptAt: 42 }; },
-      readStatus: () => ({})
+    const real = publisher();
+    let offline = false;
+    const flaky = {
+      publish: async (...a) => { if (offline) throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'offline'); return real.publish(...a); },
+      read: real.read
     };
+    const { publication: p, clock: pc } = publication(flaky);
     const log = [];
     let t = T0;
     const clock = { wall: () => t, mono: () => t - T0 };
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: pub, log: (e) => log.push(e) });
+    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: p, log: (e) => log.push(e) });
     await r.start(SPEC);
+    offline = true;
     t += MIN;
     const before = await r.tick();
     assert.equal(await r.publishNow(), false);
-    assert.deepEqual(recorded.slice(-1), [REFUSAL.PUBLISH_FAILED]);
-    assert.equal(log.filter((e) => e.event === 'publish-failed').at(-1).nextAttemptAt, 42);
+    const failed = log.filter((e) => e.event === 'publish-failed').at(-1);
+    assert.equal(failed.code, REFUSAL.PUBLISH_FAILED);
+    assert.equal(p.readStatus().failures, 2, 'the tick\'s background publish and this one both failed');
+    assert.equal(failed.nextAttemptAt, pc.t + publicationLib.backoffMs(2));
     const after = store.readRun(base, SHA).state;
     assert.equal(after.qualifiedMs, before.qualifiedMs);
     assert.deepEqual(after.extensions, before.extensions);
+  });
+
+  it('releases the runner lock even when the final publish fails', async () => {
+    const real = publisher();
+    const broken = { publish: async () => { throw new Error('boom'); }, read: real.read };
+    const admitting = publication();
+    let t = T0;
+    const clock = { wall: () => t, mono: () => t - T0 };
+    await runnerLib.createRunner({ base, candidateSha: SHA, probes: probes(), clock, publication: admitting.publication }).start(SPEC);
+    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: { collect: async () => ({ observations: obs({ worktree: { dirty: true } }), diagnostics: {} }) }, clock, publication: publication(broken).publication });
+    t += MIN;
+    const state = await r.run({ intervalMs: MIN });
+    assert.equal(state.state, STATES.FAILED);
+    assert.equal(fs.existsSync(store.runPaths(base, SHA).runnerLock), false);
   });
 });
