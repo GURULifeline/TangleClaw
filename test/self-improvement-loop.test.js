@@ -91,7 +91,7 @@ describe('self-improvement loop (#569)', () => {
 
     it('lets the operator approve and reject, recording each as a version', () => {
       const rule = store.sessionRules.create({ content: 'a proposal', projectId: project.id, createdBy: 'ai' });
-      const approved = store.sessionRules.setStatus(rule.id, 'active');
+      const approved = store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'a proposal' });
       assert.equal(approved.status, 'active');
       const rejected = store.sessionRules.setStatus(rule.id, 'rejected');
       assert.equal(rejected.status, 'rejected');
@@ -102,6 +102,119 @@ describe('self-improvement loop (#569)', () => {
     it('rejects an unknown status rather than storing it', () => {
       const rule = store.sessionRules.create({ content: 'x', projectId: project.id });
       assert.throws(() => store.sessionRules.setStatus(rule.id, 'maybe'), (e) => e.code === 'BAD_REQUEST');
+    });
+  });
+
+  // #1053: the operator approves the text a surface showed them, and that
+  // text can be edited by other callers before they click. Approval therefore
+  // names the text and is refused when the rule no longer holds it.
+  describe('approval ratifies only the text it names (#1053)', () => {
+    /**
+     * @param {string} content - Proposal text
+     * @returns {object} A proposed, AI-authored rule
+     */
+    function proposal(content) {
+      return store.sessionRules.create({ content, projectId: project.id, createdBy: 'ai' });
+    }
+
+    it('approves when the named text is what the rule holds', () => {
+      const rule = proposal('always run the linter');
+      const approved = store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'always run the linter' });
+      assert.equal(approved.status, 'active');
+    });
+
+    it('REFUSES when the text was swapped after it was shown, and changes nothing', () => {
+      const rule = proposal('always run the linter');
+      store.sessionRules.update(rule.id, { content: 'never run the linter', changedBy: 'ai' });
+      const versionsBefore = store.sessionRules.listVersions(rule.id).length;
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'always run the linter' }),
+        (err) => err.code === 'CONTENT_CHANGED' && err.currentContent === 'never run the linter'
+      );
+      assert.equal(store.sessionRules.get(rule.id).status, 'proposed', 'a refused approval must not activate');
+      assert.equal(store.sessionRules.listVersions(rule.id).length, versionsBefore,
+        'a refused approval must not record a decision');
+    });
+
+    it('refuses a swap made through restore, the other door that rewrites text', () => {
+      const rule = proposal('first text');
+      store.sessionRules.update(rule.id, { content: 'second text' });
+      // The operator is shown 'second text'; a restore puts the first back.
+      store.sessionRules.restore(rule.id, 1);
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'second text' }),
+        (err) => err.code === 'CONTENT_CHANGED' && err.currentContent === 'first text'
+      );
+      assert.equal(store.sessionRules.get(rule.id).status, 'proposed');
+    });
+
+    it('compares exactly against the persisted, already-trimmed text', () => {
+      // Canonicalisation happens where content is written, not at the compare:
+      // the persisted text is the canonical form a surface echoes back.
+      const rule = proposal('   padded rule   ');
+      assert.equal(store.sessionRules.get(rule.id).content, 'padded rule');
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active', { expectedContent: '   padded rule   ' }),
+        (err) => err.code === 'CONTENT_CHANGED'
+      );
+      assert.equal(store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'padded rule' }).status, 'active');
+    });
+
+    it('approves text that was changed and changed back — it is what was shown', () => {
+      const rule = proposal('the shown text');
+      store.sessionRules.update(rule.id, { content: 'a detour' });
+      store.sessionRules.update(rule.id, { content: 'the shown text' });
+      assert.equal(
+        store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 'the shown text' }).status, 'active');
+    });
+
+    it('never compares a rejection, even against stale text', () => {
+      const rule = proposal('original');
+      store.sessionRules.update(rule.id, { content: 'changed' });
+      const rejected = store.sessionRules.setStatus(rule.id, 'rejected', { expectedContent: 'original' });
+      assert.equal(rejected.status, 'rejected');
+    });
+
+    it('makes the comparison part of the write itself, not a read before it', () => {
+      // A read-then-write check is correct only while nothing can run between
+      // the two statements. Putting the text in the UPDATE's WHERE clause, and
+      // deciding by the rows it changed, keeps the check correct whatever runs
+      // concurrently. No single-threaded test can tell the two apart, so this
+      // pins the shape in the source.
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'store.js'), 'utf8');
+      const start = src.indexOf('  setStatus(id, status, opts = {}) {');
+      assert.ok(start !== -1, 'setStatus must exist');
+      const body = src.slice(start, src.indexOf('\n  },', start));
+      assert.match(body, /UPDATE session_rules SET status = \?[^"]*WHERE id = \? AND content = \?/);
+      assert.match(body, /written\.changes === 0/);
+    });
+
+    it('REFUSES an approval that names no text, and changes nothing', () => {
+      const rule = proposal('unnamed approval');
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active'),
+        (err) => err.code === 'EXPECTED_CONTENT_REQUIRED'
+      );
+      assert.equal(store.sessionRules.get(rule.id).status, 'proposed');
+    });
+
+    it('refuses an AI approval as FORBIDDEN before it asks for the text', () => {
+      // The authority refusal comes first: a caller with no authority to
+      // approve is not told what an approval would need.
+      const rule = proposal('self approval');
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active', { changedBy: 'ai' }),
+        (err) => err.code === 'FORBIDDEN'
+      );
+    });
+
+    it('refuses a non-string expectedContent on approval', () => {
+      const rule = proposal('text');
+      assert.throws(
+        () => store.sessionRules.setStatus(rule.id, 'active', { expectedContent: 42 }),
+        (err) => err.code === 'BAD_REQUEST'
+      );
+      assert.equal(store.sessionRules.get(rule.id).status, 'proposed');
     });
   });
 
