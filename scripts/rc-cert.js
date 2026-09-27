@@ -33,14 +33,17 @@ const store = require('../lib/release-certification/store');
 const sm = require('../lib/release-certification/state-machine');
 const probesLib = require('../lib/release-certification/probes');
 const runnerLib = require('../lib/release-certification/runner');
+const publisherLib = require('../lib/release-certification/publisher');
+const publicationLib = require('../lib/release-certification/publication');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
 const USAGE = [
-  'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>]',
+  'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>] [--no-publish-actor]',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
   '       rc-cert accept --sha <40> --actor <id>',
   '       rc-cert cancel --sha <40> --actor <id>',
+  '       rc-cert publish --sha <40>',
   '       rc-cert list',
   'common: [--base <abs>] [--api <url>] [--token <t>] [--ca <file>]'
 ].join('\n');
@@ -48,7 +51,7 @@ const REPEATABLE = new Set(['required-check']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
 class UsageError extends Error {}
-const BOOLEAN = new Set(['json']);
+const BOOLEAN = new Set(['json', 'no-publish-actor']);
 
 /**
  * Parse `--flag value` arguments.
@@ -88,7 +91,7 @@ function resolveBase(flags, configFile = path.join(tangleclawHome.baseDir(), 'co
     text = fs.readFileSync(configFile, 'utf8');
   } catch (e) {
     if (e.code === 'ENOENT') return store.defaultBase();
-    throw e;
+    throw new CertificationError(REFUSAL.STORE_UNSAFE, `config.json could not be read (${e.code || 'error'}), so releaseCertification.baseDir cannot be read`);
   }
   let configured;
   try {
@@ -176,6 +179,40 @@ function _probeCtx(flags, env, spec) {
 }
 
 /**
+ * The publication for a candidate. It publishes to `remoteUrl` when given
+ * (at start, from the worktree's origin), else to the remote its admission
+ * recorded, so a run never changes where it publishes.
+ * @param {object} c - Command context
+ * @param {string} sha - Candidate SHA
+ * @param {string} worktreePath - Candidate worktree, for the operator's git identity
+ * @param {string|null} remoteUrl - Where to publish, or null to use the recorded remote
+ * @returns {Promise<object>} Publication
+ */
+async function _publication(c, sha, worktreePath, remoteUrl) {
+  if (c.deps.publication) return c.deps.publication;
+  const facts = await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
+  const draft = publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher: null });
+  const target = remoteUrl || draft.readStatus().remoteUrl || facts.remoteUrl;
+  const publisher = publisherLib.createPublisher({ dir: path.join(c.base, '_metrics'), remoteUrl: target, identity: facts.identity });
+  return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
+}
+
+/**
+ * `publish`: publish a run's standing now (also how a failed publish is retried by hand).
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code: 0 published, 3 not
+ */
+async function cmdPublish(c) {
+  const sha = _need(c.flags, 'sha');
+  const { manifest } = store.readRun(c.base, sha);
+  const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+  const runner = runnerLib.createRunner({ base: c.base, candidateSha: sha, probes: null, publication, log: c.emit });
+  const ok = await runner.publishNow();
+  c.out.write(`${JSON.stringify({ published: ok })}\n`);
+  return ok ? 0 : 3;
+}
+
+/**
  * `list`: the candidates with runs.
  * @param {object} c - Command context
  * @returns {Promise<number>} Exit code
@@ -207,7 +244,17 @@ async function cmdDecide(c, op) {
   const sha = _need(c.flags, 'sha');
   const actor = _need(c.flags, 'actor');
   const state = store.updateRun(c.base, sha, (s) => op(s, actor, Date.now()), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
-  c.out.write(`${JSON.stringify({ state: state.state })}\n`);
+  // The decision is committed; publishing it is best effort and a failure is
+  // recorded for retry (`rc-cert publish`), never undoing the decision.
+  const { manifest } = store.readRun(c.base, sha);
+  let published = false;
+  try {
+    const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+    published = await runnerLib.createRunner({ base: c.base, candidateSha: sha, probes: null, publication, log: c.emit }).publishNow();
+  } catch (e) {
+    c.emit({ event: 'publish-failed', code: e.code || null });
+  }
+  c.out.write(`${JSON.stringify({ state: state.state, published })}\n`);
   return 0;
 }
 
@@ -241,8 +288,13 @@ async function cmdStart(c) {
   if (!version) throw new UsageError('the worktree has no readable version.json');
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
   const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
-  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, log: c.emit });
-  const state = await runner.start({ version, repository: repo, worktreePath, requiredChecks, thresholds });
+  const facts = c.deps.publication ? { remoteUrl: null } : await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
+  const publication = await _publication(c, sha, worktreePath, facts.remoteUrl);
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
+  const state = await runner.start({
+    version, repository: repo, worktreePath, requiredChecks, thresholds,
+    publishActor: !c.flags['no-publish-actor'], remoteUrl: facts.remoteUrl
+  });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
   return 0;
 }
@@ -268,7 +320,8 @@ async function cmdRun(c) {
     sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
     requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
   }));
-  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, log: c.emit });
+  const publication = await _publication(c, sha, manifest.private.worktreePath, null);
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const controller = new AbortController();
   const stop = () => controller.abort();
   if (c.signal) c.signal.addEventListener('abort', stop, { once: true });
@@ -292,7 +345,8 @@ const COMMANDS = Object.freeze({
   accept: (c) => cmdDecide(c, sm.accept),
   cancel: (c) => cmdDecide(c, sm.cancel),
   start: cmdStart,
-  run: cmdRun
+  run: cmdRun,
+  publish: cmdPublish
 });
 
 /**

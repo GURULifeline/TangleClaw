@@ -57,8 +57,14 @@ to be able to trust it. That creates two problems:
    refuses promotion until every required fact is published.
 
 5. **Unattended publishing is authorized, to `metrics` only (ruling Q4).** The runner may push
-   without an operator present during a 72-hour run. It pushes only the allowlisted documents, only
-   under `release-certification/v1/` on `metrics`, never to a source branch and never by force.
+   without an operator present during a 72-hour run.
+   - **What it pushes:** only the allowlisted documents, only under `release-certification/v1/` on
+     `metrics`, never to a source branch and never by force.
+   - **How it pushes:** from its own private clone of `metrics`, never from the candidate's
+     worktree (which must stay exactly the candidate). The repository's git hooks are off, because
+     they govern source work. Commits carry the operator's configured git identity.
+   - **When the remote moved first:** a push rejected because another publisher got there first is
+     rebuilt from the new tip and retried.
 
 6. **The operator's actor id is published by default.** An acceptance or cancellation publishes the
    identifier the operator chose (for example `jason`), because a public certification should say

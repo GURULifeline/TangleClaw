@@ -321,6 +321,24 @@ describe('store', () => {
     assert.deepEqual(store.listRuns(base), [SHA]);
   });
 
+  it('stages a manifest before the run exists, and reuses it rather than replacing it', () => {
+    const base = path.join(tmp, 'v1');
+    const facts = [];
+    const first = store.stageManifest(base, manifest(), { onRecover: (f) => facts.push(f.kind) });
+    assert.equal(first.reused, false);
+    assert.equal(first.digest, store.manifestDigest(store.manifestText(manifest())));
+    const later = sm.buildManifest({ ...manifest(), worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, createdAt: 9999 });
+    const again = store.stageManifest(base, later, { onRecover: (f) => facts.push(f.kind) });
+    assert.equal(again.reused, true);
+    assert.equal(again.digest, first.digest, 'a retried start keeps the admission it may already have published');
+    assert.deepEqual(facts, ['staged-manifest-reused']);
+    const s = sample(0);
+    const state = store.createRun(base, again.manifest, sm.admit(again.manifest, s), s, { onRecover: (f) => facts.push(f.kind) });
+    assert.equal(state.manifestDigest, first.digest);
+    assert.deepEqual(facts, ['staged-manifest-reused'], 'committing the staged bytes is not a recovery');
+    refuses(() => store.stageManifest(base, manifest()), REFUSAL.RUN_EXISTS);
+  });
+
   it('refuses a second run for the same candidate', () => {
     const { base, m } = created();
     const s = sample(0);
