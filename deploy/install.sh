@@ -131,13 +131,21 @@ fi
 # written — no plist, config.json, Caddyfile, ~/.tmux.conf or attach script, and
 # no launchctl — ask the cutover whether it would re-apply cleanly. A dry run
 # exits 0 when it would, 3 when it would refuse (a hand-edited or unreadable
-# Caddyfile, or a gate it would drop), and 1 when it cannot plan at all.
+# Caddyfile, replacing a gated Caddyfile with an ungated one, or a refused
+# tailnet move), and 1 when it cannot plan at all. A Caddy password the new file
+# omits because TangleClaw's own login guards the door is reported, not refused.
 #
 # One narrow bootstrap: when the ONLY reason is that the owned ttyd runtime is
 # missing or stale (the typed `ttyd-runtime-unavailable` code, never prose), that
 # runtime is what this script exists to provide. Provision it — inert, into its
 # private ~/.tangleclaw/bin, nothing else — and run the complete dry run again.
-# Only a passing preflight lets the rest of the script run.
+# Nothing else runs until the preflight passes.
+#
+# A passing preflight rules out the cutover's predictable refusals, not every
+# failure: a missing caddy binary, the certificate it generates and the
+# credential it adopts are only exercised by the real cutover, after restart 1.
+# If that fails, the refreshed server plist and assets stay in place, Caddy and
+# its gate are untouched, and the failure below says so and how to re-run.
 CUTOVER_SCRIPT="${REPO_DIR}/scripts/ingress-cutover.js"
 PREFLIGHT_STATUS=0
 PREFLIGHT_RESULT=""
