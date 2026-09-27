@@ -52,7 +52,7 @@ Chunk C03 of #1949 (Train 30). The PM dispatched it over Medusa (379ec59b). The 
 
 **Review.** Cumulative review `rev-20260927T193009Z-2562c027`: 0 blocking. R-3 caught `today` duplicated in `days[0]` with nothing checking they agreed; they are now required to be the same record. R-2: an old newest day now reads "Latest day", not "Today". R-4: a doc cited `lib/release-certification/`, which is not on main (the features-index test caught it too). Fixed in `d2b0fe5f` and verified in `rev-20260927T194454Z-0b432642`. After the PR review, the PM flagged that `Number.isSafeInteger` accepts epoch values past 8.64e15, where `Date#toISOString` throws, so a document could pass validation and still crash the card. `generatedAt` and `freshUntil` are now bounded by `MAX_EPOCH_MS`.
 
-**Tests.** `test/scorecard-cache.test.js`, `test/plan-progress-card.test.js`, one HTTP case in `test/api-plan-docs.test.js`, and the fixture `test/fixtures/scorecard-v1.json`. Full suite green on `d2b0fe5f`.
+**Tests.** `test/scorecard-cache.test.js`, `test/plan-progress-card.test.js`, one HTTP case in `test/api-plan-docs.test.js`, and the fixture `test/fixtures/scorecard-v1.json`. Full suite green on `9029c406` (7675 passed, 0 failed).
 
 **Not done here.** The producer and collector, and whatever refreshes the cache: a follow-on chunk, and who writes the file is still open with the PM. Wiring B5's `validateCertificationSummary` once C02 lands. Placing the blocks in the Registry and the board (the PM's job). VRF-1949-C03 is queued for the visual check.
 
