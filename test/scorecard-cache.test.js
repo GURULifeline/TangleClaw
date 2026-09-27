@@ -81,6 +81,18 @@ describe('lib/scorecard-cache.js (#1949)', () => {
       assert.match(refusal(doc), /freshUntil must be epoch milliseconds after generatedAt/);
     });
 
+    it('refuses a time a Date cannot hold, so a valid document can always be formatted', () => {
+      const card = require('../lib/plan-progress-card');
+      let doc = fixture();
+      doc.freshUntil = sc.MAX_EPOCH_MS;
+      assert.equal(refusal(doc), null, 'the last representable instant is accepted');
+      assert.doesNotThrow(() => card.renderProgressBlock('{"card":"project-health"}', { scorecard: () => ({ status: sc.STATUS.STALE, doc }) }));
+      doc = fixture(); doc.freshUntil = sc.MAX_EPOCH_MS + 1;
+      assert.match(refusal(doc), /freshUntil must be epoch milliseconds/);
+      doc = fixture(); doc.generatedAt = Number.MAX_SAFE_INTEGER - 1; doc.freshUntil = Number.MAX_SAFE_INTEGER;
+      assert.match(refusal(doc), /generatedAt must be epoch milliseconds/);
+    });
+
     it('refuses negative, fractional or oversized counts, and accepts a negative net', () => {
       for (const bad of [-1, 1.5, sc.LIMITS.count + 1, '3', null]) {
         const doc = fixture();
