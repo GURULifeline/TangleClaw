@@ -235,6 +235,29 @@ describe('lockfile', () => {
     });
   }
 
+  it('puts back a lock taken fresh between judging the old one stale and moving it', () => {
+    const file = plant({});
+    let calls = 0;
+    const reclaimed = [];
+    const isAlive = () => {
+      calls += 1;
+      if (calls > 1) return true;
+      fs.writeFileSync(file, JSON.stringify({ pid: 12345, host: 'this-host', writtenAt: Date.now(), token: 'fresh' }));
+      return false;
+    };
+    refuses(() => lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive }), onReclaim: (r) => reclaimed.push(r) }), REFUSAL.LOCK_HELD);
+    assert.equal(lockfile.readRecord(file).token, 'fresh');
+    assert.deepEqual(reclaimed, []);
+    assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.includes('.stale.')), []);
+  });
+
+  it('reports each stale lock it reclaims', () => {
+    const file = plant({ pid: 777 });
+    const reclaimed = [];
+    lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }), onReclaim: (r) => reclaimed.push(r) });
+    assert.deepEqual(reclaimed, [{ pid: 777, host: 'this-host', writtenAt: 5000 }]);
+  });
+
   it('never reclaims a lock from another host', () => {
     const file = plant({ host: 'elsewhere' });
     refuses(() => lockfile.acquire(file, { timeoutMs: 0, deps: deps({ isAlive: () => false }) }), REFUSAL.LOCK_HELD);
@@ -363,6 +386,47 @@ describe('store', () => {
     assert.equal(store.readRun(base, SHA).state.sampleCount, 1);
     assert.equal(fs.readFileSync(p.state, 'utf8'), before);
     assert.equal(tick(base, sample(MIN)).sampleCount, 2);
+  });
+
+  it('aborts a change whose lock was lost before commit, leaving state untouched', () => {
+    const { base } = created();
+    const p = store.runPaths(base, SHA);
+    const before = fs.readFileSync(p.state, 'utf8');
+    refuses(() => store.updateRun(base, SHA, (state) => {
+      fs.writeFileSync(p.lock, JSON.stringify({ pid: 1, host: 'x', writtenAt: 1, token: 'thief' }));
+      return sm.cancel(state, 'op', 1);
+    }), REFUSAL.LOCK_LOST);
+    assert.equal(fs.readFileSync(p.state, 'utf8'), before);
+    assert.equal(lockfile.readRecord(p.lock).token, 'thief');
+    assert.equal(store.readSnapshots(base, SHA).length, 1);
+  });
+
+  it('reports every recovery it performs', () => {
+    const base = path.join(tmp, 'v1');
+    const p = store.runPaths(base, SHA);
+    fs.mkdirSync(p.dir, { recursive: true });
+    fs.writeFileSync(p.manifest, '{"half":');
+    fs.writeFileSync(p.lock, JSON.stringify({ pid: 2 ** 22 + 1, host: os.hostname(), writtenAt: 1, token: 'dead' }));
+    const facts = [];
+    const onRecover = (f) => facts.push(f.kind);
+    const m = manifest();
+    const s = sample(0);
+    store.createRun(base, m, sm.admit(m, s), s, { onRecover });
+    fs.appendFileSync(p.samples, '{"seq":2,"to');
+    store.updateRun(base, SHA, (state, man) => {
+      const out = sm.reduce(state, man, sample(MIN));
+      return { state: out.state, events: out.events, record: store.sampleRecord(2, sample(MIN), out.verdict, out.interval) };
+    }, { onRecover });
+    assert.deepEqual(facts, ['lock-reclaimed', 'orphan-manifest-replaced', 'torn-sample-truncated']);
+  });
+
+  it('does not create a run directory for a candidate that has no run', () => {
+    const { base } = created();
+    const typo = 'b'.repeat(40);
+    refuses(() => store.updateRun(base, typo, (state) => sm.cancel(state, 'op', 1)), REFUSAL.RUN_NOT_FOUND);
+    assert.equal(fs.existsSync(path.join(base, typo)), false);
+    fs.mkdirSync(path.join(base, 'c'.repeat(40)));
+    assert.deepEqual(store.listRuns(base), [SHA]);
   });
 
   it('refuses to write while another live process holds the lock', () => {
