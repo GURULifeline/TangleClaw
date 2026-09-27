@@ -179,7 +179,13 @@ describe('validators refuse what the builder would never emit', () => {
     ['a failure on a running scorecard', (d) => { d.failure = { code: 'LEAK_FIRED', at: 1 }; }, 'FIELD:failure'],
     ['a passed scorecard with no acceptance', (d) => { d.state = 'passed'; }, 'FIELD:acceptance'],
     ['a negative time', (d) => { d.qualifiedMs = -1; }, 'FIELD:qualifiedMs'],
-    ['a publish sequence of zero', (d) => { d.publishSeq = 0; }, 'FIELD:publishSeq']
+    ['a publish sequence of zero', (d) => { d.publishSeq = 0; }, 'FIELD:publishSeq'],
+    ['failure reasons, which the builder drops', (d) => { d.state = 'failed'; d.failure = { code: 'LEAK_FIRED', at: 1, reasons: [{ probe: 'ttyd' }] }; }, 'FIELD:failure'],
+    ['a PTY server instance id, which holds a pid', (d) => { d.pty.instance = '4242-1-ab'; }, 'FIELD:pty'],
+    ['an extra field in the PTY target', (d) => { d.pty.target.host = HOST; }, 'FIELD:pty'],
+    ['an extra field in a trend point', (d) => { d.poolUsedTrend = [{ at: 1, used: 1, pid: 4242 }]; }, 'FIELD:poolUsedTrend'],
+    ['an extra field in an extension', (d) => { d.extensions.PROBE_UNKNOWN = { intervals: 1, lostMs: 1, probe: 'server' }; }, 'FIELD:extensions'],
+    ['an extra field in an acceptance', (d) => { d.state = 'passed'; d.acceptance = { actor: 'op', at: 1, host: HOST }; }, 'FIELD:acceptance']
   ]) {
     it(`refuses a scorecard with ${name}`, () => {
       const d = good();
@@ -197,14 +203,24 @@ describe('validators refuse what the builder would never emit', () => {
     const missing = { ...a(), thresholds: t };
     assert.deepEqual(sc.validateAdmission(noChecks), ['FIELD:requiredChecks']);
     assert.deepEqual(sc.validateAdmission(badDigest), ['FIELD:manifestDigest']);
-    assert.deepEqual(sc.validateAdmission(missing), ['FIELD:thresholds']);
+    assert.deepEqual(sc.validateAdmission(missing), ['FIELD:thresholds', 'FIELD:canonicalThresholds']);
     assert.deepEqual(sc.validateAdmission({ ...a(), host: HOST }), ['UNKNOWN_FIELD:host']);
+    assert.deepEqual(sc.validateAdmission({ ...a(), requiredChecks: ['test', 'test'] }), ['FIELD:requiredChecks']);
+    assert.deepEqual(sc.validateAdmission({ ...a(), requiredChecks: Array.from({ length: 65 }, (_, i) => `c${i}`) }), ['FIELD:requiredChecks']);
+    assert.deepEqual(sc.validateAdmission({ ...a(), thresholds: { ...a().thresholds, extra: 1 } }), ['FIELD:thresholds', 'FIELD:canonicalThresholds']);
+  });
+
+  it('refuses an admission that claims canonical thresholds it does not have', () => {
+    const loose = sc.admissionRecord(manifest(FAST), DIGEST);
+    assert.equal(loose.canonicalThresholds, false);
+    assert.deepEqual(sc.validateAdmission({ ...loose, canonicalThresholds: true }), ['FIELD:canonicalThresholds']);
   });
 
   it('refuses a malformed event line and index', () => {
     assert.deepEqual(sc.validateEvent({ schema: sc.SCHEMAS.event, from: 'running', to: 'not-started', code: 'ADMITTED', at: 1, sampleSeq: 1 }), ['FIELD:to']);
     assert.deepEqual(sc.validateEvent({ schema: sc.SCHEMAS.event, from: 'running', to: 'failed', code: 'NOPE', at: 1, sampleSeq: null }), ['FIELD:code']);
     assert.deepEqual(sc.validateIndex({ schema: sc.SCHEMAS.index, candidates: [{ candidateSha: SHA }] }), ['FIELD:candidates']);
+    assert.deepEqual(sc.validateIndex({ schema: sc.SCHEMAS.index, candidates: [{ candidateSha: SHA, version: '5.30.0', state: 'running', updatedAt: 1, host: HOST }] }), ['FIELD:candidates']);
     assert.deepEqual(sc.validateIndex(null), ['SCHEMA']);
   });
 });

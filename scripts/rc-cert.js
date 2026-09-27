@@ -75,18 +75,28 @@ function parseFlags(argv) {
 
 /**
  * The evidence base: the flag, else the configured override, else the default.
- * A configured value that is not an absolute path is refused, not ignored.
+ * A missing config.json means no override; one that cannot be parsed, or a
+ * configured value that is not an absolute path, is refused, not ignored.
  * @param {object} flags - Parsed flags
  * @param {string} [configFile] - config.json path
  * @returns {string} Absolute base
  */
 function resolveBase(flags, configFile = path.join(tangleclawHome.baseDir(), 'config.json')) {
   if (flags.base) return _absolute(flags.base, '--base');
+  let text;
+  try {
+    text = fs.readFileSync(configFile, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return store.defaultBase();
+    throw e;
+  }
   let configured;
   try {
-    configured = JSON.parse(fs.readFileSync(configFile, 'utf8')).releaseCertification?.baseDir;
+    configured = JSON.parse(text).releaseCertification?.baseDir;
   } catch {
-    configured = undefined;
+    // An unreadable config must not silently send evidence to the default
+    // location while the operator believes it goes elsewhere.
+    throw new CertificationError(REFUSAL.STORE_UNSAFE, 'config.json is not valid JSON, so releaseCertification.baseDir cannot be read');
   }
   if (configured === undefined || configured === null) return store.defaultBase();
   return _absolute(configured, 'releaseCertification.baseDir');
@@ -166,91 +176,148 @@ function _probeCtx(flags, env, spec) {
 }
 
 /**
- * Run a command.
+ * `list`: the candidates with runs.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdList(c) {
+  c.out.write(`${JSON.stringify(store.listRuns(c.base))}\n`);
+  return 0;
+}
+
+/**
+ * `status`: a run's structured health.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdStatus(c) {
+  const { manifest, state } = store.readRun(c.base, _need(c.flags, 'sha'));
+  const summary = sm.summarize(state, manifest, Date.now());
+  c.out.write(c.flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
+  return 0;
+}
+
+/**
+ * `accept` / `cancel`: an operator decision, recorded with the actor.
+ * @param {object} c - Command context
+ * @param {function(object, string, number): object} op - `sm.accept` or `sm.cancel`
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdDecide(c, op) {
+  const sha = _need(c.flags, 'sha');
+  const actor = _need(c.flags, 'actor');
+  const state = store.updateRun(c.base, sha, (s) => op(s, actor, Date.now()), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
+  c.out.write(`${JSON.stringify({ state: state.state })}\n`);
+  return 0;
+}
+
+/**
+ * The required checks for `start`: the flags, else main's branch protection.
+ * None at all is refused, since GitHub could then never fail the candidate.
+ * @param {object} c - Command context
+ * @param {string} repo - `owner/name`
+ * @returns {Promise<string[]>} Check names
+ */
+async function _startChecks(c, repo) {
+  const checks = c.flags['required-check'] || await (c.deps.requiredChecks || probesLib.requiredChecks)(repo);
+  if (!checks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
+  if (checks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
+  return checks;
+}
+
+/**
+ * `start`: admit a candidate.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdStart(c) {
+  const sha = _need(c.flags, 'sha');
+  const thresholds = c.flags.thresholds ? _jsonObject(c.flags.thresholds, '--thresholds') : undefined;
+  const worktreePath = _absolute(_need(c.flags, 'worktree'), '--worktree');
+  const repo = c.flags.repo || await (c.deps.repository || probesLib.repository)(worktreePath);
+  if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
+  const requiredChecks = await _startChecks(c, repo);
+  const version = runnerLib.worktreeVersion(worktreePath);
+  if (!version) throw new UsageError('the worktree has no readable version.json');
+  const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, log: c.emit });
+  const state = await runner.start({ version, repository: repo, worktreePath, requiredChecks, thresholds });
+  c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
+  return 0;
+}
+
+/**
+ * `run`: sample until terminal or signalled. The repository, required checks
+ * and reading age come from the manifest, never from a fresh lookup.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdRun(c) {
+  const sha = _need(c.flags, 'sha');
+  const intervalMs = _int(c.flags.interval, '--interval');
+  if (intervalMs !== undefined) {
+    try {
+      runnerLib.resolveInterval(intervalMs);
+    } catch (e) {
+      throw new UsageError(e.message);
+    }
+  }
+  const { manifest } = store.readRun(c.base, sha);
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, {
+    sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
+    requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
+  }));
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, log: c.emit });
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  if (c.signal) c.signal.addEventListener('abort', stop, { once: true });
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    const state = await runner.run({ intervalMs, signal: controller.signal });
+    c.out.write(`${JSON.stringify({ state: state.state })}\n`);
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    if (c.signal) c.signal.removeEventListener('abort', stop);
+  }
+  return 0;
+}
+
+/** Each command's handler. */
+const COMMANDS = Object.freeze({
+  list: cmdList,
+  status: cmdStatus,
+  accept: (c) => cmdDecide(c, sm.accept),
+  cancel: (c) => cmdDecide(c, sm.cancel),
+  start: cmdStart,
+  run: cmdRun
+});
+
+/**
+ * Run a command: parse, resolve the evidence base, dispatch, and turn a
+ * refusal into exit 3 and a usage error into exit 2.
  * @param {string[]} argv - Command and flags
  * @param {object} [io] - `{stdout, stderr, env, configFile, signal, deps: {probes, runner, repository, requiredChecks}}`
  * @returns {Promise<number>} Exit code
  */
 async function main(argv, io = {}) {
-  const out = io.stdout || process.stdout;
   const err = io.stderr || process.stderr;
-  const env = io.env || process.env;
-  const deps = io.deps || {};
-  const emit = (obj) => err.write(`${JSON.stringify(obj)}\n`);
   const [command, ...rest] = argv;
-  let flags;
   try {
-    flags = parseFlags(rest);
-    if (!['start', 'run', 'status', 'accept', 'cancel', 'list'].includes(command)) throw new UsageError(`unknown command ${command || ''}`.trim());
-  } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
-    err.write(`${e.message}\n${USAGE}\n`);
-    return 2;
-  }
-  try {
-    const base = resolveBase(flags, io.configFile);
-    if (command === 'list') {
-      out.write(`${JSON.stringify(store.listRuns(base))}\n`);
-      return 0;
-    }
-    const sha = _need(flags, 'sha');
-    if (command === 'status') {
-      const { manifest, state } = store.readRun(base, sha);
-      const summary = sm.summarize(state, manifest, Date.now());
-      out.write(flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
-      return 0;
-    }
-    if (command === 'accept' || command === 'cancel') {
-      const actor = _need(flags, 'actor');
-      const op = command === 'accept' ? sm.accept : sm.cancel;
-      const state = store.updateRun(base, sha, (s) => op(s, actor, Date.now()), { onRecover: (f) => emit({ event: 'recovered', ...f }) });
-      out.write(`${JSON.stringify({ state: state.state })}\n`);
-      return 0;
-    }
-    if (command === 'start') {
-      const thresholds = flags.thresholds ? _jsonObject(flags.thresholds, '--thresholds') : undefined;
-      const worktreePath = _absolute(_need(flags, 'worktree'), '--worktree');
-      const repo = flags.repo || await (deps.repository || probesLib.repository)(worktreePath);
-      if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
-      const requiredChecks = flags['required-check'] || await (deps.requiredChecks || probesLib.requiredChecks)(repo);
-      if (!requiredChecks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
-      if (requiredChecks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
-      const version = runnerLib.worktreeVersion(worktreePath);
-      if (!version) throw new UsageError('the worktree has no readable version.json');
-      const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
-      const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
-      const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
-      const state = await runner.start({ version, repository: repo, worktreePath, requiredChecks, thresholds });
-      out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
-      return 0;
-    }
-    const intervalMs = _int(flags.interval, '--interval');
-    if (intervalMs !== undefined) {
-      try {
-        runnerLib.resolveInterval(intervalMs);
-      } catch (e) {
-        throw new UsageError(e.message);
-      }
-    }
-    const { manifest } = store.readRun(base, sha);
-    const worktreePath = manifest.private.worktreePath;
-    const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, {
-      sha, worktreePath, repo: manifest.repository, requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
-    }));
-    const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    if (io.signal) io.signal.addEventListener('abort', stop, { once: true });
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-    try {
-      const state = await runner.run({ intervalMs, signal: controller.signal });
-      out.write(`${JSON.stringify({ state: state.state })}\n`);
-    } finally {
-      process.removeListener('SIGINT', stop);
-      process.removeListener('SIGTERM', stop);
-    }
-    return 0;
+    const flags = parseFlags(rest);
+    const handler = Object.prototype.hasOwnProperty.call(COMMANDS, command) ? COMMANDS[command] : null;
+    if (!handler) throw new UsageError(`unknown command ${command || ''}`.trim());
+    return await handler({
+      flags,
+      base: resolveBase(flags, io.configFile),
+      out: io.stdout || process.stdout,
+      env: io.env || process.env,
+      deps: io.deps || {},
+      signal: io.signal,
+      emit: (obj) => err.write(`${JSON.stringify(obj)}\n`)
+    });
   } catch (e) {
     if (e instanceof CertificationError) {
       err.write(`${JSON.stringify({ error: e.code, message: e.message, details: e.details })}\n`);

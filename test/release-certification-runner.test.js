@@ -465,12 +465,20 @@ describe('rc-cert CLI', () => {
       probes: (ctx) => { probeCtxs.push(ctx); return f.probes; },
       runner: (ctx) => {
         const real = runnerLib.createRunner({ ...ctx, clock: f.clock });
-        return { ...real, run: async (args) => { runArgs = args; return store.readRun(base, SHA).state; } };
+        return { ...real, run: async (args) => {
+          runArgs = args;
+          sawAbortBefore = args.signal.aborted;
+          controller.abort();
+          sawAbortAfter = args.signal.aborted;
+          return store.readRun(base, SHA).state;
+        } };
       }
     };
+    const controller = new AbortController();
+    let sawAbortBefore = null;
+    let sawAbortAfter = null;
     const thresholds = '{"maxIntervalMs":30000}';
     assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--thresholds', thresholds], { deps })).code, 0);
-    const controller = new AbortController();
     const ran = await run(['run', '--sha', SHA, '--base', base, '--api', 'http://x', '--interval', '20000'], {
       deps: { ...deps, repository: async () => { throw new Error('run must not look the repository up'); } },
       signal: controller.signal
@@ -482,9 +490,8 @@ describe('rc-cert CLI', () => {
     assert.equal(ctx.maxReadingAgeMs, 30000);
     assert.equal(ctx.worktreePath, wt);
     assert.equal(runArgs.intervalMs, 20000);
-    assert.equal(runArgs.signal.aborted, false);
-    controller.abort();
-    assert.equal(runArgs.signal.aborted, true);
+    assert.equal(sawAbortBefore, false);
+    assert.equal(sawAbortAfter, true, 'the caller\'s stop signal reaches the running loop');
   });
 
   it('treats a malformed --interval or --thresholds as a usage error', async () => {
@@ -533,5 +540,7 @@ describe('rc-cert CLI', () => {
     fs.writeFileSync(cfg, JSON.stringify({ releaseCertification: { baseDir: 'relative' } }));
     assert.throws(() => cli.resolveBase({}, cfg), (e) => e.code === REFUSAL.STORE_UNSAFE);
     assert.equal(cli.resolveBase({}, path.join(tmp, 'none.json')), store.defaultBase());
+    fs.writeFileSync(cfg, '{not json');
+    assert.throws(() => cli.resolveBase({}, cfg), (e) => e.code === REFUSAL.STORE_UNSAFE);
   });
 });
