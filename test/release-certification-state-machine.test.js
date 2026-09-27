@@ -34,7 +34,7 @@ const FAST = { targetQualifiedMs: 3 * MIN, maxIntervalMs: 2 * MIN, ptyMinAttache
 function obs(over = {}) {
   const base = {
     worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0' },
+    server: { startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500_000 },
     ttyd: { managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 3 },
     github: { state: 'ok', checks: { test: 'success' } },
     pty: { instance: 'srv-1', attaches: 0, detaches: 0, lastAt: null }
@@ -148,6 +148,7 @@ describe('classify', () => {
     ['the runtime SHA was adopted late', { server: { shaBaselineSource: 'late' } }, EXTEND.RUNTIME_UNPROVEN, 'server'],
     ['the runtime SHA baseline is missing', { server: { shaBaselineSource: null } }, EXTEND.RUNTIME_UNPROVEN, 'server'],
     ['a late SHA differs', { server: { shaBaselineSource: 'late', startupSha: 'c'.repeat(40) } }, EXTEND.RUNTIME_UNPROVEN, 'server'],
+    ['the server start time is missing', { server: { startedAt: null } }, EXTEND.PROBE_UNKNOWN, 'server'],
     ['ttyd ownership is unknown', { ttyd: { managed: null } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],
     ['the leak condition is unknown', { ttyd: { leakState: 'unknown' } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],
     ['the orphan gate is unknown', { ttyd: { orphanGate: null } }, EXTEND.PROBE_UNKNOWN, 'ttyd'],
@@ -259,10 +260,21 @@ describe('interval accrual', () => {
   });
 
   it('extends through a server restart on the same SHA and ttyd generation', () => {
-    const restarted = obs({ pty: { instance: 'srv-2', attaches: 0, detaches: 0 } });
-    const { state } = run(manifest(), [sample(MIN, obs({ server: null })), sample(2 * MIN, restarted), sample(3 * MIN, restarted)]);
+    const restarted = obs({ server: { startedAt: 900_000 }, pty: { instance: 'srv-2', attaches: 0, detaches: 0 } });
+    const { state } = run(manifest(), [sample(MIN, obs({ server: null })), sample(2 * MIN, restarted), sample(3 * MIN, restarted), sample(4 * MIN, restarted)]);
     assert.equal(state.state, STATES.RUNNING);
     assert.equal(state.failure, null);
+    assert.equal(state.qualifiedMs, 2 * MIN);
+  });
+
+  it('earns nothing for an interval the server restarted inside, however quickly', () => {
+    const restarted = obs({ server: { startedAt: 1_030_000 }, pty: { instance: 'srv-2', attaches: 0, detaches: 0 } });
+    const { state, events } = run(manifest(), [sample(MIN), sample(2 * MIN, restarted)]);
+    assert.equal(state.qualifiedMs, MIN);
+    assert.equal(state.state, STATES.EXTENDED);
+    assert.deepEqual(state.extensions, { SERVER_RESTARTED: { intervals: 1, lostMs: MIN } });
+    assert.equal(events.at(-1).code, EXTEND.SERVER_RESTARTED);
+    assert.equal(run(manifest(), [sample(MIN), sample(2 * MIN, restarted), sample(3 * MIN, restarted)]).state.state, STATES.RUNNING);
   });
 
   it('does not mutate the state it is given', () => {
@@ -280,6 +292,12 @@ describe('hard fails', () => {
     assert.equal(state.failure.code, HARD_FAIL.TTYD_GENERATION_CHANGED);
     assert.equal(state.failure.sampleSeq, 2);
     assert.equal(events.at(-1).code, HARD_FAIL.TTYD_GENERATION_CHANGED);
+  });
+
+  it('fails an extended run', () => {
+    const { state, events } = run(manifest(), [sample(MIN, obs({ server: null })), sample(2 * MIN, obs({ ttyd: { wedgedCount: 2 } }))]);
+    assert.equal(state.state, STATES.FAILED);
+    assert.deepEqual(events.slice(1).map((e) => [e.from, e.to]), [[STATES.RUNNING, STATES.EXTENDED], [STATES.EXTENDED, STATES.FAILED]]);
   });
 
   it('is terminal', () => {
@@ -310,6 +328,38 @@ describe('target, PTY use and review', () => {
     assert.equal(passed.state.state, STATES.PASSED);
     assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: 5 });
     assert.equal(passed.events[0].code, TRANSITION.OPERATOR_ACCEPTED);
+  });
+
+  it('does not begin review on an interval that did not qualify', () => {
+    const early = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN)]).state;
+    assert.equal(early.state, STATES.EXTENDED);
+    const { state } = sm.reduce(early, m, sample(4 * MIN, obs({ github: { state: 'unavailable' }, pty: { attaches: 2, detaches: 2, lastAt: 1_000_000 + 4 * MIN } })));
+    assert.equal(state.state, STATES.EXTENDED);
+    assert.equal(sm.reduce(state, m, sample(5 * MIN, busy(2, 4 * MIN))).state.state, STATES.EXTENDED);
+    const reviewing = sm.reduce(sm.reduce(state, m, sample(5 * MIN, busy(2, 4 * MIN))).state, m, sample(6 * MIN, busy(2, 4 * MIN))).state;
+    assert.equal(reviewing.state, STATES.AWAITING_REVIEW);
+  });
+
+  it('stops earning at the target, so earned and lost time never exceed elapsed', () => {
+    const { state } = run(m, [sample(2 * MIN), sample(4 * MIN), sample(6 * MIN)]);
+    assert.equal(state.qualifiedMs, 3 * MIN);
+    assert.deepEqual(state.extensions, { PTY_TARGET_UNMET: { intervals: 2, lostMs: 3 * MIN } });
+    const s = sm.summarize(state, m, 1_000_000 + 6 * MIN);
+    assert.ok(s.qualifiedMs + s.extensions.PTY_TARGET_UNMET.lostMs <= s.elapsedMs);
+    assert.equal(s.remainingMs, 0);
+  });
+
+  it('refuses every operation on a passed run', () => {
+    const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]).state;
+    const passed = sm.accept(reviewing, 'jason', 5).state;
+    refuses(() => sm.accept(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
+    refuses(() => sm.cancel(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
+    refuses(() => sm.reduce(passed, m, sample(4 * MIN)), REFUSAL.ALREADY_TERMINAL);
+  });
+
+  it('cancels a run awaiting review', () => {
+    const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]).state;
+    assert.equal(sm.cancel(reviewing, 'jason', 7).state.state, STATES.CANCELLED);
   });
 
   it('refuses acceptance before review and from a malformed actor', () => {
@@ -356,6 +406,21 @@ describe('target, PTY use and review', () => {
     assert.equal(sm.ptyTargetMet({ ...p, firstEventAt: null }, t), false);
   });
 
+  it('reports the PTY span in the summary', () => {
+    const { state } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(2, 2 * MIN))]);
+    assert.equal(sm.summarize(state, m, 1_000_000 + 2 * MIN).pty.spanMs, MIN);
+  });
+
+  it('caps the pool-use trend', () => {
+    const tiny = manifest({ trendBucketMs: 1 });
+    let { state } = sm.admit(tiny, sample(0));
+    state.poolUsedTrend = Array.from({ length: 2000 }, (_, i) => ({ at: i, used: i }));
+    state = sm.reduce(state, tiny, sample(MIN)).state;
+    assert.equal(state.poolUsedTrend.length, 2000);
+    assert.equal(state.poolUsedTrend.at(-1).used, 3);
+    assert.equal(state.poolUsedTrend[0].used, 1);
+  });
+
   it('keeps an hourly pool-use trend', () => {
     const samples = [];
     for (let i = 1; i <= 130; i++) samples.push(sample(i * MIN, obs({ ttyd: { poolUsed: i } })));
@@ -366,7 +431,8 @@ describe('target, PTY use and review', () => {
 
 describe('cancel and summarize', () => {
   it('cancels a live run with the actor recorded', () => {
-    const { state } = run(manifest(), [sample(MIN)]);
+    const { state } = run(manifest(), [sample(MIN, obs({ server: null }))]);
+    assert.equal(state.state, STATES.EXTENDED);
     const out = sm.cancel(state, 'jason', 9);
     assert.equal(out.state.state, STATES.CANCELLED);
     assert.deepEqual(out.state.cancellation, { actor: 'jason', at: 9 });
