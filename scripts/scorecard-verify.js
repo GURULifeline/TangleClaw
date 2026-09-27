@@ -44,7 +44,7 @@ function parseArgs(argv) {
 function summaryMarkdown(ref, result) {
   if (!result.exists) return `### Scorecard verification\n\n\`${ref}\` does not exist yet: nothing to verify.\n`;
   if (result.violations.length === 0) return `### Scorecard verification\n\n\`${ref}\`: ${result.commits} commit(s), no violations.\n`;
-  const rows = result.violations.map((v) => `| \`${v.commit.slice(0, 12)}\` | \`${v.rule}\` | ${v.path ? `\`${v.path}\`` : ''} |`);
+  const rows = result.violations.map((v) => `| ${v.commit ? `\`${v.commit.slice(0, 12)}\`` : '(history)'} | \`${v.rule}\` | ${v.path ? `\`${v.path}\`` : ''} |`);
   return `### Scorecard verification FAILED\n\n\`${ref}\`: ${result.violations.length} violation(s) across ${result.commits} commit(s).\n\n| Commit | Rule | Path |\n|---|---|---|\n${rows.join('\n')}\n`;
 }
 

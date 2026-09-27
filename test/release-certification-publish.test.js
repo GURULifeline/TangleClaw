@@ -351,7 +351,7 @@ describe('publication: fail-closed admission and forward-only updates', () => {
 });
 
 describe('publication: never pushes what the branch verifier would reject', () => {
-  it('refuses an update that would change a published terminal state, and leaves the branch as it was', async () => {
+  it('refuses an update whose transition log disagrees with the published one, and leaves the branch as it was', async () => {
     const { publication: p } = publication();
     const m = manifest();
     await p.admit(m, 'd'.repeat(64));
@@ -360,11 +360,9 @@ describe('publication: never pushes what the branch verifier would reject', () =
     const cancelled = sm.cancel(running, 'op', T0 + 1);
     await p.update({ state: cancelled.state, manifest: m, events: [...admitted.events, ...cancelled.events] });
     const before = remoteCommits();
-    const err = await rejects(() => p.update({ state: running, manifest: m, events: admitted.events }), REFUSAL.EVENTS_DIVERGED);
-    assert.ok(err);
-    const fakeRead = (rel) => remoteFile(rel);
+    await rejects(() => p.update({ state: running, manifest: m, events: admitted.events }), REFUSAL.EVENTS_DIVERGED);
     assert.equal(remoteCommits(), before, 'nothing reached the branch');
-    assert.equal(JSON.parse(fakeRead(P.scorecard)).state, 'cancelled');
+    assert.equal(JSON.parse(remoteFile(P.scorecard)).state, 'cancelled');
   });
 
   it('turns a would-be violation into WOULD_VIOLATE before anything is pushed', async () => {

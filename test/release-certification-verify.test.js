@@ -253,6 +253,30 @@ describe('verifyHistory: a real metrics branch', () => {
     const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
     assert.equal(result.exists, true);
     assert.deepEqual(result.violations.map((v) => v.rule), [RULES.HISTORY_UNREADABLE]);
+    const notARepo = await verify.verifyHistory({ repoDir: tmp, ref: 'metrics' });
+    assert.deepEqual(notARepo.violations.map((v) => v.rule), [RULES.HISTORY_UNREADABLE], 'a wrong --repo is not "nothing published"');
+  });
+
+  it('reports a commit whose changes cannot be read, naming it', async () => {
+    await publishHonestly();
+    const real = async (dir, args) => new Promise((resolve) => {
+      require('node:child_process').execFile('git', args, { cwd: dir }, (err, stdout) => resolve({ code: err ? 1 : 0, stdout: String(stdout) }));
+    });
+    let failed = null;
+    const git = async (dir, args) => {
+      if (args[0] === 'diff-tree' && failed === null) {
+        failed = args[args.length - 1];
+        return { code: 1, stdout: '' };
+      }
+      return real(dir, args);
+    };
+    const result = await verify.verifyHistory({ repoDir: remote, ref: 'metrics', git });
+    assert.deepEqual(result.violations, [{ commit: failed, rule: RULES.HISTORY_UNREADABLE, path: null }]);
+  });
+
+  it('writes a job summary even for a violation with no commit', () => {
+    const md = cli.summaryMarkdown('origin/metrics', { exists: true, commits: 0, violations: [{ commit: null, rule: RULES.HISTORY_UNREADABLE, path: null }] });
+    assert.match(md, /FAILED[\s\S]*\(history\)[\s\S]*HISTORY_UNREADABLE/);
   });
 
   it('keeps the workflow from passing a branch it could not fetch', () => {
