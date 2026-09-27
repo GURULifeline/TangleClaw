@@ -299,6 +299,37 @@ function describeGeneratedGate(content, gateState) {
 }
 
 /**
+ * What regenerating the Caddyfile does to the gate the EXISTING file carries
+ * (#1901). The generator writes one canonical shape: Caddy's `basic_auth` only
+ * while TangleClaw's own login cannot guard the door (#1420), and never a
+ * `forward_auth` or an `import`ed snippet. So a re-apply converges an existing
+ * file to that shape, and an operator is owed a plain statement of any gate the
+ * new file will not carry. Nothing here decides; it reports.
+ *
+ * @param {string|null} existingText - The Caddyfile being replaced, or null.
+ * @param {string} plannedText - The Caddyfile this run would write.
+ * @returns {string[]} One sentence per gate the new file drops; empty when none.
+ */
+function describeGateChange(existingText, plannedText) {
+  if (typeof existingText !== 'string' || existingText === '') return [];
+  const changes = [];
+  const directive = (text, token) => text.split('\n')
+    .some((line) => line.trim().split(/\s+/)[0] === token);
+  const before = caddy.listBasicAuthUsers(existingText);
+  if (before.length > 0 && caddy.listBasicAuthUsers(plannedText).length === 0) {
+    changes.push(`Caddy's basic_auth (${before.length} user${before.length === 1 ? '' : 's'}) will be REMOVED: `
+      + 'the regenerated Caddyfile carries none, because TangleClaw\'s login guards the door (see the login gate line)');
+  }
+  for (const token of ['forward_auth', 'import']) {
+    if (directive(existingText, token) && !directive(plannedText, token)) {
+      changes.push(`the existing Caddyfile has a \`${token}\` directive this tool does not generate; the cutover `
+        + 'converges to the canonical config, and anything it provided (a gate included) will NOT be carried over');
+    }
+  }
+  return changes;
+}
+
+/**
  * What the saved `bindAllInterfaces` will do once an install is back in direct
  * mode — the value caddy mode ignores and the locked settings switch does not
  * show (#1055). Read from the one classification, with the mode swapped, so the
@@ -454,6 +485,11 @@ function writeCutoverResult(resultFile, result) {
       rolledBack: typeof result.rolledBack === 'boolean' ? result.rolledBack : null,
       residual: result.residual || null,
       recovery: result.recovery || null,
+      // #1901 — which gate the written Caddyfile carries and why, and what this
+      // run removed from the one it replaced, so a caller such as install.sh can
+      // tell the operator exactly which gate remains instead of assuming.
+      gateNote: result.gateNote || null,
+      gateChanges: Array.isArray(result.gateChanges) ? result.gateChanges : null,
       finishedAt: new Date().toISOString()
     })}\n`, { mode: 0o600 });
     return true;
@@ -869,6 +905,10 @@ function main() {
     finish(err.cutoverCode === 'ungate-refused' ? CUTOVER_CODES.UNGATE_REFUSED : CUTOVER_CODES.FAILED, err.message);
   }
 
+  // What the new file drops from the one it replaces — computed before
+  // anything is written, so the dry run and the real run report the same thing.
+  const gateChanges = plan.caddyfile ? describeGateChange(ctx.existingCaddyfileText, plan.caddyfile.content) : [];
+
   if (dryRun) {
     // Why the real run would refuse, when it would. Collected while the preview
     // prints, and turned into the exit status at the end, so the preview still
@@ -910,6 +950,7 @@ function main() {
     process.stdout.write(`  health check:    ${plan.healthUrl}\n`);
     process.stdout.write(`  rollback:        ${plan.rollbackHint}\n`);
     if (plan.gateNote) process.stdout.write(`  login gate:      ${plan.gateNote}\n`);
+    for (const change of gateChanges) process.stdout.write(`  gate change:     ${change}\n`);
     if (plan.bindNote) process.stdout.write(`  network binding: ${plan.bindNote}\n`);
     process.stdout.write('\n');
     // A preview changes nothing, so it deliberately writes NO result file: a
@@ -1032,6 +1073,7 @@ function main() {
   process.stdout.write(`\nIngress switched to '${target}'.\n  Health: ${plan.healthUrl}\n  Rollback: ${plan.rollbackHint}\n`);
   process.stdout.write(`  ttyd: ${describeTtydRuntime(ttydRuntime)}\n`);
   if (plan.gateNote) process.stdout.write(`  Login gate: ${plan.gateNote}\n`);
+  for (const change of gateChanges) process.stdout.write(`  Gate change: ${change}\n`);
   if (plan.bindNote) process.stdout.write(`  Network binding: ${plan.bindNote}\n`);
   process.stdout.write('\n');
 
@@ -1074,7 +1116,8 @@ function main() {
     // healthError goes in its OWN field, never as `error`: the cutover succeeded —
     // the plan was applied — and reporting otherwise would tell the wizard a gated
     // install has no login.
-    finish(CUTOVER_CODES.OK, null, { healthUrl: plan.healthUrl, healthOk: ok, healthError });
+    finish(CUTOVER_CODES.OK, null, { healthUrl: plan.healthUrl, healthOk: ok, healthError,
+      gateNote: plan.gateNote, gateChanges });
   });
 }
 
@@ -1230,4 +1273,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { DRY_RUN_WOULD_REFUSE_EXIT, planCutover, runTailnetVerification, describeTtydRuntime, describeDirectBind, describeGeneratedGate, fillTemplate, parseArgs, resolveUpstreamPort, applyDryRunAdoptionPreview, writeCutoverResult, pollHealth, certHostUnion, CUTOVER_CODES };
+module.exports = { DRY_RUN_WOULD_REFUSE_EXIT, describeGateChange, planCutover, runTailnetVerification, describeTtydRuntime, describeDirectBind, describeGeneratedGate, fillTemplate, parseArgs, resolveUpstreamPort, applyDryRunAdoptionPreview, writeCutoverResult, pollHealth, certHostUnion, CUTOVER_CODES };

@@ -713,7 +713,8 @@ describe('deploy/install.sh caddy-mode refresh (#1901, executed)', () => {
     }
     const real = scenario.cutover || { status: 0, ok: true, code: 'ok', healthOk: true };
     fs.writeFileSync(resultFile, JSON.stringify({ ok: real.ok, code: real.code, healthOk: real.healthOk,
-      healthUrl: 'https://localhost:8443/api/health' }));
+      healthUrl: 'https://localhost:8443/api/health', gateNote: real.gateNote || null,
+      gateChanges: real.gateChanges || [] }));
     process.exit(real.status);
   `;
 
@@ -929,6 +930,18 @@ describe('deploy/install.sh caddy-mode refresh (#1901, executed)', () => {
       assert.doesNotMatch(text, /no caddy-mode refresh yet|never deploy\/install\.sh|on a caddy-mode host it refuses/,
         `${f} still sends caddy-mode operators to the old refusal`);
     }
+  });
+
+  it('names the gate that remains in the cutover\'s own words, and never claims a Caddy password was kept', () => {
+    const box = sandbox({ ...CLEAN, cutover: { status: 0, ok: true, code: 'ok', healthOk: true,
+      gateNote: "Caddy's basic_auth is NOT written — TangleClaw's login (armed) is the gate for every site",
+      gateChanges: ["Caddy's basic_auth (1 user) will be REMOVED: the regenerated Caddyfile carries none"] } });
+    const { code, output } = runInstall(box);
+    assert.equal(code, 0, output);
+    assert.match(output, /Login gate now: Caddy's basic_auth is NOT written — TangleClaw's login \(armed\) is the gate for every site/);
+    assert.match(output, /Gate change: {4}Caddy's basic_auth \(1 user\) will be REMOVED/);
+    assert.doesNotMatch(output, /gate was kept/i, 'an existing Caddy gate must never be claimed as preserved');
+    assert.match(output, /which login gate is in force is above/);
   });
 
   it('fails, bounded, when restart 2 never confirms healthy', () => {

@@ -543,6 +543,16 @@ else
     fi
   fi
   green "  Restart 2 of 2 confirmed: healthy through Caddy (${CUTOVER_HEALTH_URL})"
+  # Which gate remains, in the cutover's own words, and anything the regenerated
+  # Caddyfile no longer carries. Reported, never assumed: when TangleClaw's login
+  # guards the door the cutover omits Caddy's basic_auth by design (#1420), so a
+  # refresh must not claim an existing Caddy password survived.
+  node -e '
+    try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      if (r.gateNote) console.log("  Login gate now: " + r.gateNote);
+      for (const c of r.gateChanges || []) console.log("  Gate change:    " + c); }
+    catch { console.log("  Login gate now: not reported by the cutover (see its output above)"); }
+  ' "$CUTOVER_RESULT" 2>/dev/null || true
   echo ""
 fi
 
@@ -629,7 +639,7 @@ if [ -n "$TCC_PROJECTS_PROTECTED" ]; then
   echo ""
 fi
 if [ "$INGRESS_MODE" = "caddy" ]; then
-  echo "  Mode:           caddy (deploy assets refreshed; the login gate was kept)"
+  echo "  Mode:           caddy (deploy assets refreshed; which login gate is in force is above)"
   echo "  Landing page:   ${CUTOVER_HEALTH_URL%/api/health}"
 else
   echo "  Landing page:  ${PROTOCOL}://localhost:3102"
@@ -643,7 +653,7 @@ echo ""
 # AUTH-1 (#395) / #710: the password-gated Caddy ingress is the DEFAULT outcome of
 # setup as of v5, not an opt-in extra. A direct-mode run is told how to reach
 # that default state, and plainly that the cutover alone does not create a
-# login. A caddy-mode run is already there, and its gate was kept.
+# login. A caddy-mode run is already there, and has reported which gate is in force.
 if [ "$INGRESS_MODE" = "caddy" ]; then
   exit 0
 fi

@@ -157,6 +157,20 @@ describe('ingress-cutover --dry-run exit status (#1901)', () => {
     assert.ok(!r.stderr.includes(hash) && !r.stdout.includes(hash), 'the credential hash is never echoed');
   });
 
+  it('says in the dry run that an unsupported manual gate will converge to the canonical config', () => {
+    const box = sandbox('manual-gate');
+    initStore(box);
+    fs.writeFileSync(box.caddyfile,
+      'localhost:8443 {\n  forward_auth 127.0.0.1:9000 {\n    uri /check\n  }\n  reverse_proxy localhost:3102\n}\n');
+    const refused = cutover(box, ['--to', 'caddy', '--dry-run']);
+    assert.equal(refused.status, DRY_RUN_WOULD_REFUSE_EXIT, 'a hand edit is still refused without --force');
+    const forced = cutover(box, ['--to', 'caddy', '--dry-run', '--force']);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.match(forced.stdout,
+      /gate change: {5}the existing Caddyfile has a `forward_auth` directive this tool does not generate; the cutover converges to the canonical config/);
+    assert.match(refused.stdout, /gate change:.*`forward_auth`/, 'and the refused preview names it too, before any decision');
+  });
+
   it('exits 1 with the typed ttyd-runtime-unavailable code when no runtime resolves', () => {
     const box = sandbox('no-runtime', { runtime: false });
     const r = cutover(box, ['--to', 'caddy', '--dry-run', '--result-file', box.resultFile]);
