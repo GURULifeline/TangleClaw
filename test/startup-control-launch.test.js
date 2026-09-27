@@ -167,11 +167,12 @@ describe('startupControl at launch and teardown (codex)', () => {
     const sp = calls.spawn[0];
     assert.equal(sp.bin, '/opt/fake/bin/codex');
     assert.deepEqual(sp.args.slice(0, 2), ['app-server', '--listen']);
+    assert.equal(sp.args.length, 3, 'network policy stays on the TUI/thread, not competing app-server flags');
     assert.match(sp.args[2], /^unix:\/\/.+\/run\/startup-control\/[0-9a-f]{16}\.sock$/);
     assert.ok(sp.args[2].includes(tempDir), 'the socket is requested under the store base path');
     assert.equal(sp.opts.detached, true);
     assert.equal(sp.opts.cwd, l.project.path);
-    assert.match(l.command, /codex --remote unix:\/\/\/private\/tmp\/fake-daemon\/[0-9a-f]{16} --ask-for-approval never --sandbox workspace-write/);
+    assert.match(l.command, /codex --remote unix:\/\/\/private\/tmp\/fake-daemon\/[0-9a-f]{16} --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write\.network_access=true$/);
     assert.ok(!l.command.includes('--no-daemon'), 'a per-launch --remote server needs no legacy daemon isolation');
     const channel = store.startupControlChannels.getOpenBySession(l.session.id);
     assert.ok(channel, 'a channel row is open for the session');
@@ -251,7 +252,7 @@ describe('startupControl at launch and teardown (codex)', () => {
     l = launched({ launchMode: 'fullAuto' });
     assert.equal(calls.spawn.length, 0, 'an unverified native protocol does not start an app-server');
     assert.ok(!l.command.includes('--remote'));
-    assert.match(l.command, /codex --ask-for-approval never --sandbox workspace-write --no-daemon$/);
+    assert.match(l.command, /codex --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write\.network_access=true --no-daemon$/);
     assert.equal(store.startupControlChannels.getOpenBySession(l.session.id), null);
 
     healthySeams({ spawn: () => { throw new Error('ENOENT'); } });

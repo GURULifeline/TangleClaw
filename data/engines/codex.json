@@ -41,10 +41,12 @@
         "--ask-for-approval",
         "never",
         "--sandbox",
-        "workspace-write"
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true"
       ],
-      "description": "Never asks for approval, still sandboxed to the workspace",
-      "warning": "Sandboxed but unattended — review the generated diffs before merging."
+      "description": "No approval prompts; workspace file sandbox with network access for TangleClaw",
+      "warning": "Allows outbound network access, including localhost; file writes remain sandboxed. Review generated diffs before merging."
     },
     "bypassPermissions": {
       "label": "Bypass",

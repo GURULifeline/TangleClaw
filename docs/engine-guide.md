@@ -30,8 +30,10 @@ Engine profiles live in `~/.tangleclaw/engines/`. TangleClaw ships with five bui
 - **Interaction model**: Session-based
 - **Config file**: `.codex.yaml` (YAML)
 - **Slash commands**: None
-- **Launch modes**: Interactive (default), Full Auto (`--ask-for-approval never --sandbox workspace-write` — no approval prompts, sandbox retained), Bypass (`--dangerously-bypass-approvals-and-sandbox` — no approvals **and no sandbox**, containers/VMs only). Verified against codex-cli 0.145.0. Note this is the one Bypass mode across all engines that also removes the sandbox: Claude's and Antigravity's `--dangerously-skip-permissions` skip approvals only. A bypass posture confirmed on another engine and carried to Codex by an engine switch is therefore wider than the one that was confirmed
+- **Launch modes**: Interactive (default), Full Auto (`--ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true` — no approval prompts, workspace file sandbox retained, outbound network enabled), Bypass (`--dangerously-bypass-approvals-and-sandbox` — no approvals **and no sandbox**, containers/VMs only). Launch arguments are parser-checked against codex-cli 0.157.1. Native network-policy propagation still requires a live host check. Note this is the one Bypass mode across all engines that also removes the sandbox: Claude's and Antigravity's `--dangerously-skip-permissions` skip approvals only. A bypass posture confirmed on another engine and carried to Codex by an engine switch is therefore wider than the one that was confirmed
 - **Capabilities**: Prime prompt, config file, co-author
+
+Full Auto enables network access because `tc start next` and the other TangleClaw CLI verbs call the local HTTP API (#1836). Without it, Codex blocks even localhost and cannot request an exception with approvals set to `never`. The launch-mode warning discloses that this enables outbound network generally, not just TangleClaw. Existing managed network restrictions still apply. The override belongs to the launched TUI/thread; the native app-server keeps its existing policy-free command. Existing sessions must be relaunched before their policy changes. See [official OpenAI documentation](https://learn.chatgpt.com/docs/agent-approvals-security#network-access).
 
 ### Aider
 

@@ -42,14 +42,16 @@ describe('Codex launch modes (#731)', () => {
     assert.ok(!all.includes('--auto-edit'), '--auto-edit was the other unverified guess in #209');
   });
 
-  it('full auto skips approvals but keeps the sandbox', () => {
+  it('full auto can reach TangleClaw while retaining the workspace file sandbox (#1836)', () => {
     // The distinction is the whole point of having two non-default modes: this
     // one is unattended, the other also removes the sandbox.
     assert.deepEqual(
       codex.launchModes.fullAuto.args,
-      ['--ask-for-approval', 'never', '--sandbox', 'workspace-write']
+      ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true']
     );
     assert.ok(codex.launchModes.fullAuto.warning, 'unattended execution must carry a warning');
+    assert.match(codex.launchModes.fullAuto.warning, /outbound network access/i);
+    assert.match(codex.launchModes.fullAuto.warning, /file writes remain sandboxed/i);
   });
 
   it('bypass drops the sandbox too, and says so', () => {
@@ -84,7 +86,7 @@ describe('_buildLaunchCommand assembles Codex modes (#731)', () => {
   it('builds the full-auto command', () => {
     assert.equal(
       sessions._buildLaunchCommand(codex, null, 'fullAuto'),
-      'codex --ask-for-approval never --sandbox workspace-write'
+      'codex --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true'
     );
   });
 

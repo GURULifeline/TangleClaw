@@ -4,6 +4,10 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex Full Auto launches now request network access while retaining the workspace file sandbox, so TangleClaw’s localhost startup sequence is not blocked by the default network-off policy (#1836). The mode warning explicitly discloses outbound network access. Applies to newly launched sessions.
+
 ### Added
 
 - **Roadmap train cards on served plan pages** (#1930). A plan can include a fenced block tagged `tc-train` holding one JSON object. TangleClaw renders it as a collapsible card: a 🚂 row of issue cars, green for closed and grey for open, then the train's name, a closed/total count and an optional `verified` badge. The card expands to the thesis, the issue table and the sequencing note; closed issues show ✅ and are not struck through. The Roadmap Board uses these cards. Raw HTML in plans is still shown as text: the card is built from fixed styles, every value is escaped, links must be absolute `https://` URLs, and unknown keys are refused. A block that doesn't validate shows as code, with the reason above it.
