@@ -88,7 +88,7 @@ describe('lib/scorecard-cache.js (#1949)', () => {
         assert.match(refusal(doc), /issuesClosed\.current must be a whole number/, String(bad));
       }
       const doc = fixture();
-      doc.development.days[0].openBacklogNet = -7;
+      doc.development.days[3].openBacklogNet = -7;
       assert.equal(refusal(doc), null);
     });
 
@@ -129,6 +129,15 @@ describe('lib/scorecard-cache.js (#1949)', () => {
       assert.match(refusal(doc), /days must be newest first, one entry per date/);
       doc = fixture(); doc.development.days = [];
       assert.match(refusal(doc), /days must list 1–31 days/);
+    });
+
+    it('requires today to be the same record as the newest day, so the summary and the drawer agree', () => {
+      let doc = fixture(); doc.development.today.delivery.prsMerged = 4;
+      assert.match(refusal(doc), /today must be the same record as development\.days\[0\]/);
+      doc = fixture(); doc.development.today.date = '2026-09-28';
+      assert.match(refusal(doc), /today must be the same record as development\.days\[0\]/);
+      doc = fixture(); doc.development.today.openBacklogNet = 0;
+      assert.match(refusal(doc), /today must be the same record as development\.days\[0\]/);
     });
 
     it('refuses a window label carrying control or markup-shaped characters', () => {

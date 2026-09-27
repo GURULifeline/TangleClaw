@@ -104,13 +104,25 @@ describe('lib/plan-progress-card.js (#1949)', () => {
   });
 
   describe('Recent Progress card', () => {
-    const html = card.renderProgressBlock('{"card":"recent-progress"}', { scorecard: ok() });
+    // 2026-09-27 16:30 PDT: the fixture's newest day is today in Pacific time.
+    const NOW = Date.parse('2026-09-27T23:30:00Z');
+    const html = card.renderProgressBlock('{"card":"recent-progress"}', { scorecard: ok(), now: NOW });
 
     it('is a closed drawer whose summary shows today (PT) and the window', () => {
       assert.match(html, /^<details class="progress-card progress-recent"><summary/);
       assert.doesNotMatch(html, /<details[^>]* open/);
       assert.match(html, /<strong>Today \(Sun Sep 27, PT\):<\/strong> Delivery: 2 closed, 3 PRs merged, 1 cars, 0 trains · Intake: 1 opened · backlog −1/);
       assert.match(html, /<strong>Last 7 days:<\/strong> Delivery: 12 closed, 15 PRs merged, 6 cars, 1 trains · Intake: 8 opened · backlog −4/);
+    });
+
+    it('calls the newest day "Latest day", not "Today", once the Pacific date has moved on', () => {
+      // 2026-09-28 00:30 PDT: the Pacific date has rolled over.
+      const next = card.renderProgressBlock('{"card":"recent-progress"}', { scorecard: ok(), now: Date.parse('2026-09-28T07:30:00Z') });
+      assert.match(next, /<strong>Latest day \(Sun Sep 27, PT\):<\/strong>/);
+      assert.doesNotMatch(next, />Today /);
+      // 2026-09-27 23:59 PDT is already Sep 28 in UTC, and still today in Pacific.
+      const late = card.renderProgressBlock('{"card":"recent-progress"}', { scorecard: ok(), now: Date.parse('2026-09-28T06:59:00Z') });
+      assert.match(late, /<strong>Today \(Sun Sep 27, PT\):<\/strong>/);
     });
 
     it('opens to a day-by-day table, newest first, with Intake in its own column group', () => {
@@ -151,12 +163,13 @@ describe('lib/plan-progress-card.js (#1949)', () => {
       let reads = 0;
       const page = planDocs.renderPlanPage({
         project: { id: 1, name: 'p' }, file: 'r.md', relative: '.tangleclaw/plans/r.md',
-        modifiedAt: '2026-09-27T00:00:00Z', markdown: md,
+        modifiedAt: '2026-09-27T00:00:00Z', markdown: md, now: Date.parse('2026-09-28T07:30:00Z'),
         scorecard: () => { reads += 1; return { status: sc.STATUS.OK, doc: fixture() }; }
       });
       assert.equal(reads, 1);
       assert.match(page, /aria-label="Project Health"/);
       assert.match(page, /<blockquote><details class="progress-card progress-recent">/);
+      assert.match(page, /Latest day \(Sun Sep 27, PT\)/, 'the page passes its render time through to the card');
       assert.match(page, /\.progress-card\{/, 'the card styles ship with the page');
       assert.doesNotMatch(page, /<script/);
     });
