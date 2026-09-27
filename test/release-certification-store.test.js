@@ -406,12 +406,12 @@ describe('store', () => {
     const p = store.runPaths(base, SHA);
     fs.mkdirSync(p.dir, { recursive: true });
     fs.writeFileSync(p.manifest, '{"half":');
-    fs.writeFileSync(p.lock, JSON.stringify({ pid: 2 ** 22 + 1, host: os.hostname(), writtenAt: 1, token: 'dead' }));
+    fs.writeFileSync(p.lock, JSON.stringify({ pid: 424242, host: os.hostname(), writtenAt: 1, token: 'dead' }));
     const facts = [];
     const onRecover = (f) => facts.push(f.kind);
     const m = manifest();
     const s = sample(0);
-    store.createRun(base, m, sm.admit(m, s), s, { onRecover });
+    store.createRun(base, m, sm.admit(m, s), s, { onRecover, lockDeps: { isAlive: (pid) => pid !== 424242 } });
     fs.appendFileSync(p.samples, '{"seq":2,"to');
     store.updateRun(base, SHA, (state, man) => {
       const out = sm.reduce(state, man, sample(MIN));
