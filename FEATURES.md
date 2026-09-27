@@ -348,6 +348,7 @@ fails any auto-stub section older than 14 days.
 - **Medusa tracked send** (#1839) — `lib/medusa-send.js`. The one path every switchboard send takes: validate delivery metadata against what the caller can prove, record the intent after TangleClaw's own checks, then bind the Hub's id or record what the Hub answered (refused as undeliverable, lost as `send_unknown`, never re-sent). An exchange whose Hub answer is known but cannot be bound is still reported as sent, so a caller is not invited to send a second copy.
 
 - **Release-candidate certification state machine** (#1949) — `lib/release-certification/state-machine.js` (`#admit`, `#reduce`, `#accept`, `#cancel`, `#summarize`), closed codes in `lib/release-certification/codes.js`. Pure judgement of a 72-hour soak pinned to one candidate SHA: which intervals earn qualified time, what extends the run, what hard-fails it, and the PTY-use target. No I/O. Tests: `test/release-certification-state-machine.test.js`.
+- **Release-candidate certification evidence store** (#1949) — `lib/release-certification/store.js` (`#createRun`, `#updateRun`, `#readRun`, `#readSamples`, `#readSnapshots`), on `lib/release-certification/private-fs.js` (0700/0600, atomic replace, torn-tail-safe ndjson) and `lib/release-certification/lockfile.js` (cross-process lock with stale reclaim). One private directory per candidate SHA; `state.json` is the commit point; the manifest digest is verified on every read. Tests: `test/release-certification-store.test.js`.
 
 ## Governance / Engines
 

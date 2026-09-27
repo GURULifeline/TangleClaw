@@ -357,6 +357,22 @@ describe('target, PTY use and review', () => {
     refuses(() => sm.reduce(passed, m, sample(4 * MIN)), REFUSAL.ALREADY_TERMINAL);
   });
 
+  it('refuses every operation on a cancelled or failed run', () => {
+    const live = run(m, [sample(MIN)]).state;
+    const cancelled = sm.cancel(live, 'jason', 5).state;
+    const failed = run(m, [sample(MIN, obs({ worktree: { dirty: true } }))]).state;
+    for (const [name, terminal] of [['cancelled', cancelled], ['failed', failed]]) {
+      for (const [op, fn] of [
+        ['reduce', () => sm.reduce(terminal, m, sample(2 * MIN))],
+        ['accept', () => sm.accept(terminal, 'jason', 6)],
+        ['cancel', () => sm.cancel(terminal, 'jason', 6)]
+      ]) {
+        const err = refuses(fn, REFUSAL.ALREADY_TERMINAL);
+        assert.equal(err.details.state, terminal.state, `${op} on ${name}`);
+      }
+    }
+  });
+
   it('cancels a run awaiting review', () => {
     const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]).state;
     assert.equal(sm.cancel(reviewing, 'jason', 7).state.state, STATES.CANCELLED);
