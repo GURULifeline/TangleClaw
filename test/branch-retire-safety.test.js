@@ -163,8 +163,9 @@ describe('branch-retire-safety: against real git', () => {
     assert.equal(a.verdict, VERDICTS.PRESERVE);
     assert.deepEqual(codes(a), [REASONS.UNIQUE_COMMITS]);
     assert.deepEqual(a.unique, { count: 1, shas: [wrap] });
-    assert.match(a.safeNextAction, /Keep 'feat'/);
+    assert.match(a.safeNextAction, /Do not delete or reset 'feat'/);
     assert.match(a.safeNextAction, /git worktree add <new-path> origin\/main/);
+    assert.doesNotMatch(a.safeNextAction, /worktree remove/, 'no tree holds it, so no tree-retire step is offered');
     assert.doesNotMatch(a.safeNextAction, /git branch -d/);
     assert.match(brs.render(a), new RegExp(wrap));
   });
@@ -183,6 +184,9 @@ describe('branch-retire-safety: against real git', () => {
     const held = a.worktrees.filter((w) => w.holdsTarget);
     assert.equal(held.length, 1);
     assert.deepEqual(held[0].dirt, { staged: 0, unstaged: 0, unmerged: 0, untracked: 1 });
+    assert.match(a.safeNextAction, /plain `git worktree remove <tree>` \(never `--force`\)/);
+    assert.match(a.safeNextAction, /--ignored/);
+    assert.ok(a.safeNextAction.includes(held[0].path), 'the advice names the tree holding the branch');
   });
 
   it('a stale remote-tracking ref is never evidence: the fresh fetch prunes it and the commit is unique again', async () => {
@@ -311,7 +315,7 @@ describe('branch-retire-safety: against real git', () => {
     assert.equal(a.verdict, VERDICTS.UNKNOWN);
     assert.ok(codes(a).includes(REASONS.NO_REMOTE));
     assert.doesNotMatch(a.safeNextAction, /origin/, 'no remote is invented for the next step');
-    assert.match(a.safeNextAction, /Keep 'feat'/);
+    assert.match(a.safeNextAction, /Do not delete or reset 'feat'/);
   });
 
   it('a missing branch, an option-shaped name and a non-repository are unknown', async () => {
@@ -340,7 +344,16 @@ describe('branch-retire-safety: against real git', () => {
     assert.equal((await check(dir, 'feat')).verdict, VERDICTS.PRESERVE);
 
     fs.rmSync(path.join(linked, 'plan.md'));
+    // Why the rule's clean-tree step asks for --ignored: a gitignored file is
+    // not a reason for git to refuse, and it is gone with the tree.
+    fs.writeFileSync(path.join(linked, '.gitignore'), 'local.env\n');
+    git(linked, 'add', '.gitignore');
+    git(linked, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'ignore local.env');
+    git(linked, 'push', '-q');
+    fs.writeFileSync(path.join(linked, 'local.env'), 'SECRET=1\n');
+    assert.match(git(linked, 'status', '--porcelain', '--untracked-files=all', '--ignored'), /!! local\.env/);
     git(dir, 'worktree', 'remove', linked);
+    assert.equal(fs.existsSync(linked), false, 'plain remove deleted the tree, ignored file included');
     const a = await check(dir, 'feat');
     assert.equal(a.verdict, VERDICTS.SAFE, JSON.stringify(a.reasons));
   });
