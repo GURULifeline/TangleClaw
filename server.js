@@ -7081,19 +7081,30 @@ function registerMedusaRoutes(prefix, resolve) {
     jsonResponse(res, 200, bridge ? { ...status, bridge } : status);
   });
 
-  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). A pure
-  // read (no mark-read side effect on GET); the read panel clears unread via
-  // POST /read. No live participant → an empty inbox.
+  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). It never
+  // marks mail handled or clears unread. For any other reader it records a
+  // `read` fact for what it returned (#1839); for the dashboard (`operator-ui`)
+  // it records nothing, because a read fact changes the exchange: it ends
+  // awaiting-read and wake re-arms, and forbids a retract. The inbox panel
+  // calls this route and nothing else, so viewing mail never acts for the
+  // agent (#1987). No live participant → an empty inbox.
   route('GET', `${prefix}/messages`, (req, res, params) => {
     const r = resolve(params, parseQuery(reqUrl(req).search));
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
     const sessionId = r.target ? r.target.sessionId : (r.fallbackSessionId || null);
     const messages = sessionId == null ? [] : medusa.getMessages(sessionId);
     // #1839: record what was actually shown to the reader, and who read it.
-    if (r.target && messages.length > 0) {
+    // The dashboard records nothing (#1987): recordRead ignores `operator-ui`,
+    // and a browser-shaped request that is not the agent's verified launch is
+    // treated as the dashboard too, so an auth gate in fallback or unreadable
+    // (the operator unproven) does not turn viewing into an unverified read.
+    // Presenting that shape can only suppress a read record, never forge one.
+    const reader = r.target && messages.length > 0 ? exchangeCaller(req, targetProjectId(r.target), true) : null;
+    const viewing = reader && reader.kind !== 'project' && isOperatorShaped(req);
+    if (reader && !viewing) {
       try {
         medusaExchanges.recordRead(messages.map((m) => m && m.id).filter(Boolean),
-          medusa.getStatus(sessionId).workspaceId, exchangeCaller(req, targetProjectId(r.target), true));
+          medusa.getStatus(sessionId).workspaceId, reader);
       } catch (err) { // prawduct:allow prawduct/broad-except -- a failed read record must not withhold the inbox from its reader
         log.warn('Could not record Medusa reads', { sessionId: String(sessionId), error: err.message });
       }
@@ -10205,8 +10216,8 @@ async function handleRequest(req, res) {
     // header, and they keep working exactly as written.
     //
     // Keyed on a body being PRESENT, not on the method. The dashboard sends
-    // genuine bodyless writes (`medusa/toggle`, `medusa/read`,
-    // `wrap-sentinel/ack` go through `api()` with no body and no
+    // genuine bodyless writes (`medusa/toggle` and `wrap-sentinel/ack` go
+    // through `api()` with no body and no
     // Content-Type), and refusing those would break the operator's own UI to
     // close nothing — a request with no body carries no forged payload. The
     // residual is a bodyless same-site POST to a route that acts without one;
