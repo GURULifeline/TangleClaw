@@ -136,6 +136,7 @@ Also fixed:
 
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 ## 2026-09-28 — A reproducible load-and-fault schedule for the release-candidate soak (#2020)
+## 2026-09-28 — A reproducible load-and-fault schedule for the release-candidate soak (#2020 Chunk 2A)
 
 <!-- prawduct: type=feature | scope=2020-soak-schedule -->
 
@@ -150,6 +151,12 @@ Also fixed:
 - `deploy/soak/stub-engine/` holds the Q4 stand-in engine, which has no network access.
 
 **Descoped, explicitly:** the `browser` and `fault` executors. They act on processes inside the guest, so they can be neither verified nor safely run until Chunk 1's guest exists. `run` refuses them (`NO_EXECUTOR`) rather than skipping them. They need a follow-on dispatch.
+
+**Architect ruling (2026-09-28, via the PM) on the items below:**
+- Nothing is dropped from #2020. This branch is **Chunk 2A**, the core.
+- Plans and switchboard load, and the wrap and switchboard engine journeys, are a mandatory **Chunk 2B**.
+- The exact-owned synthetic `soak-*` repos with local bare origins are mandatory **Chunk 1** guest provisioning.
+- Both are required before the first guest dry run, and each is dispatched separately.
 
 **Also descoped, and not declared until the cumulative Critic `rev-20260928T185141Z-f04421bb` caught it (BLOCKING).** These are Chunk 2 items from the plan that were neither built nor listed. Nobody had ruled on them; they are pending the PM's ruling, now requested. They are recorded in the plan (§4), the README status block and the CHANGELOG:
 - API load against **plans and the switchboard**. Built: health, server-info, projects, ports.
@@ -244,6 +251,9 @@ Also fixed:
     - The dead `restIsDamage` clause is dropped.
     - **Tests now enumerate the threat, not the reported case.** Both fragment kinds, a record cut mid-way and a complete record missing only its newline, are resumed with the seal cut at every byte. A two-level test cuts a second seal too. Each case must read back identically twice.
     - The complete-record test fails on the `f109c34e` reader.
+  - *Verify-resolutions `rev-20260928T190622Z-463e228b` at `11a055e7`:* R-2 is resolved. Its three observations are folded into the final commit:
+    - the seal-cut tests require `completed` and check that each event is on record exactly once, at every cut;
+    - `readLog`'s JSDoc names `finishSeal`.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
     - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
     - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.

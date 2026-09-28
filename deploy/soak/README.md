@@ -8,18 +8,19 @@ It judges nothing. Whether the release candidate passes is decided by the releas
 judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces the conditions and
 records what happened.
 
-> **Status: partial.** This directory has the schedule, the runner for the `api` and `engine`
+> **Status: Chunk 2A (the core).** This directory has the schedule, the runner for the `api` and `engine`
 > load classes, and the stub engine. Not built yet:
 > - the guest itself;
 > - the executors for the `browser` and `fault` classes;
 > - integrity sampling, the evidence bundle and the operator runbook;
-> - **explicitly descoped from this chunk, pending the PM's ruling:**
->   - API load against plans and the switchboard (the API load built covers health, server-info,
+> - **Chunk 2B, mandatory before the first guest dry run** (Architect ruling):
+>   - API load against plans and the switchboard (this chunk, 2A, covers health, server-info,
 >     projects and ports);
->   - stub-engine sessions that exercise wrap and the switchboard (the engine cycle covers launch,
+>   - stub-engine sessions that exercise wrap and the switchboard (2A's engine cycle covers launch,
 >     commands and kill);
->   - generating the synthetic `soak-*` repos with a local bare origin. Today they must already
->     exist on the target.
+> - **Chunk 1, also mandatory before the dry run:** deterministic, idempotent creation of the
+>   exact-owned synthetic `soak-*` repos with local bare origins. Until then they must already exist
+>   on the target.
 >
 > Until the missing executors exist, `run` **refuses** any schedule containing those kinds
 > (`NO_EXECUTOR`) rather than skipping them. Plan with `--classes api,engine` to run the load

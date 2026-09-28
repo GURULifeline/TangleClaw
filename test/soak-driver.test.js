@@ -388,8 +388,22 @@ describe('soak driver — resume', () => {
      */
     async function resumesCleanly(s, label) {
       const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0 + 10 * MIN) });
-      assert.ok(result.status === 'completed' || result.status === 'already-complete', label);
+      assert.equal(result.status, 'completed', label);
       const once = driver.readLog(logPath);
+      // Every event is on record exactly once: none lost, none duplicated,
+      // whatever the crash cut. The sealed region is the only place bytes of
+      // a record may sit outside the record list.
+      const events = fs.readFileSync(logPath, 'utf8').split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } });
+      const sealedAt = new Set(events.filter((r) => r && r.type === 'torn-tail-sealed').map((r) => r.offset));
+      let offset = 0;
+      const counted = [];
+      for (const line of fs.readFileSync(logPath, 'utf8').split('\n')) {
+        let r = null;
+        try { r = JSON.parse(line); } catch { r = null; }
+        if (r && r.type === 'event' && !sealedAt.has(offset)) counted.push(r.index);
+        offset += Buffer.byteLength(line) + 1;
+      }
+      assert.deepEqual([...counted].sort((a, b) => a - b), s.events.map((e) => e.index), `${label}: each event exactly once`);
       const twice = driver.readLog(logPath);
       assert.equal(once.ended, true, label);
       assert.equal(once.torn, null, `${label}: nothing left pending`);
