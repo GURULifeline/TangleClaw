@@ -7093,12 +7093,18 @@ function registerMedusaRoutes(prefix, resolve) {
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
     const sessionId = r.target ? r.target.sessionId : (r.fallbackSessionId || null);
     const messages = sessionId == null ? [] : medusa.getMessages(sessionId);
-    // #1839: record what was actually shown to the reader, and who read it
-    // (recordRead ignores the dashboard, #1987).
-    if (r.target && messages.length > 0) {
+    // #1839: record what was actually shown to the reader, and who read it.
+    // The dashboard records nothing (#1987): recordRead ignores `operator-ui`,
+    // and a browser-shaped request that is not the agent's verified launch is
+    // treated as the dashboard too, so an auth gate in fallback or unreadable
+    // (the operator unproven) does not turn viewing into an unverified read.
+    // Presenting that shape can only suppress a read record, never forge one.
+    const reader = r.target && messages.length > 0 ? exchangeCaller(req, targetProjectId(r.target), true) : null;
+    const viewing = reader && reader.kind !== 'project' && isOperatorShaped(req);
+    if (reader && !viewing) {
       try {
         medusaExchanges.recordRead(messages.map((m) => m && m.id).filter(Boolean),
-          medusa.getStatus(sessionId).workspaceId, exchangeCaller(req, targetProjectId(r.target), true));
+          medusa.getStatus(sessionId).workspaceId, reader);
       } catch (err) { // prawduct:allow prawduct/broad-except -- a failed read record must not withhold the inbox from its reader
         log.warn('Could not record Medusa reads', { sessionId: String(sessionId), error: err.message });
       }

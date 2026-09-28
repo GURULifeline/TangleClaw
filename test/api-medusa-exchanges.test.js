@@ -18,6 +18,7 @@ setLevel('error');
 const store = require('../lib/store');
 const medusa = require('../lib/medusa');
 const medusaExchanges = require('../lib/medusa-exchanges');
+const gateFallback = require('../lib/gate-fallback');
 const { createServer } = require('../server');
 const { operatorHeaders, bindProject } = require('./_shared-docs-callers');
 
@@ -378,6 +379,29 @@ describe('API — Medusa exchanges (#1839)', () => {
     assert.ok(again.data.messages.some((m) => m.id === hubId), 'still in the inbox');
     const pmCaller = { kind: 'project', projectId: pm.id };
     assert.equal(medusaExchanges.retract(hubId, pmCaller, { reason: 'superseded' }).state, 'retracted', 'still retractable');
+  });
+
+  it('records no read for a dashboard view whose operator cannot be proven (gate in fallback)', async () => {
+    const hubId = await unreadWithWake();
+    const before = standing(hubId);
+    const cfg = store.config.load();
+    const prevAuth = cfg.authEnabled;
+    store.users.create(`rosie${Date.now()}`, 'correct horse battery staple');
+    store.config.save({ ...cfg, authEnabled: true });
+    gateFallback.writeMarker(gateFallback.markerPath(), { createdAt: new Date().toISOString() });
+    try {
+      const viewed = await call(server, 'GET', `${builderBase()}/messages`, null, op);
+      assert.equal(viewed.status, 200, JSON.stringify(viewed.data));
+      assert.ok(viewed.data.messages.some((m) => m.id === hubId));
+    } finally {
+      gateFallback.removeMarker(gateFallback.markerPath());
+      store.getDb().prepare('DELETE FROM users').run();
+      store.config.save({ ...store.config.load(), authEnabled: prevAuth });
+    }
+    assert.deepEqual(standing(hubId), before, 'no unverified-reader read either');
+    // A caller that is not browser-shaped (an agent's plain curl) still records its read.
+    await call(server, 'GET', `${builderBase()}/messages`);
+    assert.equal(standing(hubId).read[0].actor, 'unverified-reader');
   });
 
   it('still records the agent\'s own read, with every transition it carries (#1987 pair)', async () => {
