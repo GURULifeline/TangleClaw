@@ -1314,6 +1314,39 @@ describe('soak driver — the log lock and header', () => {
       await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_LOCK_LOST');
     });
 
+    it('keeps the run\'s own error first when closing the segment also fails, and reports it', async () => {
+      const boom = new Error('primary failure');
+      const failRm = { rmSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; } };
+      let calls = 0;
+      await assert.rejects(
+        driver.runSchedule({
+          schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), segmentFs: failRm,
+          shouldStop: () => { if (++calls === 3) throw boom; return false; }
+        }),
+        (err) => err === boom && /could not be removed \(EIO\)/.test(err.segmentCloseFailed.why)
+      );
+      assert.ok(fs.existsSync(driver.segmentPath(logPath)), 'the marker stays, so the log stays refused');
+    });
+
+    it('fails a clean run with SEGMENT_CLOSE_FAILED when the marker cannot be removed', async () => {
+      const failRm = { rmSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; } };
+      await assert.rejects(
+        driver.runSchedule({ schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), segmentFs: failRm }),
+        (err) => err.code === 'SEGMENT_CLOSE_FAILED' && err.details.result.status === 'completed'
+      );
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+    });
+
+    it('reports how the lock release went when a reconcile is refused', async () => {
+      const s = apiSchedule();
+      await crashedRun(s, { pid: deadPid(), host: os.hostname() }, { lock: false });
+      const perm = { readFileSync: fs.readFileSync, rmSync: () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; } };
+      await assert.rejects(
+        driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: perm } }),
+        (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && /EPERM/.test(err.lockRelease.releaseFailed.why)
+      );
+    });
+
     const tampers = [
       ['a marker naming another log', (m) => { m.logPath = '/tmp/other.ndjson'; }],
       ['a marker whose start sha256 was altered', (m) => { m.logSha256AtStart = '0'.repeat(64); }],

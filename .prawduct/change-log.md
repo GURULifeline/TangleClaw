@@ -294,6 +294,10 @@ Also fixed:
         - a graceful stop closes the segment;
         - the stop protocol: stopped-clean at release, then cleanup, then resume; a crash after release but before cleanup resumes with no lock; a judge refuses a leftover stopped-clean marker; four stopped-clean tampers are refused, including a byte appended after the stop; a loss before the stop commit writes neither the stop record nor the transition.
       - **Mutation checks:** each of these fails the tests that pin it: removing the owner match, the reader refusal, the keep-open-on-loss rule, the stopped-clean transition, the whole-log binding, or the ownership check on the stop append.
+      - *Verify-resolutions `rev-20260928T201939Z-90bb23d6` at `55181dcb`:* clean. Two observations were fixed because they touch the stated primary-error rule:
+        - `closeSegment` failing no longer replaces the run's error. A failed run carries `segmentCloseFailed`, and a clean run fails with `SEGMENT_CLOSE_FAILED`. The marker stays, so the log stays refused.
+        - A reconcile refusal now carries how the lock release went (`lockRelease`).
+        - All three cases are tested.
       - *RB* (the check-then-write window) is accepted and documented as a known limit.
       - The carried root-skip is added to both chmod-based tests.
     - *O1: accepted and documented* as a known limit. The log is unsigned, so seals detect damage, not forgery.
