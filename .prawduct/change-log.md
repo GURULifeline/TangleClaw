@@ -48,6 +48,19 @@ The PM dispatched this over Medusa. The Architect ruled on scope under A24 (the 
 **Not claimed.** The June "restart did nothing, uptime kept counting" symptom was the server process not recycling. It is separate, unattributed without a live repro, and not addressed here. The user guide says so and names what to capture.
 
 **Evidence.** The tests run against a mock `ServiceWorkerContainer` and a stub DOM; no live-browser check was run. They show the banner requests exactly one update per appearance, and none on repeated polls. They also show that a check which finds a new worker drives the existing controllerchange path to reload exactly once, that an absent hook renders an identical banner, and that `sw-register.js` loads before `landing.js`.
+## 2026-09-27 — Codex wakes observe the bound thread; a stalled wake is logged and reported (#1978)
+
+<!-- prawduct: type=bugfix | scope=codex-bound-thread-wake-1978 -->
+
+The PM dispatched it over Medusa as an Architect-prioritized v5.30 durable fix. Plan: `.tangleclaw/plans/1978-codex-bound-thread-wake.md` (local, not tracked).
+
+**Problem.** `startup-control-codex.observeActivity()` required the launch's recorded thread to be the only thread loaded for the project directory. When a subagent or any other thread stayed loaded, every Medusa wake to that Codex session was skipped as `engine-thread-unknown`, silently (verified on the Architect's session 1183).
+
+**The change.**
+- **Chunk 01.** The recorded thread is observed directly. Other loaded project threads can only hold the wake. An active one reads busy (`subagent-active` or `other-thread-active`, from the protocol's `parentThreadId` and `source` metadata), and one in a status outside `idle`, `systemError` and `notLoaded` reads unknown. The process, socket, version, launch and channel checks are unchanged, and so are the pane's composer and busy-turn gates. A binding made in the same observation still requires the sole thread.
+- **Chunk 02.** A session whose wake verdict has been `engine-thread-unknown` for 10 minutes with mail waiting logs one warning per episode and is reported read-only as `/api/server-info` `medusaWakeStalls`. The alert is derived from the verdict's `since`, clears itself, and never injects or sends. The unread count was descoped (a recorded plan DECISION). A dashboard banner was built and then removed on the Architect's ruling (active A24 UI freeze), so there is no UI change.
+
+**Evidence.** The targeted files pass. An integration case, a bound idle root plus an extra loaded thread, observes idle, and the new pins were mutation-checked. The cumulative Critic found 0 blocking; its 3 warnings were resolved or accepted, and verify-resolutions came back clean. On the full suite, `test/tmux.test.js` and `test/activity-observer.test.js` failed under load and pass 3/3 in isolation (untouched files), so that evidence was recorded as degraded. Uncontended full runs then passed at 1f5f21c6 and again at 0c547132 (after the banner removal), and CI passed at both.
 
 ## 2026-09-27 — The Codex approval/user-input wait test waits for acceptance, not a timer (#1846)
 
