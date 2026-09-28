@@ -261,6 +261,7 @@ Also fixed:
       - A structural test pins every fetch call site to `redirect: 'manual'`.
       - With the option removed, all six real-server tests fail and the live stand-in receives the load.
     - *O2: fixed.* `release` reports a lock that vanished or changed hands instead of throwing. A clean run then ends with `LOCK_LOST`, carrying the result. A run that already failed throws its own error, with `lockLost` attached, never masked.
+    - *Verify-resolutions `rev-20260928T192614Z-f110475b` at `fcef14de`:* clean. Its observation was a real (if unlikely) breach of the "never masked" requirement: a lock-file read error other than ENOENT at release, such as EIO or EPERM, still threw and replaced the run's own error. `release` now never throws. Any read or remove failure becomes a lost lock with its reason, and tests cover both the release and the primary-error path.
     - *O1: accepted and documented* as a known limit. The log is unsigned, so seals detect damage, not forgery.
     - *O3: confirmed.* Separate crashes, each exactly sealed, are accepted, and two seals on one region are refused.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.

@@ -941,6 +941,31 @@ describe('soak driver — the log lock and header', () => {
     assert.deepEqual(gone.release().lost, { why: 'lock file removed during the run', holder: null });
   });
 
+  it('reports an unreadable or unremovable lock at release as lost, never throwing', () => {
+    const failing = (what) => ({
+      readFileSync: (p, enc) => { if (what === 'read') { const e = new Error('io'); e.code = 'EIO'; throw e; } return fs.readFileSync(p, enc); },
+      rmSync: (p, o) => { if (what === 'rm') { const e = new Error('perm'); e.code = 'EPERM'; throw e; } return fs.rmSync(p, o); }
+    });
+    const a = driver.acquireLogLock(logPath, { releaseFs: failing('read') });
+    assert.deepEqual(a.release().lost, { why: 'lock unreadable at release (EIO)', holder: null });
+    fs.rmSync(`${logPath}.lock`);
+    const b = driver.acquireLogLock(logPath, { releaseFs: failing('rm') });
+    assert.deepEqual(b.release().lost, { why: 'lock could not be removed at release (EPERM)', holder: null });
+  });
+
+  it('keeps the run\'s own error when the lock is unreadable at release', async () => {
+    const boom = new Error('primary failure');
+    const ioFail = { readFileSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; }, rmSync: fs.rmSync };
+    let calls = 0;
+    await assert.rejects(
+      driver.runSchedule({
+        schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: ioFail },
+        shouldStop: () => { if (++calls === 3) throw boom; return false; }
+      }),
+      (err) => err === boom && /unreadable at release \(EIO\)/.test(err.lockLost.why)
+    );
+  });
+
   it('reports LOCK_LOST, with the run result, when the lock vanished during an otherwise clean run', async () => {
     const s = apiSchedule();
     const executors = recordingExecutors([]);
