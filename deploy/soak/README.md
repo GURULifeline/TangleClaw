@@ -112,9 +112,23 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - An unreadable lock, a live holder, a holder on another host, or a reclaim already in progress
     is refused, naming the file to remove if you are sure no driver is running.
   - Each record is flushed to disk before the next event.
-  - If the lock vanishes or changes hands during a run, the run ends with `LOCK_LOST` rather than a
-    clean result, because another writer may have appended to the log. An error the run hit anyway is
-    reported first, with the loss attached.
+  - **Ownership is re-checked before every log write and before every event**, so the check just
+    before `end` is exact. The moment the lock is found removed, taken over or unreadable:
+    - nothing more is written to the log, not even a note about the loss, because writing without
+      the lock is what the lock forbids;
+    - the loss is recorded beside it in a fail-only sidecar, `<log>.lock-lost`. The sidecar is
+      created atomically and fsynced, and binds the log's absolute path, its size and sha256 at that
+      moment, the expected holder and the one observed;
+    - the run fails with `LOCK_LOST`, or with `LOCK_LOST_UNRECORDED` if even the sidecar could not
+      be written. The log is then never complete.
+  - **While a sidecar exists, the log is refused everywhere**: reading it, resuming it, rerunning
+    it, or judging it (`LOG_LOCK_LOST`). A sidecar that does not bind the log, was altered, or cannot
+    be read is refused too (`LOG_LOCK_LOST_INVALID`), so tampering never turns a refusal into
+    acceptance. Start a new log.
+  - A lock the run still owns but cannot remove is a different failure, `LOCK_RELEASE_FAILED`. The
+    log is intact; only the lock file is left behind.
+  - An error the run hit for another reason is always reported first, with any lock outcome
+    attached.
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
   a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record that binds that
   exact fragment by byte offset, length and sha256. Its event runs again.

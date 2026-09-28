@@ -182,7 +182,7 @@ describe('soak CLI — redirects never carry the load to the live install', () =
 });
 
 describe('soak CLI — a lost lock', () => {
-  it('exits 3 with LOCK_LOST when the lock vanished during an otherwise clean run', async () => {
+  it('exits 3 with LOCK_LOST when the lock vanishes mid-run, records it beside the log, and refuses a rerun', async () => {
     const out = path.join(dir, 's.json');
     await run(['plan', '--seed', 'll', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
     const log = path.join(dir, 'l');
@@ -195,7 +195,11 @@ describe('soak CLI — a lost lock', () => {
     assert.equal(r.code, 3);
     const report = JSON.parse(r.err.trim().split('\n').pop());
     assert.equal(report.code, 'LOCK_LOST');
-    assert.equal(report.details.result.status, 'completed');
+    assert.ok(fs.existsSync(report.details.sidecar), 'the loss is recorded beside the log');
+    assert.ok(!fs.readFileSync(log, 'utf8').includes('"type":"end"'), 'the log never reads as complete');
+    const rerun = await run(['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'], { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
+    assert.equal(rerun.code, 3);
+    assert.equal(JSON.parse(rerun.err.trim().split('\n').pop()).code, 'LOG_LOCK_LOST', 'a rerun is refused, never already-complete');
   });
 });
 

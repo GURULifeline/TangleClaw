@@ -930,69 +930,195 @@ describe('soak driver — the log lock and header', () => {
     assert.equal(fs.existsSync(`${logPath}.lock.reclaim`), false);
   });
 
-  it('never releases a lock it does not hold, and reports it lost instead of throwing', () => {
+  it('release tells ownership loss apart from a lock it still owns but cannot remove, and never throws', () => {
     const lock = driver.acquireLogLock(logPath);
     fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 1, host: 'someone-else' }));
-    const r = lock.release();
+    const taken = lock.release();
     assert.ok(fs.existsSync(`${logPath}.lock`), 'another holder\'s lock survives our release');
-    assert.deepEqual(r.lost, { why: 'lock taken over during the run', holder: { pid: 1, host: 'someone-else' } });
-    const gone = driver.acquireLogLock(`${logPath}2`);
-    fs.rmSync(`${logPath}2.lock`);
-    assert.deepEqual(gone.release().lost, { why: 'lock file removed during the run', holder: null });
-  });
+    assert.deepEqual([taken.lost.why, taken.lost.holder, taken.releaseFailed], ['lock taken over during the run', { pid: 1, host: 'someone-else' }, null]);
+    fs.rmSync(`${logPath}.lock`);
 
-  it('reports an unreadable or unremovable lock at release as lost, never throwing', () => {
-    const failing = (what) => ({
+    const gone = driver.acquireLogLock(logPath);
+    fs.rmSync(`${logPath}.lock`);
+    assert.equal(gone.release().lost.why, 'lock file removed during the run');
+
+    const io = (what) => ({
       readFileSync: (p, enc) => { if (what === 'read') { const e = new Error('io'); e.code = 'EIO'; throw e; } return fs.readFileSync(p, enc); },
       rmSync: (p, o) => { if (what === 'rm') { const e = new Error('perm'); e.code = 'EPERM'; throw e; } return fs.rmSync(p, o); }
     });
-    const a = driver.acquireLogLock(logPath, { releaseFs: failing('read') });
-    assert.deepEqual(a.release().lost, { why: 'lock unreadable at release (EIO)', holder: null });
+    const unreadable = driver.acquireLogLock(logPath, { releaseFs: io('read') });
+    assert.equal(unreadable.release().lost.why, 'lock unreadable (EIO)', 'ownership that cannot be verified is lost');
     fs.rmSync(`${logPath}.lock`);
-    const b = driver.acquireLogLock(logPath, { releaseFs: failing('rm') });
-    assert.deepEqual(b.release().lost, { why: 'lock could not be removed at release (EPERM)', holder: null });
+    const stuck = driver.acquireLogLock(logPath, { releaseFs: io('rm') });
+    const r = stuck.release();
+    assert.equal(r.lost, null, 'a lock we still own was not lost');
+    assert.match(r.releaseFailed.why, /could not be removed \(EPERM\)/);
   });
 
-  it('keeps the run\'s own error when the lock is unreadable at release', async () => {
-    const boom = new Error('primary failure');
-    const ioFail = { readFileSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; }, rmSync: fs.rmSync };
-    let calls = 0;
-    await assert.rejects(
-      driver.runSchedule({
-        schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: ioFail },
-        shouldStop: () => { if (++calls === 3) throw boom; return false; }
-      }),
-      (err) => err === boom && /unreadable at release \(EIO\)/.test(err.lockLost.why)
-    );
-  });
+  describe('a lock lost during a run', () => {
+    const lockFile = () => `${logPath}.lock`;
+    const takeOver = () => fs.writeFileSync(lockFile(), JSON.stringify({ pid: 4242, host: 'intruder' }));
+    const logLines = () => fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-  it('reports LOCK_LOST, with the run result, when the lock vanished during an otherwise clean run', async () => {
-    const s = apiSchedule();
-    const executors = recordingExecutors([]);
-    const first = s.events[0].kind;
-    const inner = executors[first];
-    let done = false;
-    executors[first] = async (...a) => { if (!done) { done = true; fs.rmSync(`${logPath}.lock`); } return inner(...a); };
-    await assert.rejects(
-      driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
-      (err) => err.code === 'LOCK_LOST' && err.details.result.status === 'completed' && /removed/.test(err.details.why)
-    );
-  });
+    it('stops the moment an event finds the lock taken over: that event and end are never written, and a bound sidecar is', async () => {
+      const s = apiSchedule();
+      // Take the lock over inside the SECOND executor call, whatever its kind.
+      const executors = {};
+      let calls = 0;
+      for (const [kind, fn] of Object.entries(recordingExecutors([]))) {
+        executors[kind] = async (...a) => { if (++calls === 2) takeOver(); return fn(...a); };
+      }
+      await assert.rejects(
+        driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
+        (err) => err.code === 'LOCK_LOST' && err.details.observed.host === 'intruder' && err.details.expected.pid === process.pid
+      );
+      const recs = logLines();
+      assert.ok(!recs.some((r) => r.type === 'end'), 'no end');
+      assert.deepEqual(recs.filter((r) => r.type === 'event').map((r) => r.index), [0], 'the first event is on record; the one in flight at the loss is not');
+      assert.ok(!recs.some((r) => r.type === 'lock-lost'), 'nothing about the loss goes into the shared log');
+      const side = JSON.parse(fs.readFileSync(driver.lockLostPath(logPath), 'utf8'));
+      const bytes = fs.readFileSync(logPath);
+      assert.deepEqual([side.logPath, side.logBytes, side.logSha256], [path.resolve(logPath), bytes.length, require('node:crypto').createHash('sha256').update(bytes).digest('hex')]);
+      assert.deepEqual(side.observed, { pid: 4242, host: 'intruder' });
+      assert.equal(fs.readFileSync(lockFile(), 'utf8'), JSON.stringify({ pid: 4242, host: 'intruder' }), 'the other holder\'s lock is left alone');
+    });
 
-  it('never lets a lost lock mask the run\'s own error: the primary error is thrown, carrying the loss', async () => {
-    const s = apiSchedule();
-    const boom = new Error('primary failure');
-    let calls = 0;
-    await assert.rejects(
-      driver.runSchedule({
-        schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0),
-        shouldStop: () => {
-          if (++calls === 3) { fs.rmSync(`${logPath}.lock`); throw boom; }
-          return false;
+    it('checks ownership immediately before end: a loss after the last event leaves no end record', async () => {
+      const s = apiSchedule();
+      const base = fakeClock(T0);
+      let taken = false;
+      // The end record reads the clock just before it is written; take the
+      // lock over at that exact moment, after every event is on record.
+      const clock = {
+        ...base,
+        now: () => {
+          if (!taken && fs.existsSync(logPath) && logLines().filter((r) => r.type === 'event').length === s.events.length) { taken = true; takeOver(); }
+          return base.now();
         }
-      }),
-      (err) => err === boom && err.lockLost && /removed/.test(err.lockLost.why)
+      };
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock }), (err) => err.code === 'LOCK_LOST');
+      const recs = logLines();
+      assert.equal(recs.filter((r) => r.type === 'event').length, s.events.length, 'every event was written while the lock was held');
+      assert.ok(!recs.some((r) => r.type === 'end'), 'but no end');
+      assert.ok(fs.existsSync(driver.lockLostPath(logPath)));
+    });
+
+    it('refuses to read, resume or rerun the log while the sidecar exists: never already-complete', async () => {
+      const s = apiSchedule();
+      const executors = recordingExecutors([]);
+      const k = s.events[0].kind;
+      const inner = executors[k];
+      let fired = false;
+      executors[k] = async (...a) => { if (!fired) { fired = true; fs.rmSync(lockFile()); } return inner(...a); };
+      await assert.rejects(driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOCK_LOST');
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST');
+      const ran = [];
+      await assert.rejects(
+        driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock: fakeClock(T0) }),
+        (err) => err.code === 'LOG_LOCK_LOST'
+      );
+      assert.equal(ran.length, 0, 'the rerun ran nothing');
+      assert.equal(fs.existsSync(lockFile()), false, 'the refused rerun did not even take the lock');
+    });
+
+    const tampers = [
+      ['a sidecar whose sha256 was altered', (side) => { side.logSha256 = '0'.repeat(64); }],
+      ['a sidecar naming another log', (side) => { side.logPath = '/tmp/some-other.ndjson'; }],
+      ['a sidecar claiming more bytes than the log has', (side) => { side.logBytes += 10; }],
+      ['a malformed sidecar', () => 'not json'],
+      ['a sidecar of the wrong type', (side) => { side.type = 'lock-reclaimed'; }]
+    ];
+    for (const [label, edit] of tampers) {
+      it(`still refuses, as invalid, ${label}`, async () => {
+        const s = apiSchedule();
+        const executors = recordingExecutors([]);
+        const k = s.events[0].kind;
+        const inner = executors[k];
+        let fired = false;
+        executors[k] = async (...a) => { if (!fired) { fired = true; takeOver(); } return inner(...a); };
+        await assert.rejects(driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }));
+        const sp = driver.lockLostPath(logPath);
+        const side = JSON.parse(fs.readFileSync(sp, 'utf8'));
+        const out = edit(side);
+        fs.writeFileSync(sp, typeof out === 'string' ? out : JSON.stringify(side));
+        assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST_INVALID', label);
+        fs.rmSync(lockFile(), { force: true });
+        await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_LOCK_LOST_INVALID');
+      });
+    }
+
+    it('refuses, as invalid, a log cut back after the loss was recorded', async () => {
+      const s = apiSchedule();
+      const executors = recordingExecutors([]);
+      const k = s.events[1].kind;
+      const inner = executors[k];
+      let fired = false;
+      executors[k] = async (...a) => { if (!fired) { fired = true; takeOver(); } return inner(...a); };
+      await assert.rejects(driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }));
+      const bytes = fs.readFileSync(logPath);
+      fs.writeFileSync(logPath, bytes.subarray(0, bytes.length - 5));
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST_INVALID');
+    });
+
+    it('reports LOCK_LOST_UNRECORDED, and still writes no end, when the sidecar cannot be created', async () => {
+      const s = apiSchedule();
+      const executors = recordingExecutors([]);
+      const k = s.events[0].kind;
+      const inner = executors[k];
+      let fired = false;
+      executors[k] = async (...a) => {
+        if (!fired) { fired = true; takeOver(); fs.chmodSync(dir, 0o500); }
+        return inner(...a);
+      };
+      try {
+        await assert.rejects(
+          driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
+          (err) => err.code === 'LOCK_LOST_UNRECORDED' && err.details.sidecar === null && /EACCES/.test(err.details.sidecarError)
+        );
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      assert.ok(!logLines().some((r) => r.type === 'end'));
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false);
+    });
+
+    it('keeps the run\'s own error first when the lock is also lost, with the recorded loss attached', async () => {
+      const boom = new Error('primary failure');
+      let calls = 0;
+      await assert.rejects(
+        driver.runSchedule({
+          schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0),
+          shouldStop: () => { if (++calls === 3) { takeOver(); throw boom; } return false; }
+        }),
+        (err) => err === boom && err.lockLost.observed.host === 'intruder' && err.lockLost.sidecar === driver.lockLostPath(logPath)
+      );
+      assert.ok(fs.existsSync(driver.lockLostPath(logPath)), 'the loss is on record even though another error came first');
+    });
+
+    it('keeps the run\'s own error first when the lock is unreadable at release', async () => {
+      const boom = new Error('primary failure');
+      const ioFail = { readFileSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; }, rmSync: fs.rmSync };
+      let calls = 0;
+      await assert.rejects(
+        driver.runSchedule({
+          schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: ioFail },
+          shouldStop: () => { if (++calls === 3) throw boom; return false; }
+        }),
+        (err) => err === boom && /lock unreadable \(EIO\)/.test(err.lockLost.why)
+      );
+    });
+  });
+
+  it('reports LOCK_RELEASE_FAILED, not a loss, when a clean run cannot remove the lock it still owns', async () => {
+    const s = apiSchedule();
+    const perm = { readFileSync: fs.readFileSync, rmSync: () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; } };
+    await assert.rejects(
+      driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: perm } }),
+      (err) => err.code === 'LOCK_RELEASE_FAILED' && err.details.result.status === 'completed'
     );
+    assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'no sidecar: the lock was never lost');
+    fs.rmSync(`${logPath}.lock`);
+    assert.equal(driver.readLog(logPath).ended, true, 'the log is intact and complete');
   });
 
   it('never reclaims a lock held on another host', async () => {
