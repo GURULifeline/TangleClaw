@@ -135,6 +135,34 @@ Also fixed:
   - **Fix.** `GET /api/tc/rotation` now also returns `latest`, and `post` accepts a rotation that is already active and bound to this thread.
 
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
+## 2026-09-28 — A reproducible load-and-fault schedule for the release-candidate soak (#2020)
+
+<!-- prawduct: type=feature | scope=2020-soak-schedule -->
+
+#2020 Chunk 2, dispatched by the PM over Medusa after the Architect's rulings on the overlap checkpoint (Q1–Q4). This is TC-RM02's slice of #1949 Deliverable 2. C01/C02 (#1962, #1975) and Habitat were not touched.
+
+**The change.**
+- `lib/soak/schedule.js` is pure. It hashes a string seed into a mulberry32 PRNG, draws the load and fault streams separately, and applies a quiet window between faults. The schedule's `digest` is a sha256 of its canonical JSON.
+- `validateSchedule` enforces every rule on any schedule, whoever produced it. That includes the Architect's Q3 ruling: no `fault.ttyd.restart` in a `certifying` schedule, because an owned-ttyd generation change hard-fails C01.
+- `lib/soak/executors.js` implements the `api` and `engine` classes over HTTP. `engine.session.cycle` always kills a session it launched, even after a failed command, so one failure cannot leak a session into the rest of the soak.
+- `lib/soak/driver.js` refuses on `INVALID_SCHEDULE`, `NO_EXECUTOR`, `LIVE_INSTALL_TARGET` and `LOG_MISMATCH`. It appends fsynced ndjson, keeps each event's wall-clock slot and records lateness, resumes from the log, and cuts a torn final line.
+- `scripts/soak.js` is the `plan` / `validate` / `run` CLI.
+- `deploy/soak/stub-engine/` holds the Q4 stand-in engine, which has no network access.
+
+**Descoped, explicitly:** the `browser` and `fault` executors. They act on processes inside the guest, so they can be neither verified nor safely run until Chunk 1's guest exists. `run` refuses them (`NO_EXECUTOR`) rather than skipping them. They need a follow-on dispatch.
+
+**Verification.**
+- New suites: `test/soak-{schedule,driver,executors,cli,stub-engine}.test.js`.
+- Baseline suite on `origin/main` 69fc2253: green, with the one ledgered skip.
+- Real-process smoke against a throwaway local HTTP server:
+  - server hit counts matched the planned counts;
+  - a rerun was a no-op;
+  - the live `TANGLECLAW_API` was refused before any request.
+- **Not verified:** the executors against a real TangleClaw server with the stub engine installed. That needs the guest, and the first dry run is where it happens.
+
+**Bugs the tests caught while building:**
+- The stub answered lines that `readline` had buffered after `/exit`.
+- A fake hung request let the event loop exit, because `AbortSignal.timeout`'s timer is unref'd.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
 
