@@ -223,6 +223,25 @@ describe('soak CLI — run', () => {
     assert.equal(r.code, 2);
   });
 
+  it('refuses, with a code, when TANGLECLAW_API is set but is not a URL', async () => {
+    const schedulePath = await planApi();
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'not a url' } });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'GUARD_CONTEXT_ABSENT');
+  });
+
+  it('says on stderr that it is stopping, once, when the first signal arrives', async () => {
+    const schedulePath = await planApi();
+    let fire;
+    let calls = 0;
+    const fetch = async () => { if (++calls === 2) { fire(); fire(); } return { status: 200, text: async () => '{}' }; };
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
+      { fetch, clock: instantClock(), onStopSignal: (fn) => { fire = fn; } });
+    assert.equal(r.code, 4);
+    assert.equal(r.err.split('\n').filter((l) => l.includes('"stopping"')).length, 1);
+  });
+
   it('refuses a target whose name does not resolve', async () => {
     const schedulePath = await planApi();
     const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],

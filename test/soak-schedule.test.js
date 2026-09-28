@@ -247,7 +247,13 @@ describe('soak schedule — validation of tampered or malformed schedules', () =
         c.params.leasePortRange = [3100, 3199];
         for (const e of c.events) if (e.kind === 'api.ports.lease-release') e.params.port = 3102;
       }],
-      ['a load gap below the floor', (c) => { c.params.loadMeanMs = 1; }]
+      ['a load gap below the floor', (c) => { c.params.loadMeanMs = 1; }],
+      // A deleted key would be filled with its default by validation, while
+      // anything reading the file directly would see it missing.
+      ['a deleted faultQuietMs', (c) => { delete c.params.faultQuietMs; }],
+      ['a deleted classes list', (c) => { delete c.params.classes; }],
+      ['an extra params key', (c) => { c.params.note = 'x'; }],
+      ['classes out of canonical order', (c) => { c.params.classes = ['fault', 'api', 'engine', 'browser']; }]
     ];
     for (const [label, mutate] of retarget) {
       it(`rejects ${label}`, () => {

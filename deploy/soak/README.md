@@ -38,6 +38,8 @@ node scripts/soak.js validate --schedule soak-certifying.json
     and its digest recomputed.
 - **Faults are spaced by at least `--fault-quiet-ms`** (default: 10 minutes), so the system gets a
   window to recover before the next one.
+- **The params must be written out in full**, exactly as `plan` writes them. A key deleted by hand is
+  refused, not silently defaulted.
 - **The params have fixed limits, so a hand-edited schedule cannot widen them:**
   - project names must be synthetic (`soak-…`);
   - lease ports stay at 5000 or above, outside TangleClaw's own ranges;
@@ -64,7 +66,9 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     - any local interface address.
   - **By resolution.** It resolves the target's name and refuses when any address it gets is on this
     machine, which catches names no spelling rule anticipates. It fails closed: a name that does not
-    resolve, or resolves to nothing, is refused (`TARGET_UNRESOLVED`).
+    resolve, or resolves to nothing, is refused (`TARGET_UNRESOLVED`). It resolves `TANGLECLAW_API`'s
+    own name too. When that name is a Tailscale or LAN name rather than the hostname, `127.0.0.1` on
+    the live port is still refused, and a live name that does not resolve counts as this machine.
   - **By identity.** It asks both servers for `/api/server-info` and refuses a target that reports the
     same running server (`startedAt` and `startupSha`), which catches a reverse-proxy route.
 - **If the live install's identity cannot be read, `run` refuses** (`LIVE_IDENTITY_UNREADABLE`).
@@ -88,7 +92,7 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
   a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record naming its
   size. Its event runs again.
-- **Ctrl-C stops before the next event** (exit 4). Running the same command again resumes, and no
+- **Ctrl-C stops within a second, before the next event** (exit 4), even during a long wait, and says so on stderr. Running the same command again resumes, and no
   logged event runs twice.
 - **An engine cycle cleans up only the harness's own sessions.** It first reads the project's
   session status:

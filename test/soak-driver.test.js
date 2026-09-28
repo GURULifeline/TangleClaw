@@ -61,6 +61,16 @@ function records(p) {
   return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
+/**
+ * A stop condition that trips once the log holds `k` event records, so a test
+ * says "stop after k events" rather than counting how often the driver asks.
+ * @param {number} k - Events to allow
+ * @returns {() => boolean} Stop check
+ */
+function afterEvents(k) {
+  return () => fs.existsSync(logPath) && fs.readFileSync(logPath, 'utf8').split('\n').filter((l) => l.includes('"type":"event"')).length >= k;
+}
+
 let dir;
 let logPath;
 beforeEach(() => {
@@ -185,11 +195,10 @@ describe('soak driver — resume', () => {
     const s = apiSchedule();
     const clock = fakeClock(5_000);
     const firstRun = [];
-    let n = 0;
     const stopAfter = 4;
     const first = await driver.runSchedule({
       schedule: s, executors: recordingExecutors(firstRun), ctx: {}, logPath, clock,
-      shouldStop: () => n++ >= stopAfter * 2 // checked twice per event
+      shouldStop: afterEvents(stopAfter)
     });
     assert.equal(first.status, 'stopped');
     assert.equal(firstRun.length, stopAfter);
@@ -210,8 +219,7 @@ describe('soak driver — resume', () => {
   it('runs an event that is only slightly late at once, and records how late', async () => {
     const s = apiSchedule();
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(1) });
     const next = s.events[1];
     clock.advance(next.atMs - s.events[0].atMs + 20 * 1000); // resume 20 s after the next slot
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
@@ -224,8 +232,7 @@ describe('soak driver — resume', () => {
   it('skips and records load that went stale while it was down, then runs the rest on time', async () => {
     const s = apiSchedule();
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(1) });
     clock.advance(5 * MIN);
     const ran = [];
     const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock });
@@ -245,8 +252,7 @@ describe('soak driver — resume', () => {
   it('seals a torn final line by appending, never rewriting, and runs that event again', async () => {
     const s = apiSchedule();
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 6 });
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(3) });
     const fragment = '{"type":"event","index":3,"kind":"api.he';
     fs.appendFileSync(logPath, fragment);
     const before = fs.readFileSync(logPath, 'utf8');
@@ -446,6 +452,28 @@ describe('soak driver — resolving the target', () => {
     }
   });
 
+  it('refuses 127.0.0.1 on the live port when TANGLECLAW_API names this machine by another name', async () => {
+    // e.g. a Tailscale name that is not the hostname and so fails every spelling rule.
+    const live = 'http://tc-box.tail123678.ts.net:3102';
+    const lookup = lookupFrom({ 'tc-box.tail123678.ts.net': ['192.168.1.20'] });
+    driver.refuseLiveTarget('http://127.0.0.1:3102', live, names); // the spelling check cannot know
+    await assert.rejects(
+      driver.refuseLiveResolved({ apiBase: 'http://127.0.0.1:3102', liveApi: live, names, lookup }),
+      (err) => err.code === 'LIVE_INSTALL_TARGET'
+    );
+  });
+
+  it('treats a live name that does not resolve as this machine, the protective answer', async () => {
+    await assert.rejects(
+      driver.refuseLiveResolved({ apiBase: 'http://localhost:3102', liveApi: 'http://gone.example:3102', names, lookup: lookupFrom({}) }),
+      (err) => err.code === 'LIVE_INSTALL_TARGET'
+    );
+  });
+
+  it('allows a local target when the live install resolves to another machine', async () => {
+    await driver.refuseLiveResolved({ apiBase: 'http://localhost:3102', liveApi: 'http://far.example:3102', names, lookup: lookupFrom({ 'far.example': ['10.0.0.9'], localhost: ['127.0.0.1'] }) });
+  });
+
   it('really resolves localhost through the system resolver', async () => {
     await assert.rejects(driver.refuseLiveResolved({ apiBase: 'http://localhost.:3102', liveApi: LIVE }), (err) => err.code === 'LIVE_INSTALL_TARGET');
   });
@@ -473,8 +501,7 @@ describe('soak driver — run-time pacing', () => {
   it('keeps faults a full quiet window apart after a long outage, and says so', async () => {
     const s = faultSchedule();
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
+    await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock, shouldStop: afterEvents(1) });
     clock.advance(10 * 60 * MIN); // down for ten hours: most of the schedule is overdue
     await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock });
     const faults = records(logPath).filter((r) => r.type === 'event' && r.kind.startsWith('fault.'));
@@ -498,8 +525,7 @@ describe('soak driver — run-time pacing', () => {
     const [f0, f1] = s.events.filter((e) => e.class === 'fault');
     assert.ok(f1, 'the fixture needs two faults');
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock, shouldStop: () => n++ >= 0 });
+    await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock, shouldStop: () => true });
     clock.advance(f1.atMs + 60 * MIN); // both faults are now overdue
     await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock, shouldStop: () => records(logPath).some((r) => r.index === f0.index) });
     await driver.runSchedule({ schedule: s, executors: allOk(s), ctx: {}, logPath, clock });
@@ -512,8 +538,7 @@ describe('soak driver — run-time pacing', () => {
   it('spaces overdue events instead of firing them in one burst', async () => {
     const s = apiSchedule({ durationMs: 60 * MIN });
     const clock = fakeClock(T0);
-    let n = 0;
-    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(1) });
     clock.advance(50 * MIN);
     // Stale-skipping is turned off here so the catch-up spacing itself is what is measured.
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, catchUpGapMs: 2000, staleLoadMs: Infinity });
@@ -533,6 +558,50 @@ describe('soak driver — run-time pacing', () => {
       assert.equal(r.paced, null);
       assert.equal(r.lateMs, 0);
     }
+  });
+});
+
+describe('soak driver — stopping and record integrity', () => {
+  it('honours a stop during a long deferred-fault wait within one poll, not after the whole window', async () => {
+    const s = sched.buildSchedule({ seed: 'pace', phase: 'certifying', durationMs: 12 * 60 * MIN, loadMeanMs: 5 * MIN, faultMeanMs: 60 * MIN, faultQuietMs: 30 * MIN, classes: ['api', 'fault'] });
+    const executors = {};
+    for (const k of new Set(s.events.map((e) => e.kind))) executors[k] = async () => ({ ok: true, code: 'OK' });
+    const clock = fakeClock(T0);
+    let asked = null;
+    const result = await driver.runSchedule({
+      schedule: s, executors, ctx: {}, logPath, clock, stopPollMs: 1000,
+      // Ask to stop 5 s into the first wait that is longer than a minute.
+      shouldStop: () => {
+        const last = clock.sleeps[clock.sleeps.length - 1];
+        if (asked === null && clock.sleeps.length > 0 && last === 1000) asked = clock.now();
+        return asked !== null && clock.now() >= asked + 5000;
+      }
+    });
+    assert.equal(result.status, 'stopped');
+    assert.ok(clock.now() - asked <= 5000 + 1000, 'stopped within one poll of the request');
+  });
+
+  it('never lets an executor overwrite the fields resume depends on', async () => {
+    const s = apiSchedule();
+    const executors = recordingExecutors([]);
+    for (const k of Object.keys(executors)) executors[k] = async () => ({ ok: true, code: 'OK', type: 'end', index: 999, kind: 'x', startedAt: 1 });
+    await driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) });
+    const ev = records(logPath).filter((r) => r.type === 'event');
+    assert.deepEqual(ev.map((r) => r.index), s.events.map((e) => e.index));
+    assert.ok(ev.every((r) => r.kind === s.events[r.index].kind && r.startedAt > T0));
+  });
+
+  it('uses the validated quiet window, never a value read raw from the file', async () => {
+    const s = sched.buildSchedule({ seed: 'pace', phase: 'certifying', durationMs: 12 * 60 * MIN, loadMeanMs: 5 * MIN, faultMeanMs: 60 * MIN, faultQuietMs: 30 * MIN, classes: ['api', 'fault'] });
+    const tampered = JSON.parse(JSON.stringify(s));
+    delete tampered.params.faultQuietMs;
+    tampered.digest = sched.scheduleDigest(tampered);
+    const executors = {};
+    for (const k of new Set(s.events.map((e) => e.kind))) executors[k] = async () => ({ ok: true });
+    await assert.rejects(
+      driver.runSchedule({ schedule: tampered, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
+      (err) => err.code === 'INVALID_SCHEDULE'
+    );
   });
 });
 

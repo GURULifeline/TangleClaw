@@ -204,6 +204,15 @@ async function cmdRun(flags, io, deps) {
   }
   if (api.protocol !== 'http:' && api.protocol !== 'https:') throw new UsageError('--api must be http or https');
   const liveApi = deps.env.TANGLECLAW_API;
+  if (liveApi) {
+    try {
+      new URL(liveApi); // eslint-disable-line no-new
+    } catch (err) {
+      if (!(err instanceof TypeError)) throw err;
+      // A guard context that cannot be read is no guard context.
+      throw new driver.DriverRefusal(driver.REFUSAL.GUARD_CONTEXT_ABSENT, `refusing to run: TANGLECLAW_API is set but is not a URL (${liveApi})`);
+    }
+  }
   const noLiveInstall = driver.requireGuardContext(liveApi, flags['no-live-install'] === true);
   if (liveApi && flags['no-live-install'] === true) throw new UsageError('--no-live-install contradicts TANGLECLAW_API being set');
   driver.refuseLiveTarget(api.href, liveApi);
@@ -213,7 +222,10 @@ async function cmdRun(flags, io, deps) {
   const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi, fetch: deps.fetch, token, allowUnverifiedLive: flags['allow-unverified-live'] === true });
   if (!identity.checked) io.stderr.write(`${JSON.stringify({ warning: 'IDENTITY_UNCHECKED', reason: identity.reason, liveUnverified: identity.liveUnverified })}\n`);
   let stop = false;
-  deps.onStopSignal(() => { stop = true; });
+  deps.onStopSignal(() => {
+    if (!stop) io.stderr.write(`${JSON.stringify({ stopping: 'before the next event; the log resumes from here' })}\n`);
+    stop = true;
+  });
   const result = await driver.runSchedule({
     schedule,
     executors: EXECUTORS,

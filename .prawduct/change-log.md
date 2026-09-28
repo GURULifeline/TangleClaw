@@ -145,7 +145,7 @@ Also fixed:
 - `lib/soak/schedule.js` is pure. It hashes a string seed into a mulberry32 PRNG, draws the load and fault streams separately, and applies a quiet window between faults. The schedule's `digest` is a sha256 of its canonical JSON.
 - `validateSchedule` enforces every rule on any schedule, whoever produced it. That includes the Architect's Q3 ruling: no `fault.ttyd.restart` in a `certifying` schedule, because an owned-ttyd generation change hard-fails C01.
 - `lib/soak/executors.js` implements the `api` and `engine` classes over HTTP. `engine.session.cycle` always kills a session it launched, even after a failed command, so one failure cannot leak a session into the rest of the soak.
-- `lib/soak/driver.js` refuses on `INVALID_SCHEDULE`, `NO_EXECUTOR`, `LIVE_INSTALL_TARGET` and `LOG_MISMATCH`. It appends fsynced ndjson, keeps each event's wall-clock slot and records lateness, resumes from the log, and cuts a torn final line.
+- `lib/soak/driver.js` refuses on `INVALID_SCHEDULE`, `NO_EXECUTOR`, `LIVE_INSTALL_TARGET` and `LOG_MISMATCH`. It appends fsynced ndjson, keeps each event's wall-clock slot and records lateness, and resumes from the log. At this commit it truncated a torn final line; the F7 remediation below replaced that with append-only sealing.
 - `scripts/soak.js` is the `plan` / `validate` / `run` CLI.
 - `deploy/soak/stub-engine/` holds the Q4 stand-in engine, which has no network access.
 
@@ -202,6 +202,13 @@ Also fixed:
   - `acquireLogLock` gives one driver per log, reclaims only a dead holder on this host, and logs the reclaim. An empty or unreadable lock fails safe.
   - A header without a real `startEpochMs` is refused.
 - *F8: fixed.* There are floors on the gaps, and an absolute cap of 300,000 events, enforced while generating and in validation.
+- **Cumulative Critic `rev-20260928T182655Z-286f32cd` at `df6b7346`: 0 blocking, 3 warnings, 5 notes.** Fixed in the next commit:
+  - *W1:* a deleted `faultQuietMs` validated, because it was filled with its default, but the driver read it raw, which switched spacing off. Params must now be written out in full canonical form, and the driver reads through the normalizer.
+  - *W2:* when `TANGLECLAW_API` names this machine by a Tailscale or LAN name that is not its hostname, `127.0.0.1` on the live port passed both address checks. The live name is now resolved too, and an unresolvable live name counts as local.
+  - *W3:* Ctrl-C waited out a whole deferred-fault window. Waits are now polled every second, and the first signal prints a `stopping` line.
+  - *Notes:* an executor's result can no longer overwrite `type`, `index`, `kind` or `startedAt`. An unparseable `TANGLECLAW_API` is refused with `GUARD_CONTEXT_ABSENT` rather than a stack trace. Two doc contradictions were corrected.
+  - *Note accepted:* a narrow race in stale-lock reclaim, where two drivers start at the same moment on a dead holder's lock. Closing it needs an atomic compare-and-swap that the filesystem does not offer portably. It needs a crash plus two simultaneous operator starts on one log, and a later `readLog` of a doubly-written log would show it.
+  - The W2 and W3 regression tests were confirmed to fail with their fixes reverted.
 - **Real-process smoke, run guest-style with no `TANGLECLAW_API`:**
   - without the flag, `run` refused with `GUARD_CONTEXT_ABSENT`;
   - with `--no-live-install` it completed, and the header recorded the override;

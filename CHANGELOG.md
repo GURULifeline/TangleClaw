@@ -51,7 +51,7 @@ All notable changes to TangleClaw are documented in this file.
     - An engine cycle cleans up only the harness's own leftover `soak-stub` sessions. It never touches a session on another engine.
     - It reads the token from `TANGLECLAW_SERVICE_TOKEN` only.
     - It logs every outcome to an fsynced, owner-only ndjson file.
-    - Interrupted, it resumes without running any event twice. An event missed while it was down runs late, and the lateness is recorded.
+    - Interrupted, it resumes without running any event twice. Ctrl-C takes effect within a second, even during a long wait.
   - **The engine load uses a network-free stub engine** (`deploy/soak/stub-engine/`), because the soak guest has no egress and no vendor credentials. Real-vendor engine behaviour is outside this soak.
   - **Not built yet:** the browser and fault executors, the isolated guest, and the evidence bundle. Until they exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently.
 
