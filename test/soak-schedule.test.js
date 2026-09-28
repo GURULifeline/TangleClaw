@@ -201,6 +201,34 @@ describe('soak schedule — validation of tampered or malformed schedules', () =
     assert.ok(codes(bad).includes('FAULT_IN_QUIET_WINDOW'));
   });
 
+  describe('event params that break the generator\'s rules', () => {
+    const s = build({ durationMs: 24 * HOUR });
+    const first = (kind) => {
+      const i = s.events.findIndex((e) => e.kind === kind);
+      assert.ok(i >= 0, `the fixture schedule has a ${kind}`);
+      return i;
+    };
+    const tampered = [
+      ['a lease port outside the range', 'api.ports.lease-release', (e) => { e.params.port = 3102; }],
+      ['a lease port that is not a whole number', 'api.ports.lease-release', (e) => { e.params.port = '5510'; }],
+      ['a session cycle on a project not in the schedule', 'engine.session.cycle', (e) => { e.params.project = 'TangleClaw'; }],
+      ['a session cycle with a different command count', 'engine.session.cycle', (e) => { e.params.commands = 100000; }],
+      ['an extra key', 'engine.session.cycle', (e) => { e.params.extra = true; }],
+      ['a tmux kill aimed at a project not in the schedule', 'fault.tmux.session-kill', (e) => { e.params.project = 'TangleClaw'; }],
+      ['params on a kind that takes none', 'api.health', (e) => { e.params.path = '/api/server/restart'; }],
+      ['missing params', 'api.health', (e) => { delete e.params; }],
+      ['params that are not an object', 'api.ports.lease-release', (e) => { e.params = [5510]; }]
+    ];
+    for (const [label, kind, mutate] of tampered) {
+      it(`reports ${label}, even with the digest fixed`, () => {
+        const i = first(kind);
+        const bad = edited(s, (c) => mutate(c.events[i]));
+        const found = sched.validateSchedule(bad);
+        assert.deepEqual(found.map((v) => [v.code, v.index]), [['EVENT_PARAMS', i]]);
+      });
+    }
+  });
+
   it('reports a broken index sequence', () => {
     const s = build();
     assert.ok(codes(edited(s, (c) => { c.events[3].index = 99; })).includes('INDEX'));

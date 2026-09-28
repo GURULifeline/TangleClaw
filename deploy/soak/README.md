@@ -47,8 +47,19 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   --api http://<guest-address>:<port> --log soak-certifying.ndjson
 ```
 
-- **`--api` is required and has no fallback.** `run` refuses the TangleClaw named by this pane's own
-  `TANGLECLAW_API` (`LIVE_INSTALL_TARGET`), because the load writes port leases and sessions.
+- **`--api` is required and has no fallback.** The load writes port leases and sessions, so before
+  any load `run` refuses the TangleClaw named by this pane's own `TANGLECLAW_API`
+  (`LIVE_INSTALL_TARGET`) in two ways:
+  - **By address.** It refuses the same origin, and any spelling that reaches the same port on this
+    machine: `127.0.0.1`, `[::1]`, the hostname or its MagicDNS name, a local interface address, or
+    the other scheme.
+  - **By identity.** It asks both servers for `/api/server-info` and refuses a target that reports
+    the same running server (`startedAt` and `startupSha`), which catches a reverse-proxy route.
+  - When a side cannot be read, it prints `IDENTITY_UNCHECKED` with the reason and carries on. For
+    example, a login-gated proxy answers `401`, and then so would every load request.
+- **The target must already have the synthetic projects** (`--projects`, default `soak-a`,
+  `soak-b`, `soak-c`) and no delete password. Otherwise every session cycle is logged as a `404`
+  or `403`.
 - **The token comes from `TANGLECLAW_SERVICE_TOKEN` only.** `--token` is refused.
 - **The log is `0600`.** Each record is flushed to disk before the next event.
 - **Ctrl-C stops before the next event** (exit 4). Running the same command again resumes: no

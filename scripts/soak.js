@@ -192,12 +192,15 @@ async function cmdRun(flags, io, deps) {
   if (api.protocol !== 'http:' && api.protocol !== 'https:') throw new UsageError('--api must be http or https');
   driver.refuseLiveTarget(api.href, deps.env.TANGLECLAW_API);
   const schedule = readSchedule(flags.schedule);
+  const token = deps.env.TANGLECLAW_SERVICE_TOKEN || null;
+  const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi: deps.env.TANGLECLAW_API, fetch: deps.fetch, token });
+  if (!identity.checked) io.stderr.write(`${JSON.stringify({ warning: 'IDENTITY_UNCHECKED', reason: identity.reason })}\n`);
   let stop = false;
   deps.onStopSignal(() => { stop = true; });
   const result = await driver.runSchedule({
     schedule,
     executors: EXECUTORS,
-    ctx: { apiBase: api.href, token: deps.env.TANGLECLAW_SERVICE_TOKEN || null, fetch: deps.fetch },
+    ctx: { apiBase: api.href, token, fetch: deps.fetch },
     logPath: flags.log,
     clock: deps.clock,
     shouldStop: () => stop

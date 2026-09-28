@@ -160,6 +160,17 @@ Also fixed:
   - the live `TANGLECLAW_API` was refused before any request.
 - **Not verified:** the executors against a real TangleClaw server with the stub engine installed. That needs the guest, and the first dry run is where it happens.
 
+**Critic review `rev-20260928T175410Z-bba5dd13` (cumulative, `222a8ee1`): 0 blocking, 3 warnings.**
+- *Guard bypass: fixed.* `refuseLiveTarget` compared origins only, so `127.0.0.1`, `[::1]`, the hostname or MagicDNS name, or the other scheme on the live port got through. It now refuses any local alias of the live port.
+  - A new `refuseSameInstall` also refuses a target whose `/api/server-info` reports the same `startedAt`/`startupSha`. That catches a proxy route that no address check can see.
+  - Verified read-only against the live install: every alias was refused.
+  - The live install's Caddy route on :8443 answers `401` because it is login-gated and this install has no service token. There the identity check reports `IDENTITY_UNCHECKED` and does not refuse. That is harmless: the same `401` would answer every load request, so nothing could be written.
+- *Event params: fixed.* `validateSchedule` never checked event params. It now rejects anything `_taskParams` could not have produced (`EVENT_PARAMS`), and tamper tests cover each case.
+- *No suite evidence: resolved.* The suite ran on the fix commit and its result was recorded.
+- **The Critic's notes, not rated as findings:**
+  - A resumed run fires overdue events back to back, which would bunch faults. That is for the fault-executor follow-on to decide, and it is recorded in the handoff notes.
+  - The target's projects and delete-password prerequisites are now stated in the README.
+
 **Bugs the tests caught while building:**
 - The stub answered lines that `readline` had buffered after `/exit`.
 - A fake hung request let the event loop exit, because `AbortSignal.timeout`'s timer is unref'd.

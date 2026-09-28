@@ -124,15 +124,20 @@ describe('soak CLI — run', () => {
     const log = path.join(dir, 'soak.ndjson');
     const seen = [];
     const fetch = async (url, init) => {
-      seen.push({ origin: url.origin, auth: init.headers.authorization });
+      seen.push({ origin: url.origin, path: url.pathname, auth: init.headers.authorization });
       return { status: 200, text: async () => '{}' };
     };
     const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log],
       { fetch, clock: instantClock(), env: { TANGLECLAW_SERVICE_TOKEN: 'tok', TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 0, r.err);
     assert.equal(JSON.parse(r.out).status, 'completed');
-    assert.ok(seen.length > 0);
-    assert.ok(seen.every((s) => s.origin === 'http://guest.invalid:3102' && s.auth === 'Bearer tok'));
+    // The live install is contacted once, without the token, for the identity
+    // check; every other request goes to the guest, with it.
+    const live = seen.filter((s) => s.origin === 'http://localhost:3102');
+    assert.deepEqual(live, [{ origin: 'http://localhost:3102', path: '/api/server-info', auth: undefined }]);
+    const guest = seen.filter((s) => s.origin !== 'http://localhost:3102');
+    assert.ok(guest.length > 1);
+    assert.ok(guest.every((s) => s.origin === 'http://guest.invalid:3102' && s.auth === 'Bearer tok'));
   });
 
   it('refuses the pane\'s own TangleClaw with exit 3 and makes no request', async () => {
@@ -145,13 +150,35 @@ describe('soak CLI — run', () => {
     assert.equal(calls, 0);
   });
 
+  it('refuses, before any load, a target that reports the same running server as the live install', async () => {
+    const schedulePath = await planApi();
+    const hits = [];
+    const info = JSON.stringify({ startedAt: '2026-09-28T17:27:45.023Z', startupSha: 'b'.repeat(40) });
+    const fetch = async (url) => { hits.push(url.pathname); return { status: 200, text: async () => info }; };
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'https://proxy.example:8443', '--log', path.join(dir, 'l')],
+      { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'LIVE_INSTALL_TARGET');
+    assert.deepEqual(hits, ['/api/server-info', '/api/server-info'], 'only the identity check reached any server');
+    assert.equal(fs.existsSync(path.join(dir, 'l')), false);
+  });
+
+  it('warns, and still runs, when the identity check cannot compare', async () => {
+    const schedulePath = await planApi();
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 0);
+    assert.equal(JSON.parse(r.err.split('\n')[0]).warning, 'IDENTITY_UNCHECKED');
+  });
+
   it('refuses a schedule whose kinds have no executor with exit 3', async () => {
     const out = path.join(dir, 'full.json');
     await run(['plan', '--seed', 'rc', '--phase', 'certifying', '--duration-hours', '4', '--out', out]);
     const r = await run(['run', '--schedule', out, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
       { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
     assert.equal(r.code, 3);
-    assert.equal(JSON.parse(r.err).code, 'NO_EXECUTOR');
+    const lines = r.err.trim().split('\n');
+    assert.equal(JSON.parse(lines[lines.length - 1]).code, 'NO_EXECUTOR');
   });
 
   it('exits 4 when stopped by a signal, and a second run resumes to completion', async () => {

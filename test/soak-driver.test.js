@@ -245,15 +245,99 @@ describe('soak driver — resume', () => {
 });
 
 describe('soak driver — the live-install guard', () => {
-  it('refuses the pane\'s own TangleClaw, however the URL is spelled', () => {
-    for (const target of ['http://localhost:3102', 'http://localhost:3102/', 'http://localhost:3102/api']) {
-      assert.throws(() => driver.refuseLiveTarget(target, 'http://localhost:3102'), (err) => err.code === 'LIVE_INSTALL_TARGET', target);
+  // A fixed picture of "this machine", so the tests do not depend on the
+  // interfaces of whichever host runs them.
+  const names = { exact: new Set(['localhost', '::1', '[::1]', '0.0.0.0', '::', '[::]', 'devbox', '192.168.1.20', '100.64.0.7']), hostnamePrefix: 'devbox.' };
+  const LIVE = 'http://localhost:3102';
+
+  it('refuses every spelling that reaches the live port on this machine', () => {
+    const spellings = [
+      'http://localhost:3102', 'http://localhost:3102/', 'http://localhost:3102/api',
+      'http://127.0.0.1:3102', 'http://127.1.2.3:3102', 'http://[::1]:3102', 'http://0.0.0.0:3102',
+      'https://localhost:3102', 'http://DEVBOX:3102', 'http://devbox.tail123678.ts.net:3102',
+      'http://192.168.1.20:3102', 'http://100.64.0.7:3102'
+    ];
+    for (const target of spellings) {
+      assert.throws(() => driver.refuseLiveTarget(target, LIVE, names), (err) => err.code === 'LIVE_INSTALL_TARGET', target);
     }
   });
 
-  it('allows a different origin, and allows anything when there is no live install', () => {
-    driver.refuseLiveTarget('http://192.168.64.7:3102', 'http://localhost:3102');
-    driver.refuseLiveTarget('http://localhost:3202', 'http://localhost:3102');
-    driver.refuseLiveTarget('http://localhost:3102', undefined);
+  it('refuses the same origin even on another machine', () => {
+    assert.throws(() => driver.refuseLiveTarget('http://tc.example:3102', 'http://tc.example:3102', names), (err) => err.code === 'LIVE_INSTALL_TARGET');
+  });
+
+  it('fills in the scheme default port when comparing', () => {
+    assert.throws(() => driver.refuseLiveTarget('http://127.0.0.1', 'http://localhost:80', names), (err) => err.code === 'LIVE_INSTALL_TARGET');
+  });
+
+  it('allows another port on this machine, another machine, or anything when there is no live install', () => {
+    driver.refuseLiveTarget('http://localhost:3202', LIVE, names);
+    driver.refuseLiveTarget('http://192.168.64.7:3102', LIVE, names);
+    driver.refuseLiveTarget('http://devboxer:3102', LIVE, names);
+    driver.refuseLiveTarget('http://localhost:3102', undefined, names);
+  });
+
+  it('knows this machine\'s real loopback and hostname', () => {
+    const real = driver.localNames();
+    assert.ok(real.exact.has('localhost'));
+    assert.ok(real.exact.has(os.hostname().toLowerCase().split('.')[0]));
+  });
+});
+
+describe('soak driver — the same-install identity check', () => {
+  /**
+   * A fetch that answers /api/server-info per origin.
+   * @param {Object<string, {status: number, body?: object}|Error>} byOrigin - Answer per origin
+   * @returns {Function} Fetch
+   */
+  function infoFetch(byOrigin) {
+    return async (url) => {
+      const a = byOrigin[url.origin];
+      if (a instanceof Error) throw a;
+      assert.equal(url.pathname, '/api/server-info');
+      return { status: a.status, text: async () => JSON.stringify(a.body || {}) };
+    };
+  }
+  const LIVE = 'http://localhost:3102';
+  const PROXY = 'https://devbox.tail123678.ts.net:8443';
+  const same = { status: 200, body: { startedAt: '2026-09-28T17:27:45.023Z', startupSha: 'a'.repeat(40) } };
+
+  it('refuses a target that reports the same running server, whatever address reached it', async () => {
+    await assert.rejects(
+      driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch: infoFetch({ [LIVE]: same, [PROXY]: same }) }),
+      (err) => err.code === 'LIVE_INSTALL_TARGET'
+    );
+  });
+
+  it('allows a different server', async () => {
+    const other = { status: 200, body: { startedAt: '2026-09-28T18:00:00.000Z', startupSha: 'a'.repeat(40) } };
+    const r = await driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch: infoFetch({ [LIVE]: same, [PROXY]: other }) });
+    assert.deepEqual(r, { checked: true, reason: null });
+  });
+
+  it('reports unchecked, never refused or crashed, when a side cannot be read', async () => {
+    const cases = [
+      [{ [LIVE]: new TypeError('fetch failed'), [PROXY]: same }, /unreadable/],
+      [{ [LIVE]: { status: 401 }, [PROXY]: same }, /live install server-info: HTTP 401/],
+      [{ [LIVE]: same, [PROXY]: { status: 503 } }, /target server-info: HTTP 503/],
+      [{ [LIVE]: { status: 200, body: {} }, [PROXY]: { status: 200, body: {} } }, /no startedAt/]
+    ];
+    for (const [answers, reason] of cases) {
+      const r = await driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch: infoFetch(answers) });
+      assert.equal(r.checked, false);
+      assert.match(r.reason, reason);
+    }
+  });
+
+  it('does nothing without a live install', async () => {
+    const r = await driver.refuseSameInstall({ apiBase: PROXY, liveApi: undefined, fetch: async () => { throw new Error('must not fetch'); } });
+    assert.deepEqual(r, { checked: false, reason: 'no TANGLECLAW_API in this pane' });
+  });
+
+  it('sends the service token to the target only', async () => {
+    const auth = {};
+    const fetch = async (url, init) => { auth[url.origin] = init.headers.authorization; return { status: 200, text: async () => '{}' }; };
+    await driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch, token: 'tok' });
+    assert.deepEqual(auth, { [LIVE]: undefined, [PROXY]: 'Bearer tok' });
   });
 });
