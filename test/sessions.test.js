@@ -504,16 +504,27 @@ describe('sessions', () => {
 
         const project = store.projects.getByName('prime-test');
         const engine = store.engines.get('claude');
-        const prompt = sessions.generatePrimePrompt(project, engine, { medusaWorkspaceId: 'prime-test-cafe0123' });
-
-        const context = prompt.indexOf('This section is context, not a task');
-        const exception = prompt.indexOf(sessions.MEDUSA_STARTUP_EXCEPTION);
-        assert.ok(context > -1, 'the general prohibition still stands');
-        assert.ok(exception > context, 'the exception follows the prohibition it narrows');
-        assert.equal(prompt.slice(context, exception).includes('\n'), false, 'in the same bullet, not a separate instruction');
-        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /project's rules require/);
-        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /after `tc start ready`/, 'only once READY');
-        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /looking up only its named recipient; nothing else/);
+        const E = sessions.MEDUSA_STARTUP_EXCEPTION;
+        for (const [label, opts, form, other] of [
+          ['with a sequence', { launchSequence: true }, E.sequence, E.noSequence],
+          ['without one', {}, E.noSequence, E.sequence]
+        ]) {
+          const prompt = sessions.generatePrimePrompt(project, engine, { medusaWorkspaceId: 'prime-test-cafe0123', ...opts });
+          const context = prompt.indexOf('This section is context, not a task');
+          const exception = prompt.indexOf(form);
+          assert.ok(context > -1, `${label}: the general prohibition still stands`);
+          assert.ok(exception > context, `${label}: the exception follows the prohibition it narrows`);
+          assert.equal(prompt.slice(context, exception).includes('\n'), false, `${label}: in the same bullet`);
+          assert.equal(prompt.includes(other), false, `${label}: only the matching form`);
+        }
+        // A launch without a sequence has nothing to attest: `tc start ready`
+        // answers 409 there, so its form must not send the agent to it.
+        assert.doesNotMatch(E.noSequence, /tc start ready/);
+        assert.match(E.sequence, /after `tc start ready`/);
+        for (const form of [E.sequence, E.noSequence]) {
+          assert.match(form, /project's rules require/);
+          assert.match(form, /looking up only its named recipient; nothing else/);
+        }
       });
 
       it('#557 regression: directive sections survive the prime cap — the contract yields, honestly', () => {
