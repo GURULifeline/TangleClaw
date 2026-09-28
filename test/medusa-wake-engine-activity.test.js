@@ -468,46 +468,6 @@ describe('medusa-wake — a prolonged engine-thread-unknown alerts the operator 
     assert.equal(wake.wakeStallSummary(), null);
   });
 
-  it('renders the dashboard banner with text nodes only, and clears it when nothing is stalled', () => {
-    const fs = require('node:fs');
-    const path = require('node:path');
-    const vm = require('node:vm');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'landing.js'), 'utf8');
-    const start = src.indexOf('function renderMedusaWakeStallBanner(');
-    assert.ok(start >= 0, 'the renderer exists');
-    let depth = 0;
-    let end = -1;
-    for (let i = src.indexOf('{', start); i < src.length; i++) {
-      if (src[i] === '{') depth++;
-      else if (src[i] === '}' && --depth === 0) { end = i + 1; break; }
-    }
-    const fn = src.slice(start, end);
-    const el = () => {
-      const o = { _hidden: true, children: [], replaceChildren(...kids) { o.children = kids; } };
-      o.classList = { add(c) { if (c === 'hidden') o._hidden = true; }, remove(c) { if (c === 'hidden') o._hidden = false; } };
-      return o;
-    };
-    const banner = el();
-    const text = el();
-    const document = {
-      getElementById: (id) => (id === 'medusaWakeStallBanner' ? banner : id === 'medusaWakeStallBannerText' ? text : null),
-      createElement: () => ({ textContent: '' }),
-      createTextNode: (t) => ({ textContent: t })
-    };
-    const ctx = vm.createContext({ document });
-    ctx.summary = { count: 2, oldest: { sessionId: 3, project: '<img src=x>', engineReason: 'thread-ambiguous', ageMinutes: 14 } };
-    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(summary);`, ctx);
-    assert.equal(banner._hidden, false);
-    const rendered = text.children.map((c) => c.textContent).join('');
-    assert.match(rendered, /^Medusa: 2 sessions are not being woken for new mail\. Oldest: <img src=x>, 14 min — its engine has not confirmed it is idle \(thread-ambiguous\)\./);
-    assert.equal(text.innerHTML, undefined, 'never written as HTML');
-    ctx.summary = { count: 1, oldest: { sessionId: 3, project: null, engineReason: null, ageMinutes: 10 } };
-    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(summary);`, ctx);
-    assert.match(text.children.map((c) => c.textContent).join(''), /^Medusa: 1 session is not being woken for new mail\. Oldest: session 3, 10 min — its engine has not confirmed it is idle\. /);
-    vm.runInContext(`${fn}\nrenderMedusaWakeStallBanner(null);`, ctx);
-    assert.equal(banner._hidden, true);
-  });
-
   it('warns once per stall episode, and again for the next episode', async () => {
     const logger = require('../lib/logger');
     const lines = [];

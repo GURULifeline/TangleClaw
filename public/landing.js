@@ -232,7 +232,6 @@ async function loadServerInfo() {
   renderBehindOriginBanner(data.behindOrigin);
   // #1839: Medusa messages the delivery watchdog escalated to the operator.
   renderMedusaEscalationBanner(data.medusaEscalations);
-  renderMedusaWakeStallBanner(data.medusaWakeStalls);
   // #993: what the served checkout is on. Before the stale branches too, for
   // the same reason — a feature branch checked out here is itself a deploy.
   renderLiveCheckoutBanner(data.liveCheckout, data.behindOrigin);
@@ -543,38 +542,6 @@ function renderMedusaEscalationBanner(summary) {
   const detail = document.createTextNode(
     ` Oldest: ${String(o.priority)}, ${age} min, to ${String(o.recipient)}, blocked by ${String(o.blocker)}`
     + (o.blockerMeaning ? ` (${String(o.blockerMeaning)})` : '') + '.'
-  );
-  textEl.replaceChildren(strong, detail);
-  banner.classList.remove('hidden');
-}
-
-/**
- * Show or hide the Medusa wake-stall banner (#1978) from the `medusaWakeStalls`
- * field of `/api/server-info`: how many sessions have had their wakes held for
- * want of an engine answer, with mail waiting, past the alert threshold, and
- * the oldest one's project, age and adapter reason. Built with text nodes
- * only, since the project is a name. Self-clears when nothing is stalled.
- * @param {{count: number, oldest: {project: (string|null), sessionId: number, ageMinutes: number, engineReason: (string|null), meaning: (string|null)}}|null|undefined} summary
- * @returns {void}
- */
-function renderMedusaWakeStallBanner(summary) {
-  const banner = document.getElementById('medusaWakeStallBanner');
-  const textEl = document.getElementById('medusaWakeStallBannerText');
-  if (!banner || !textEl) return;
-  const count = summary ? Math.max(0, Number(summary.count) | 0) : 0;
-  if (count === 0 || !summary.oldest) {
-    banner.classList.add('hidden');
-    return;
-  }
-  const o = summary.oldest;
-  const strong = document.createElement('strong');
-  strong.textContent = `Medusa: ${count} session${count === 1 ? ' is' : 's are'} not being woken for new mail.`;
-  const age = Math.max(0, Number(o.ageMinutes) | 0);
-  const who = o.project ? String(o.project) : `session ${String(o.sessionId)}`;
-  const detail = document.createTextNode(
-    ` Oldest: ${who}, ${age} min — its engine has not confirmed it is idle`
-    + (o.engineReason ? ` (${String(o.engineReason)})` : '')
-    + '. Its messages are waiting unread; ask it to check its inbox.'
   );
   textEl.replaceChildren(strong, detail);
   banner.classList.remove('hidden');

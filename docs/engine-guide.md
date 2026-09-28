@@ -563,9 +563,9 @@ profile names an adapter that can observe it (`declaresObserver`; today, Codex):
 - The adapter's own reason (`version-mismatch`, `thread-ambiguous`, …) is logged whenever it changes.
   The ledger and the peer route carry only the bounded wake code.
 - A session held as `engine-thread-unknown`, with mail waiting, for 10 minutes (`WAKE_STALL_ALERT_MS`) is
-  surfaced to the operator (#1978). One warning is logged per episode, and `/api/server-info` carries
-  `medusaWakeStalls` (the count, plus the oldest session's project, age and adapter reason). The
-  dashboard shows that as a banner. The alert is derived from the wake verdict, so it clears as soon as
+  reported (#1978). One warning is logged per episode, and `/api/server-info` carries
+  `medusaWakeStalls` (the count, plus the oldest session's project, age and adapter reason) as
+  read-only evidence. No dashboard UI renders it. The alert is derived from the wake verdict, so it clears as soon as
   the engine answers, the mail is read or the session ends. It never types into the pane or sends a
   message.
 
