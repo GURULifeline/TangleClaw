@@ -110,10 +110,14 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
   a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record that binds that
   exact fragment by byte offset, length and sha256. Its event runs again.
-  - A malformed line is accepted only when a seal matching it byte for byte comes straight after it.
-  - A mismatched seal, a fragment altered after sealing, a stray seal, more than one malformed line
-    under one seal, or an empty line makes the log unreadable (`LOG_UNREADABLE`).
-  - A log that survived several crashes, each sealed to its own fragment, still resumes.
+  - Damaged bytes are accepted only when a seal matching them byte for byte comes straight after
+    them. A seal binds a byte range. That range is usually one torn line, and it spans more when the
+    seal's own write was torn and the next resume sealed the leftovers.
+  - Unsealed damage is accepted only at the very end of the log, as the pending leftovers of the
+    last crash, and the next run seals it.
+  - A mismatched seal, damage altered after sealing, a stray seal, or damage in the middle of the log
+    with no seal makes the log unreadable (`LOG_UNREADABLE`).
+  - A log that survived several crashes, each sealed, still resumes, whichever byte a crash cut.
 - **Ctrl-C stops within a second, before the next event** (exit 4), even during a long wait, and says so on stderr. Running the same command again resumes, and no
   logged event runs twice.
 - **An engine cycle cleans up only the harness's own sessions.** It first reads the project's

@@ -234,6 +234,11 @@ Also fixed:
     - *W2 fixed:* a torn line that was a complete, valid record, missing only its newline, parsed as a record, so its seal was refused as stray and the log could never resume again. `readLog` now identifies a fragment by the seal that follows it, before parsing. There is a regression test, which fails on the old reader.
     - *W3 fixed:* `appendRecord` and `sealTornTail` ignored partial `writeSync` results, so a nearly full disk could leave an unrepairable partial record mid-log. Both now use `writeAll`, which loops, or throws `ESHORTWRITE` when a write makes no progress. Tested.
     - *Notes:* the driver header and the CHANGELOG resume wording are corrected. Splitting `driver.js` into guard, log and loop modules is accepted and left for when the fault executors land.
+  - *Verify-resolutions `rev-20260928T185604Z-c489e612` at `a42b1d1a`:* R-1 and R-3 were resolved. R-2 was half-resolved: a crash that tore the SEAL's own write still left the log unresumable, because the fragment became a complete, unsealed line and the half-written seal became the torn tail. Fixed:
+    - A seal now binds a byte RANGE, from the start of the damage up to its own separator. It is found by its start offset, however many lines the range spans.
+    - Unsealed damage is accepted only as the very end of the log, where it is the pending region the next run seals.
+    - A regression test cuts `sealTornTail`'s write at every byte and requires each resulting log to resume and complete. It fails on the `a42b1d1a` reader.
+    - The observations on CHANGELOG wording (fixed) and on the plan being gitignored (accepted, since the tracked records carry the descope) are disposed of.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
     - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
     - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.

@@ -174,7 +174,10 @@ describe('soak driver — refusals', () => {
   });
 
   it('refuses a log with a malformed line before its end', async () => {
-    fs.writeFileSync(logPath, `${JSON.stringify({ type: 'header', schema: driver.LOG_SCHEMA, scheduleDigest: apiSchedule().digest, startEpochMs: T0 })}\nnot json\n`);
+    // Damage in the MIDDLE of the log, with a valid record after it, is never
+    // the leftovers of a crash, so it is refused. (Unsealed damage at the very
+    // end is the pending region of the last crash, tested separately.)
+    fs.writeFileSync(logPath, `${JSON.stringify({ type: 'header', schema: driver.LOG_SCHEMA, scheduleDigest: apiSchedule().digest, startEpochMs: T0 })}\nnot json\n${JSON.stringify({ type: 'event', index: 0, kind: 'api.health', startedAt: T0 })}\n`);
     await assert.rejects(
       driver.runSchedule({ schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }),
       (err) => err.code === 'LOG_UNREADABLE'
@@ -263,7 +266,7 @@ describe('soak driver — resume', () => {
     const peek = driver.readLog(logPath);
     const crypto = require('node:crypto');
     assert.deepEqual([peek.tornTail, peek.lastIndex], [true, 2]);
-    assert.deepEqual(peek.torn, { offset: Buffer.byteLength(before) - Buffer.byteLength(fragment), bytes: Buffer.byteLength(fragment), sha256: crypto.createHash('sha256').update(fragment).digest('hex') });
+    assert.deepEqual(peek.torn, { offset: Buffer.byteLength(before) - Buffer.byteLength(fragment), bytes: Buffer.byteLength(fragment), sha256: crypto.createHash('sha256').update(fragment).digest('hex'), endsWithNewline: false });
     assert.equal(fs.readFileSync(logPath, 'utf8'), before, 'reading the log changes nothing');
 
     const ran = [];
@@ -342,6 +345,35 @@ describe('soak driver — resume', () => {
       const second = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
       assert.equal(second.status, 'completed');
       assert.equal(driver.readLog(logPath).ended, true);
+    });
+
+    it('resumes whichever byte the seal\'s own write was cut at', async () => {
+      // Build the log a crash leaves, then the exact bytes sealing would
+      // append, and cut that seal write at every possible byte.
+      const s = apiSchedule();
+      const clock = fakeClock(T0);
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(2) });
+      fs.appendFileSync(logPath, '{"type":"event","index":2,"kind":"api.he');
+      const crashed = fs.readFileSync(logPath);
+      const scratch = `${logPath}.probe`;
+      fs.writeFileSync(scratch, crashed);
+      driver.sealTornTail(scratch, driver.readLog(scratch).torn, T0 + 1);
+      const sealWrite = fs.readFileSync(scratch).subarray(crashed.length);
+      fs.rmSync(scratch);
+      for (let cut = 0; cut <= sealWrite.length; cut++) {
+        fs.writeFileSync(logPath, Buffer.concat([crashed, sealWrite.subarray(0, cut)]));
+        const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
+        assert.equal(result.status, 'completed', `cut at byte ${cut}`);
+        const back = driver.readLog(logPath);
+        assert.equal(back.ended, true, `cut at byte ${cut}`);
+        assert.equal(back.torn, null, `cut at byte ${cut}: nothing left pending`);
+        fs.rmSync(logPath);
+        fs.writeFileSync(logPath, '');
+        fs.rmSync(logPath);
+        await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2) });
+        fs.appendFileSync(logPath, '{"type":"event","index":2,"kind":"api.he');
+        assert.deepEqual(fs.readFileSync(logPath), crashed, 'the fixture rebuilds identically');
+      }
     });
 
     it('still resumes a log that survived two crashes, each sealed to its own fragment', async () => {
