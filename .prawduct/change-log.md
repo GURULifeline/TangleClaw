@@ -239,6 +239,11 @@ Also fixed:
     - Unsealed damage is accepted only as the very end of the log, where it is the pending region the next run seals.
     - A regression test cuts `sealTornTail`'s write at every byte and requires each resulting log to resume and complete. It fails on the `a42b1d1a` reader.
     - The observations on CHANGELOG wording (fixed) and on the plan being gitignored (accepted, since the tracked records carry the descope) are disposed of.
+  - *Verify-resolutions `rev-20260928T190033Z-92086e9a` at `f109c34e`:* R-2 was still open for one cut. The fragment was a complete, valid record, and the crash cut only the seal's trailing newline. That resumed once, then a later read refused the log, because a second seal landed on top of the first.
+    - **Fixed at the root.** A torn tail that is itself a complete seal matching the damage right before it is accepted as a seal, and the run appends just its newline (`finishSeal`, via `appendRaw`). No seal ever lands on another seal.
+    - The dead `restIsDamage` clause is dropped.
+    - **Tests now enumerate the threat, not the reported case.** Both fragment kinds, a record cut mid-way and a complete record missing only its newline, are resumed with the seal cut at every byte. A two-level test cuts a second seal too. Each case must read back identically twice.
+    - The complete-record test fails on the `f109c34e` reader.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
     - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
     - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.

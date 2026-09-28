@@ -347,34 +347,85 @@ describe('soak driver — resume', () => {
       assert.equal(driver.readLog(logPath).ended, true);
     });
 
-    it('resumes whichever byte the seal\'s own write was cut at', async () => {
-      // Build the log a crash leaves, then the exact bytes sealing would
-      // append, and cut that seal write at every possible byte.
-      const s = apiSchedule();
-      const clock = fakeClock(T0);
-      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(2) });
-      fs.appendFileSync(logPath, '{"type":"event","index":2,"kind":"api.he');
-      const crashed = fs.readFileSync(logPath);
+    // The two fragment kinds a crash can leave: a record cut mid-way, and a
+    // complete record that lost only its newline, which parses as JSON.
+    const FRAGMENTS = [
+      ['a record cut mid-way', () => '{"type":"event","index":2,"kind":"api.he'],
+      ['a complete record missing only its newline', (s) => JSON.stringify({ type: 'event', index: 2, kind: s.events[2].kind, startedAt: T0 + 1, ok: true })]
+    ];
+
+    /**
+     * Rebuild the crashed log deterministically.
+     * @param {object} s - Schedule
+     * @param {string} fragment - Torn bytes
+     * @returns {Promise<Buffer>} The crashed log
+     */
+    async function crashedLog(s, fragment) {
+      if (fs.existsSync(logPath)) fs.rmSync(logPath);
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2) });
+      fs.appendFileSync(logPath, fragment);
+      return fs.readFileSync(logPath);
+    }
+
+    /**
+     * The exact bytes sealing would append to a log.
+     * @param {Buffer} log - Log bytes
+     * @returns {Buffer} The seal write
+     */
+    function sealWriteFor(log) {
       const scratch = `${logPath}.probe`;
-      fs.writeFileSync(scratch, crashed);
+      fs.writeFileSync(scratch, log);
       driver.sealTornTail(scratch, driver.readLog(scratch).torn, T0 + 1);
-      const sealWrite = fs.readFileSync(scratch).subarray(crashed.length);
+      const out = fs.readFileSync(scratch).subarray(log.length);
       fs.rmSync(scratch);
-      for (let cut = 0; cut <= sealWrite.length; cut++) {
-        fs.writeFileSync(logPath, Buffer.concat([crashed, sealWrite.subarray(0, cut)]));
-        const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
-        assert.equal(result.status, 'completed', `cut at byte ${cut}`);
-        const back = driver.readLog(logPath);
-        assert.equal(back.ended, true, `cut at byte ${cut}`);
-        assert.equal(back.torn, null, `cut at byte ${cut}: nothing left pending`);
-        fs.rmSync(logPath);
-        fs.writeFileSync(logPath, '');
-        fs.rmSync(logPath);
-        await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2) });
-        fs.appendFileSync(logPath, '{"type":"event","index":2,"kind":"api.he');
-        assert.deepEqual(fs.readFileSync(logPath), crashed, 'the fixture rebuilds identically');
-      }
-    });
+      return out;
+    }
+
+    /**
+     * Resume to completion, then check the log reads back the same way twice.
+     * @param {object} s - Schedule
+     * @param {string} label - For messages
+     */
+    async function resumesCleanly(s, label) {
+      const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0 + 10 * MIN) });
+      assert.ok(result.status === 'completed' || result.status === 'already-complete', label);
+      const once = driver.readLog(logPath);
+      const twice = driver.readLog(logPath);
+      assert.equal(once.ended, true, label);
+      assert.equal(once.torn, null, `${label}: nothing left pending`);
+      assert.deepEqual(twice, once, `${label}: reads back the same every time`);
+    }
+
+    for (const [kind, make] of FRAGMENTS) {
+      it(`resumes whichever byte the seal's own write was cut at: ${kind}`, async () => {
+        const s = apiSchedule();
+        const crashed = await crashedLog(s, make(s));
+        const seal = sealWriteFor(crashed);
+        for (let cut = 0; cut <= seal.length; cut++) {
+          fs.writeFileSync(logPath, Buffer.concat([crashed, seal.subarray(0, cut)]));
+          await resumesCleanly(s, `${kind}, seal cut at byte ${cut}`);
+        }
+      });
+
+      it(`resumes when a second seal is cut too: ${kind}`, async () => {
+        // A crash tears the seal; the next run seals the leftovers and is
+        // torn again. Sampled cut points keep the pairs to a few hundred.
+        const s = apiSchedule();
+        const crashed = await crashedLog(s, make(s));
+        const seal1 = sealWriteFor(crashed);
+        for (let c1 = 0; c1 <= seal1.length; c1 += 9) {
+          const afterFirst = Buffer.concat([crashed, seal1.subarray(0, c1)]);
+          fs.writeFileSync(logPath, afterFirst);
+          const back = driver.readLog(logPath);
+          if (!back.torn) continue; // nothing to seal a second time at this cut
+          const seal2 = sealWriteFor(afterFirst);
+          for (let c2 = 0; c2 <= seal2.length; c2 += 11) {
+            fs.writeFileSync(logPath, Buffer.concat([afterFirst, seal2.subarray(0, c2)]));
+            await resumesCleanly(s, `${kind}, seals cut at ${c1} and ${c2}`);
+          }
+        }
+      });
+    }
 
     it('still resumes a log that survived two crashes, each sealed to its own fragment', async () => {
       const s = apiSchedule();
