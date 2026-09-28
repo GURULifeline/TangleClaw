@@ -547,6 +547,20 @@ else
   # "|" rather than a tab: tab is IFS whitespace, so an EMPTY field would collapse
   # and shift every later value into the wrong variable.
   IFS='|' read -r CUTOVER_OK CUTOVER_CODE CUTOVER_HEALTHY CUTOVER_HEALTH_URL <<< "$CUTOVER_FIELDS"
+  # Which gate remains, in the cutover's own words, and anything the regenerated
+  # Caddyfile no longer carries. Reported, never assumed: when TangleClaw's login
+  # guards the door the cutover omits Caddy's basic_auth by design (#1420), so a
+  # refresh must not claim an existing Caddy password survived. Once a cutover has
+  # succeeded this is owed on EVERY exit, the health timeout's included: the gate
+  # has already changed, and the EXIT trap deletes the result file that says how.
+  report_cutover_gate() {
+    node -e '
+      try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        if (r.gateNote) console.log("  Login gate now: " + r.gateNote);
+        for (const c of r.gateChanges || []) console.log("  Gate change:    " + c); }
+      catch { console.log("  Login gate now: not reported by the cutover (see its output above)"); }
+    ' "$CUTOVER_RESULT" 2>/dev/null || true
+  }
   if [ "$CUTOVER_STATUS" -ne 0 ] || [ "$CUTOVER_OK" != "true" ]; then
     red "ERROR: the ingress cutover failed (status ${CUTOVER_STATUS}, code ${CUTOVER_CODE:-none}; reason above)."
     red "       The server plist, ~/.tmux.conf and dependencies WERE refreshed. The ingress was"
@@ -558,21 +572,14 @@ else
   if [ "$CUTOVER_HEALTHY" != "true" ]; then
     if [ -z "$CUTOVER_HEALTH_URL" ] || ! wait_for_health "$CUTOVER_HEALTH_URL" 30; then
       red "ERROR: restart 2 of 2 could not be confirmed healthy through Caddy (${CUTOVER_HEALTH_URL:-no health URL}; last: HTTP ${HEALTH_STATUS:-none})."
+      red "       The ingress cutover itself succeeded, so its gate is already in force:"
+      report_cutover_gate
       tcc_hint
       exit 1
     fi
   fi
   green "  Restart 2 of 2 confirmed: healthy through Caddy (${CUTOVER_HEALTH_URL})"
-  # Which gate remains, in the cutover's own words, and anything the regenerated
-  # Caddyfile no longer carries. Reported, never assumed: when TangleClaw's login
-  # guards the door the cutover omits Caddy's basic_auth by design (#1420), so a
-  # refresh must not claim an existing Caddy password survived.
-  node -e '
-    try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-      if (r.gateNote) console.log("  Login gate now: " + r.gateNote);
-      for (const c of r.gateChanges || []) console.log("  Gate change:    " + c); }
-    catch { console.log("  Login gate now: not reported by the cutover (see its output above)"); }
-  ' "$CUTOVER_RESULT" 2>/dev/null || true
+  report_cutover_gate
   echo ""
 fi
 

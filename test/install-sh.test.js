@@ -961,4 +961,25 @@ describe('deploy/install.sh caddy-mode refresh (#1901, executed)', () => {
     assert.equal(callsOf(box).filter((c) => c === 'curl https://localhost:8443/api/health').length, 30);
     assert.match(output, /restart 2 of 2 could not be confirmed healthy through Caddy/);
   });
+
+  it('still names the gate now in force, once, when a successful cutover is followed by a health timeout', () => {
+    const leftovers = (b) => fs.readdirSync(b.root).filter((f) => /^tc-install-(preflight|cutover)\./.test(f));
+    const box = sandbox({ ...CLEAN, caddyHealth: '502', cutover: { status: 0, ok: true, code: 'ok', healthOk: false,
+      gateNote: "Caddy's basic_auth is NOT written — TangleClaw's login (armed) is the gate for every site",
+      gateChanges: [
+        "Caddy's basic_auth (1 user) will be REMOVED: the regenerated Caddyfile carries none",
+        'the existing Caddyfile has a `import` directive this tool does not generate; the cutover '
+          + 'converges to the canonical config, and anything it provided (a gate included) will NOT be carried over'
+      ] } });
+    const { code, output } = runInstall(box);
+    assert.equal(code, 1, 'the timeout is still a bounded failure');
+    assert.equal(callsOf(box).filter((c) => c === 'curl https://localhost:8443/api/health').length, 30);
+    assert.match(output, /restart 2 of 2 could not be confirmed healthy through Caddy/);
+    const count = (re) => (output.match(re) || []).length;
+    assert.equal(count(/Login gate now: Caddy's basic_auth is NOT written — TangleClaw's login \(armed\) is the gate for every site/g), 1);
+    assert.equal(count(/Gate change: {4}Caddy's basic_auth \(1 user\) will be REMOVED/g), 1);
+    assert.equal(count(/Gate change: {4}the existing Caddyfile has a `import` directive/g), 1);
+    assert.doesNotMatch(output, /Restart 2 of 2 confirmed/);
+    assert.deepEqual(leftovers(box), [], 'the EXIT trap still removes the result files');
+  });
 });
