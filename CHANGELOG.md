@@ -45,8 +45,9 @@ All notable changes to TangleClaw are documented in this file.
       - by spelling: any alias of this machine on the live port, including IPv4-mapped IPv6, a trailing dot and `*.localhost`;
       - by address: with a live install to protect, `--api` must be an IP address, so no DNS answer can change between the check and the connection;
       - by identity: the same running server, according to `/api/server-info`.
+    - It never follows a redirect, so a target cannot bounce the load onto the live install. A 3xx is refused and recorded.
     - If the live install's identity cannot be read, it refuses unless `--allow-unverified-live` is given. With no `TANGLECLAW_API` at all, it refuses unless `--no-live-install` is given, which is the soak guest's case. Every run segment records its guard results and either override, including one given only when resuming.
-    - The log is never rewritten. A crash's damaged tail is sealed by appending a record bound to those exact bytes, and a seal that does not match is refused. A log still resumes however a crash cut it, including one that cut the seal's own write. One driver holds a log at a time, and a dead driver's lock is reclaimed by exactly one contender.
+    - The log is never rewritten. A crash's damaged tail is sealed by appending a record bound to those exact bytes, and a seal that does not match is refused. A log still resumes however a crash cut it, including one that cut the seal's own write. One driver holds a log at a time, a dead driver's lock is reclaimed by exactly one contender, and a lock lost mid-run ends the run with `LOCK_LOST`. The log is not signed: seals catch accidental damage, not deliberate forgery.
     - After downtime, stale load is skipped and recorded rather than replayed in a burst. Faults are deferred, never skipped, and stay a quiet window apart.
     - An engine cycle cleans up only the harness's own leftover `soak-stub` sessions. It never touches a session on another engine.
     - It reads the token from `TANGLECLAW_SERVICE_TOKEN` only.

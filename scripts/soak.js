@@ -284,7 +284,9 @@ async function main(argv, deps = {}) {
       return 2;
     }
     if (err instanceof driver.DriverRefusal) {
-      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details })}\n`);
+      // A lock lost during a run that also failed rides along as a secondary
+      // fact; the primary refusal stays the headline.
+      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details, ...(err.lockLost ? { lockLost: err.lockLost } : {}) })}\n`);
       return 3;
     }
     throw err;

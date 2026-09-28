@@ -586,6 +586,22 @@ describe('soak driver — the same-install identity check', () => {
     }
   });
 
+  it('never follows a redirect on either side: live refuses, target is unchecked', async () => {
+    const modes = [];
+    const redirecting = (who) => async (url, init) => {
+      modes.push(init.redirect);
+      if (url.origin === who) return { status: 307, text: async () => '' };
+      return { status: 200, text: async () => JSON.stringify(url.origin === LIVE ? same.body : other.body) };
+    };
+    await assert.rejects(
+      driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch: redirecting(LIVE) }),
+      (err) => err.code === 'LIVE_IDENTITY_UNREADABLE' && /redirect refused \(HTTP 307\)/.test(err.details.reason)
+    );
+    const r = await driver.refuseSameInstall({ apiBase: PROXY, liveApi: LIVE, fetch: redirecting(PROXY) });
+    assert.deepEqual([r.checked, r.reason], [false, 'target server-info: redirect refused (HTTP 307)']);
+    assert.ok(modes.length === 4 && modes.every((m) => m === 'manual'));
+  });
+
   it('does nothing without a live install, the soak guest\'s normal case', async () => {
     const r = await driver.refuseSameInstall({ apiBase: 'http://localhost:3102', liveApi: undefined, fetch: async () => { throw new Error('must not fetch'); } });
     assert.deepEqual(r, { checked: false, reason: 'no TANGLECLAW_API in this pane', liveUnverified: false });
@@ -914,11 +930,44 @@ describe('soak driver — the log lock and header', () => {
     assert.equal(fs.existsSync(`${logPath}.lock.reclaim`), false);
   });
 
-  it('never releases a lock it does not hold', () => {
+  it('never releases a lock it does not hold, and reports it lost instead of throwing', () => {
     const lock = driver.acquireLogLock(logPath);
     fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 1, host: 'someone-else' }));
-    lock.release();
+    const r = lock.release();
     assert.ok(fs.existsSync(`${logPath}.lock`), 'another holder\'s lock survives our release');
+    assert.deepEqual(r.lost, { why: 'lock taken over during the run', holder: { pid: 1, host: 'someone-else' } });
+    const gone = driver.acquireLogLock(`${logPath}2`);
+    fs.rmSync(`${logPath}2.lock`);
+    assert.deepEqual(gone.release().lost, { why: 'lock file removed during the run', holder: null });
+  });
+
+  it('reports LOCK_LOST, with the run result, when the lock vanished during an otherwise clean run', async () => {
+    const s = apiSchedule();
+    const executors = recordingExecutors([]);
+    const first = s.events[0].kind;
+    const inner = executors[first];
+    let done = false;
+    executors[first] = async (...a) => { if (!done) { done = true; fs.rmSync(`${logPath}.lock`); } return inner(...a); };
+    await assert.rejects(
+      driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
+      (err) => err.code === 'LOCK_LOST' && err.details.result.status === 'completed' && /removed/.test(err.details.why)
+    );
+  });
+
+  it('never lets a lost lock mask the run\'s own error: the primary error is thrown, carrying the loss', async () => {
+    const s = apiSchedule();
+    const boom = new Error('primary failure');
+    let calls = 0;
+    await assert.rejects(
+      driver.runSchedule({
+        schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0),
+        shouldStop: () => {
+          if (++calls === 3) { fs.rmSync(`${logPath}.lock`); throw boom; }
+          return false;
+        }
+      }),
+      (err) => err === boom && err.lockLost && /removed/.test(err.lockLost.why)
+    );
   });
 
   it('never reclaims a lock held on another host', async () => {

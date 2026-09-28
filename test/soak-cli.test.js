@@ -111,6 +111,110 @@ describe('soak CLI — plan and validate', () => {
   }
 });
 
+describe('soak CLI — redirects never carry the load to the live install', () => {
+  const http = require('node:http');
+
+  /**
+   * Start a local HTTP server on an OS-assigned port.
+   * @param {Function} handler - Request handler
+   * @returns {Promise<{port: number, close: () => Promise<void>}>} Server
+   */
+  function serve(handler) {
+    return new Promise((resolve) => {
+      const srv = http.createServer(handler);
+      srv.listen(0, '127.0.0.1', () => resolve({ port: srv.address().port, close: () => new Promise((r) => srv.close(r)) }));
+    });
+  }
+  const identity = (tag) => JSON.stringify({ startedAt: tag, startupSha: 'd'.repeat(40) });
+
+  for (const code of [301, 302, 303, 307, 308]) {
+    it(`a target answering ${code} to the live install gets its load refused, and the live side receives none of it`, async () => {
+      const liveHits = [];
+      const live = await serve((req, res) => {
+        liveHits.push(`${req.method} ${req.url}`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(req.url === '/api/server-info' ? identity('live') : '{}');
+      });
+      const target = await serve((req, res) => {
+        if (req.url === '/api/server-info') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(identity('target'));
+          return;
+        }
+        res.writeHead(code, { location: `http://localhost:${live.port}${req.url}` });
+        res.end();
+      });
+      try {
+        const out = path.join(dir, 's.json');
+        await run(['plan', '--seed', 'rd', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
+        const log = path.join(dir, 'l');
+        const r = await run(['run', '--schedule', out, '--api', `http://127.0.0.1:${target.port}`, '--log', log],
+          { fetch: globalThis.fetch, clock: instantClock(), env: { TANGLECLAW_API: `http://localhost:${live.port}` } });
+        assert.equal(r.code, 0, r.err);
+        assert.deepEqual(liveHits, ['GET /api/server-info'], 'the live side saw only its own identity probe');
+        const events = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => x.type === 'event');
+        assert.ok(events.length > 0);
+        assert.ok(events.filter((e) => e.kind !== 'api.server-info').every((e) => e.code === 'REDIRECT_REFUSED' && e.status === code));
+      } finally {
+        await target.close();
+        await live.close();
+      }
+    });
+  }
+
+  it('a target whose identity endpoint redirects to the live install is not believed, and still sends it nothing', async () => {
+    const liveHits = [];
+    const live = await serve((req, res) => { liveHits.push(`${req.method} ${req.url}`); res.writeHead(200); res.end(identity('live')); });
+    const target = await serve((req, res) => { res.writeHead(307, { location: `http://localhost:${live.port}${req.url}` }); res.end(); });
+    try {
+      const out = path.join(dir, 's.json');
+      await run(['plan', '--seed', 'rd', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
+      const r = await run(['run', '--schedule', out, '--api', `http://127.0.0.1:${target.port}`, '--log', path.join(dir, 'l')],
+        { fetch: globalThis.fetch, clock: instantClock(), env: { TANGLECLAW_API: `http://localhost:${live.port}` } });
+      assert.equal(r.code, 0, r.err);
+      assert.match(JSON.parse(r.err.split('\n')[0]).reason, /redirect refused/);
+      assert.deepEqual(liveHits, ['GET /api/server-info']);
+    } finally {
+      await target.close();
+      await live.close();
+    }
+  });
+});
+
+describe('soak CLI — a lost lock', () => {
+  it('exits 3 with LOCK_LOST when the lock vanished during an otherwise clean run', async () => {
+    const out = path.join(dir, 's.json');
+    await run(['plan', '--seed', 'll', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
+    const log = path.join(dir, 'l');
+    let removed = false;
+    const fetch = async () => {
+      if (!removed) { removed = true; fs.rmSync(`${log}.lock`); }
+      return { status: 200, text: async () => '{}' };
+    };
+    const r = await run(['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'], { fetch, clock: instantClock() });
+    assert.equal(r.code, 3);
+    const report = JSON.parse(r.err.trim().split('\n').pop());
+    assert.equal(report.code, 'LOCK_LOST');
+    assert.equal(report.details.result.status, 'completed');
+  });
+});
+
+describe('soak CLI — every soak fetch refuses redirects', () => {
+  it('passes redirect: manual at every fetch call site in the soak modules', () => {
+    const files = ['lib/soak/executors.js', 'lib/soak/driver.js', 'scripts/soak.js'].map((f) => path.join(__dirname, '..', f));
+    let sites = 0;
+    for (const f of files) {
+      const src = fs.readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/\bfetch\(\s*new URL\([^)]*\)[^,]*,\s*\{/g)) {
+        sites++;
+        const opts = src.slice(m.index, src.indexOf('});', m.index));
+        assert.match(opts, /redirect: 'manual'/, `${path.basename(f)}: a fetch call without redirect: 'manual'`);
+      }
+    }
+    assert.equal(sites, 2, 'the soak modules make exactly the fetch calls this test knows about');
+  });
+});
+
 describe('soak CLI — run', () => {
   /**
    * Plan an api-only schedule into the temp dir.

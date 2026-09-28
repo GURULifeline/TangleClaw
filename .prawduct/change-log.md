@@ -254,6 +254,15 @@ Also fixed:
   - *Verify-resolutions `rev-20260928T190622Z-463e228b` at `11a055e7`:* R-2 is resolved. Its three observations are folded into the final commit:
     - the seal-cut tests require `completed` and check that each event is on record exactly once, at every cut;
     - `readLog`'s JSDoc names `finishSeal`.
+  - **TC-RM03 final verification of `911a5f73`: R1, L1, L2, L3 and L5 verified. NOT GREEN on R2.** Dispatched by the PM with the Architect's specifics:
+    - *R2: fixed.* Every soak fetch followed redirects, so an IP-literal target could answer 307 and have the load replayed, method and body included, onto the live install after every guard passed. TC-RM03 reproduced it with local decoys.
+      - Both fetch call sites now pass `redirect: 'manual'`. A 3xx from the load is `REDIRECT_REFUSED`, with its `location`. A 3xx from an identity probe counts as unreadable, so the live side fails closed.
+      - Tests use real local HTTP servers, one per code (301, 302, 303, 307, 308), plus a target whose identity endpoint itself redirects. Each asserts the live stand-in receives nothing but its own identity probe.
+      - A structural test pins every fetch call site to `redirect: 'manual'`.
+      - With the option removed, all six real-server tests fail and the live stand-in receives the load.
+    - *O2: fixed.* `release` reports a lock that vanished or changed hands instead of throwing. A clean run then ends with `LOCK_LOST`, carrying the result. A run that already failed throws its own error, with `lockLost` attached, never masked.
+    - *O1: accepted and documented* as a known limit. The log is unsigned, so seals detect damage, not forgery.
+    - *O3: confirmed.* Separate crashes, each exactly sealed, are accepted, and two seals on one region are refused.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
     - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
     - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.

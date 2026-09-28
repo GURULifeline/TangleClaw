@@ -83,6 +83,10 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
       counts as this machine.
   - **By identity.** It asks both servers for `/api/server-info` and refuses a target that reports the
     same running server (`startedAt` and `startupSha`), which catches a reverse-proxy route.
+- **A redirect is never followed.** A target that passed every check could answer `307` and have
+  the request replayed, body and all, to any host, the live install included. Every soak request asks
+  for no redirects. A 3xx from the load is recorded as a failed outcome (`REDIRECT_REFUSED`, with its
+  `location`), and a 3xx from an identity check counts as unreadable.
 - **If the live install's identity cannot be read, `run` refuses** (`LIVE_IDENTITY_UNREADABLE`).
   `--allow-unverified-live` overrides this, and the override is recorded in the log. If only
   the target cannot be read, `run` warns (`IDENTITY_UNCHECKED`) and carries on: a target that answers
@@ -108,6 +112,9 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - An unreadable lock, a live holder, a holder on another host, or a reclaim already in progress
     is refused, naming the file to remove if you are sure no driver is running.
   - Each record is flushed to disk before the next event.
+  - If the lock vanishes or changes hands during a run, the run ends with `LOCK_LOST` rather than a
+    clean result, because another writer may have appended to the log. An error the run hit anyway is
+    reported first, with the loss attached.
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
   a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record that binds that
   exact fragment by byte offset, length and sha256. Its event runs again.
@@ -119,6 +126,9 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - A mismatched seal, damage altered after sealing, a stray seal, or damage in the middle of the log
     with no seal makes the log unreadable (`LOG_UNREADABLE`).
   - A log that survived several crashes, each sealed, still resumes, whichever byte a crash cut.
+  - **Known limit: the log is not signed.** Seals detect accidental damage, not forgery. Someone
+    who can write the file can compute a correct sha256 and forge a seal that hides a record. Making
+    it tamper-evident would need a keyed MAC or a hash chain anchored outside the host.
 - **Ctrl-C stops within a second, before the next event** (exit 4), even during a long wait, and says so on stderr. Running the same command again resumes, and no
   logged event runs twice.
 - **An engine cycle cleans up only the harness's own sessions.** It first reads the project's

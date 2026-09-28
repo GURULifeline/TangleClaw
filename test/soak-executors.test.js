@@ -70,6 +70,30 @@ describe('soak executors — single calls', () => {
     assert.equal(f.calls[0].headers.authorization, undefined);
   });
 
+  for (const status of [301, 302, 303, 307, 308]) {
+    it(`refuses a ${status} redirect without following it, and records where it pointed`, async () => {
+      const calls = [];
+      const fetch = async (url, init) => {
+        calls.push({ url: url.href, redirect: init.redirect });
+        return { status, headers: { get: (h) => (h === 'location' ? 'http://localhost:3102/api/ports/lease' : null) }, text: async () => { throw new Error('the body of a refused redirect is never read'); } };
+      };
+      const r = await ex.EXECUTORS['api.ports.lease-release'](ctx(fetch), { port: 5512 });
+      assert.deepEqual([r.ok, r.code, r.status, r.step, r.location], [false, 'REDIRECT_REFUSED', status, 0, 'http://localhost:3102/api/ports/lease']);
+      assert.equal(calls.length, 1, 'nothing after the refused redirect, and no release');
+      assert.equal(calls[0].redirect, 'manual');
+    });
+  }
+
+  it('asks fetch never to follow redirects, on every call an executor makes', async () => {
+    const modes = [];
+    const fetch = async (url, init) => { modes.push(init.redirect); return { status: 200, text: async () => JSON.stringify({ active: false }) }; };
+    for (const [kind, params] of [['api.health', {}], ['api.ports.lease-release', { port: 5512 }], ['engine.session.cycle', { project: 'soak-a', commands: 2 }]]) {
+      await ex.EXECUTORS[kind](ctx(fetch), params);
+    }
+    assert.ok(modes.length >= 7);
+    assert.ok(modes.every((m) => m === 'manual'), JSON.stringify(modes));
+  });
+
   it('reports HTTP_STATUS with the status for a non-2xx', async () => {
     const f = fakeFetch(() => ({ status: 503, body: { error: 'down' } }));
     const r = await ex.EXECUTORS['api.ports.list'](ctx(f.fetch), {});
