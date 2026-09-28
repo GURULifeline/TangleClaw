@@ -35,6 +35,24 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-28 — New installs default the projects directory to ~/Projects (#880)
+
+<!-- prawduct: type=feature | scope=default-projects-dir-880 -->
+
+The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-projects-dir.md` (local, not tracked).
+
+**Problem.** The shipped `projectsDir` was `~/Documents/Projects`, under a macOS TCC-protected folder. The setup wizard cautions on protected paths by shape alone, so every fresh Mac opened the wizard with a caution about its own pre-filled value.
+
+**The change.**
+- The default is `~/Projects`. The Create-it offer makes it, and existing installs keep their persisted value.
+- The new `lib/tcc-folders.js` owns the protected-folder list and prose. `server.js` builds `config.protectedRoots` from it, and the server-side messages read it.
+- Hand copies that cannot import it are held by `test/tcc-folders.test.js`: the wizard's caution, the EACCES hint, `install.sh`'s `case` arms, and the default's install.sh and browser fallbacks. The installer's default check now derives from `DEFAULT_CONFIG` instead of a literal.
+- #880 said the wizard held its own folder list. It no longer did (it reads `config.protectedRoots`); the real duplicates were server-side prose.
+
+**Review.** The first Critic pass (rev-20260928T000124Z-734ba1ca) found 0 blocking. Its observations were fixed: a helper only tests called was replaced by the roots builder the server uses; an unpinned third copy; two wrong comments. The verify pass (rev-20260928T000637Z-0f0b6f70) was clean.
+
+**Evidence.** The full suite is green (a clean run at 2026-09-28T00:27Z). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
+
 ## 2026-09-27 — The Codex approval/user-input wait test waits for acceptance, not a timer (#1846)
 
 <!-- prawduct: type=bugfix | scope=codex-wait-test-1846 -->
