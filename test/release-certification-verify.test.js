@@ -140,7 +140,7 @@ describe('verifyChange: the rules, one commit at a time (#1949 C02)', () => {
   });
 });
 
-describe('verifyChange: a forged certification cannot go green', () => {
+describe('verifyChange: a certification that skips review or its targets cannot verify', () => {
   const d = documents();
   const m = manifest();
   const events = (...lines) => `${lines.map((l) => JSON.stringify({ schema: sc.SCHEMAS.event, sampleSeq: null, at: 1, ...l })).join('\n')}\n`;
@@ -185,6 +185,90 @@ describe('verifyChange: a forged certification cannot go green', () => {
     assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: '{"schema":"x"}' }).includes(RULES.INVALID_DOCUMENT));
     assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.events]: 'not json\n' }).includes(RULES.INVALID_DOCUMENT));
     assert.ok(judge({}, { [sc.INDEX_PATH]: '{"schema":"x"}' }).includes(RULES.INVALID_DOCUMENT));
+  });
+});
+
+describe('verifyChange: the timeline must be internally consistent (PR #1975 review)', () => {
+  const d = documents();
+  const H72 = 72 * 60 * 60 * 1000;
+  const line = (from, to, code, at, sampleSeq = null) => JSON.stringify({ schema: sc.SCHEMAS.event, from, to, code, at, sampleSeq });
+  const log = (...lines) => `${lines.join('\n')}\n`;
+
+  /**
+   * A forged `passed` history that obeys every other rule: canonical
+   * thresholds bound to the admission, targets shown met, a legal transition
+   * chain that agrees with the scorecard, a rising index. Only its times give
+   * it away. `over` replaces scorecard fields; `times` the event times.
+   * @param {object} [over] - Scorecard overrides
+   * @param {number[]} [times] - At of admitted, review and accepted lines
+   * @returns {{[path: string]: string}} The tree after the forging commit
+   */
+  function forged(over = {}, times = [T0, T0 + MIN, T0 + MIN]) {
+    const card = {
+      ...JSON.parse(d.card1),
+      state: 'passed',
+      updatedAt: T0 + MIN,
+      lastSampleAt: T0 + MIN,
+      elapsedMs: MIN,
+      qualifiedMs: H72,
+      remainingMs: 0,
+      extensions: {},
+      pty: { attaches: 25, detaches: 25, firstEventAt: T0, lastEventAt: T0 + 6 * 60 * MIN, spanMs: 6 * 60 * MIN, met: true, target: { attaches: 25, detaches: 25, spanMs: 6 * 60 * MIN } },
+      acceptance: { actor: 'x', at: T0 + MIN },
+      publishedAt: T0 + MIN,
+      publishSeq: 1,
+      ...over
+    };
+    return {
+      [P.admission]: d.admission,
+      [P.scorecard]: sc.serialize(card),
+      [P.events]: log(
+        line('not-started', 'running', 'ADMITTED', times[0], 1),
+        line('running', 'awaiting-review', 'TARGET_REACHED', times[1], 2),
+        line('awaiting-review', 'passed', 'OPERATOR_ACCEPTED', times[2])
+      ),
+      [sc.INDEX_PATH]: sc.serialize(sc.indexDoc([card]))
+    };
+  }
+
+  it('refuses 72 qualified hours claimed a minute after admission, and nothing else gives it away', () => {
+    // The reviewer's probe: before this rule it verified clean.
+    assert.deepEqual(judge({ [P.admission]: d.admission }, forged()), [RULES.TIMELINE_INCONSISTENT, RULES.TIMELINE_INCONSISTENT]);
+  });
+
+  it('refuses the same forgery with elapsedMs inflated to match', () => {
+    assert.ok(judge({ [P.admission]: d.admission }, forged({ elapsedMs: H72 })).includes(RULES.TIMELINE_INCONSISTENT));
+  });
+
+  it('accepts the same documents when their times are consistent — it checks consistency, not that a soak ran', () => {
+    const end = T0 + H72;
+    const ok = forged({ updatedAt: end, lastSampleAt: end, elapsedMs: H72, acceptance: { actor: 'x', at: end }, publishedAt: end }, [T0, end, end]);
+    assert.deepEqual(judge({ [P.admission]: d.admission }, ok), []);
+  });
+
+  const end = T0 + H72;
+  const consistent = { updatedAt: end, lastSampleAt: end, elapsedMs: H72, acceptance: { actor: 'x', at: end }, publishedAt: end };
+  const cases = [
+    ['a run that started before its admission', { ...consistent, startedAt: T0 - 1, elapsedMs: H72 + 1 }, [T0 - 1, end, end]],
+    ['an updatedAt before startedAt', { ...consistent, updatedAt: T0 - 1 }, [T0, T0, T0]],
+    ['a publishedAt before updatedAt', { ...consistent, publishedAt: end - 1 }, [T0, end, end]],
+    ['transition times that go back', consistent, [T0, end, end - 1]],
+    ['a transition before admission', consistent, [T0 - 1, end, end]],
+    ['a transition after the scorecard\'s updatedAt', consistent, [T0, end, end + 1]],
+    ['a first transition that is not the run\'s start', consistent, [T0 + 1, end, end]],
+    ['an acceptance before the review it accepts', { ...consistent, acceptance: { actor: 'x', at: end - 1 } }, [T0, end, end]]
+  ];
+  for (const [name, over, times] of cases) {
+    it(`refuses ${name}`, () => {
+      const found = judge({ [P.admission]: d.admission }, forged(over, times));
+      assert.ok(found.includes(RULES.TIMELINE_INCONSISTENT), `${found} should include ${RULES.TIMELINE_INCONSISTENT}`);
+    });
+  }
+
+  it('judges a transition log changed without its scorecard against the admission', () => {
+    const before = { [P.admission]: d.admission, [P.scorecard]: d.card1, [P.events]: d.events1, [sc.INDEX_PATH]: d.index1 };
+    const early = `${d.events1}${log(line('running', 'extended', 'PROBE_UNKNOWN', T0 - 1, 2))}`;
+    assert.ok(judge(before, { ...before, [P.events]: early }).includes(RULES.TIMELINE_INCONSISTENT));
   });
 });
 

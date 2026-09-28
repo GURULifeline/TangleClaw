@@ -97,12 +97,23 @@ to be able to trust it. That creates two problems:
    `operator`) is published with the admission and every scorecard, so an auditor can tell a
    candidate judged by the repository's own rules from one judged by a hand-picked list.
 
-9. **Verification is by rule, and the publisher applies the same rules first** (cumulative review of
-   C02). One transition table in `codes.js` is shared by the state machine and the verifier. A
-   published `awaiting-review` or `passed` must show its targets met, and every state change and
-   transition line must be one the table allows, so a forged certification cannot pass
-   verification. The publisher runs the verifier on each commit before pushing it; a violation
-   fails the publish (`WOULD_VIOLATE`) instead of landing on a branch whose history is permanent.
+9. **Verification checks that the history is internally consistent, not that a soak happened**
+   (cumulative review of C02; narrowed after the PR #1975 review). One transition table in
+   `codes.js` is shared by the state machine and the verifier. A published `awaiting-review` or
+   `passed` must show its targets met, every state change and transition line must be one the
+   table allows, and the times must agree with each other (`TIMELINE_INCONSISTENT`): the run starts
+   no earlier than its admission; qualified time is at most `elapsedMs` and at most
+   `updatedAt - admittedAt`; `elapsedMs` is the span the scorecard's own times give; transition
+   times never go back, begin at the run's start and fall within `[admittedAt, updatedAt]`; and
+   an acceptance comes no earlier than the review it accepts. The PR review found a history
+   claiming the full 72 qualified hours a minute after admission that passed every earlier rule;
+   it now fails. Every time judged is one the publisher wrote, so the verifier refuses a history
+   that contradicts itself, not one that is consistent and invented: how long a run really took
+   rests on who can push to `metrics` (the ruleset below). The state machine keeps its own output
+   inside these rules even when the clock is stepped: earned time never exceeds how far
+   `updatedAt` moved, and transition, acceptance and cancellation times are clamped to it. The
+   publisher runs the verifier on each commit before pushing it; a violation fails the publish
+   (`WOULD_VIOLATE`) instead of landing on a branch whose history is permanent.
 
 ## Consequences
 

@@ -296,6 +296,29 @@ describe('interval accrual', () => {
     assert.deepEqual(Object.keys(state.extensions), [EXTEND.CLOCK_SKEW]);
   });
 
+  it('never earns more qualified time than updatedAt moved (PR #1975 review)', () => {
+    // Monotonic time ahead of the wall clock, within tolerance: earns the wall time.
+    assert.equal(run(manifest(), [sample(MIN - 5000, obs(), { mono: MIN })]).state.qualifiedMs, MIN - 5000);
+    // A clock stepped back re-covers wall time already counted; none of it is earned twice.
+    const { state, events } = run(manifest(), [
+      sample(1 * MIN, obs(), { mono: 1 * MIN }),
+      sample(2 * MIN, obs(), { mono: 2 * MIN }),
+      sample(3 * MIN, obs(), { mono: 3 * MIN }),
+      sample(1 * MIN, obs(), { mono: 4 * MIN }),
+      sample(2 * MIN, obs(), { mono: 5 * MIN }),
+      sample(3 * MIN, obs(), { mono: 6 * MIN }),
+      sample(4 * MIN, obs(), { mono: 7 * MIN })
+    ]);
+    assert.ok(state.qualifiedMs <= state.updatedAt - state.startedAt, `${state.qualifiedMs} > ${state.updatedAt - state.startedAt}`);
+    assert.equal(state.qualifiedMs, 4 * MIN);
+    assert.ok(events.every((e, i) => i === 0 || e.at >= events[i - 1].at), 'transition times never go back');
+    assert.ok(events.every((e) => e.at <= state.updatedAt));
+  });
+
+  it('refuses an admission sample that predates its manifest', () => {
+    refuses(() => sm.admit(manifest(), sample(-1_000_000)), REFUSAL.INVALID_SAMPLE);
+  });
+
   it('asserts every transition it emits against the shared table', () => {
     const codes = require('../lib/release-certification/codes');
     assert.equal(codes.transitionAllowed('awaiting-review', 'passed', 'OPERATOR_ACCEPTED'), true);
@@ -352,11 +375,20 @@ describe('target, PTY use and review', () => {
     const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
     assert.equal(state.state, STATES.AWAITING_REVIEW);
     assert.equal(events.at(-1).code, TRANSITION.TARGET_REACHED);
-    refuses(() => sm.accept(state, 'jason', 5, m), REFUSAL.NOT_CANONICAL);
-    const passed = sm.accept(state, 'jason', 5, manifest());
+    const at = 1_000_000 + 4 * MIN;
+    refuses(() => sm.accept(state, 'jason', at, m), REFUSAL.NOT_CANONICAL);
+    const passed = sm.accept(state, 'jason', at, manifest());
     assert.equal(passed.state.state, STATES.PASSED);
-    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: 5 });
+    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at });
     assert.equal(passed.events[0].code, TRANSITION.OPERATOR_ACCEPTED);
+    assert.equal(passed.events[0].at, at);
+  });
+
+  it('never records an acceptance before the review it accepts, whatever the operator clock says', () => {
+    const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
+    const passed = sm.accept(state, 'jason', 5, manifest());
+    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: state.updatedAt });
+    assert.ok(passed.events[0].at >= events.at(-1).at);
   });
 
   it('does not begin review on an interval that did not qualify', () => {
@@ -478,9 +510,11 @@ describe('cancel and summarize', () => {
   it('cancels a live run with the actor recorded', () => {
     const { state } = run(manifest(), [sample(MIN, obs({ server: null }))]);
     assert.equal(state.state, STATES.EXTENDED);
-    const out = sm.cancel(state, 'jason', 9);
+    const out = sm.cancel(state, 'jason', 1_000_000 + 2 * MIN);
     assert.equal(out.state.state, STATES.CANCELLED);
-    assert.deepEqual(out.state.cancellation, { actor: 'jason', at: 9 });
+    assert.deepEqual(out.state.cancellation, { actor: 'jason', at: 1_000_000 + 2 * MIN });
+    // A clock behind the last sample stamps the cancellation at the run's time.
+    assert.deepEqual(sm.cancel(state, 'jason', 9).state.cancellation, { actor: 'jason', at: state.updatedAt });
   });
 
   it('summarizes progress as structured health', () => {

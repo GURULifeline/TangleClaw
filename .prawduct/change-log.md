@@ -61,7 +61,8 @@ The PM approved moving the GitHub check to `main` on a schedule. PR-review items
   - Transitions go to a numbered log written before the state commits.
   - The actor setting and publish remote are pinned in the manifest, and a withheld actor gets a neutral commit identity.
 - **Chunk 03 — verification** (`verify.js`, `scripts/scorecard-verify.js`, `.github/workflows/scorecard-verify.yml`):
-  - Every commit on `metrics` is checked against the rules, and one `TRANSITIONS` table is shared with the state machine, so a forged `passed` cannot verify.
+  - Every commit on `metrics` is checked against the rules, and one `TRANSITIONS` table is shared with the state machine, so a `passed` that skipped review or shows unmet targets cannot verify.
+  - The times must be internally consistent (`TIMELINE_INCONSISTENT`). This checks that the history agrees with itself, not that a soak happened.
   - The publisher preflights the same rules before every push (`WOULD_VIOLATE`).
   - The workflow runs from `main` every 30 min and re-verifies the whole history.
   - Unreadable history is reported as such, never as absent.
@@ -71,6 +72,8 @@ The PM approved moving the GitHub check to `main` on a schedule. PR-review items
   - N4: `requiredChecksSource` is recorded.
 
 **Reviews.** Chunk 01: 1 blocking (evidence), then clean. Chunk 02: 1 blocking (a clone shared across candidates), then clean. Chunk 03: 5 blocking (forged pass, permanent time-backwards, untested rules, evidence), then clean. The cumulative review across the branch has no blocking findings open.
+
+**PR review (Architect gate at 79584b8a).** 1 blocking: the verifier trusted the scorecard's self-reported duration, so a history claiming 72 qualified hours a minute after admission verified clean. Fixed with the `TIMELINE_INCONSISTENT` rule; the probe is a regression test. The state machine was made to satisfy the rule under a stepped clock: earned time is capped by how far `updatedAt` moved, transition/acceptance/cancellation times are clamped to it, and an admission sample older than its manifest is refused. Two state-machine tests that passed an acceptance and a cancellation time predating the run now use real times, with the clamp tested separately. Claims narrowed from "a forgery cannot pass" to "the history is internally consistent" in ADR 0021 §9, `CHANGELOG.md`, `verify.js`, `codes.js` and the tests.
 
 **Tests.** `test/release-certification-{scorecard,publish,verify}.test.js`, and extended C01 suites. Git behaviour is tested against local bare repos made with `test/_temp-repo.js`, with nothing pushed anywhere real. The full suite is clean on da603537 (14,225 pass, 0 fail, 1 skip).
 
