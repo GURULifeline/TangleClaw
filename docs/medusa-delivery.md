@@ -99,8 +99,10 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   `POST <base>/medusa/read {"ids": [...]}` records `acknowledged`. Both apply
   only to mail addressed to the reading session, and record who did it:
   - `recipient`: a verified launch;
-  - `operator-ui`: the dashboard, whose inbox panel marks everything it shows
-    as handled;
+  - `operator-ui`: the dashboard. Its inbox panel only reads: opening it
+    records `read` for what it shows and never acknowledges or clears the
+    unread count (#1987), because a cleared count would cancel the agent's wake
+    nudge for mail it has not seen;
   - `unverified-reader`: an unproven caller.
 - **A message that needs no reply closes on acknowledgement**, whoever
   acknowledged it; the record names who.

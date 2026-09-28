@@ -269,6 +269,12 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Fixed
 
+- **Opening the dashboard's Medusa inbox panel no longer acts on the agent's mail** (#1987). The panel acknowledged every message it displayed by ID. For a normal message, that removed it from the agent's inbox and closed the exchange before the agent ever saw it, so the sender never got a reply. The panel now only fetches and renders.
+  - **No clearing:** it no longer sends even the bodyless badge clear. That call sets the unread count to zero, which the wake monitor reads as "inbox read", and so it would cancel the agent's nudge for mail it had not seen.
+  - **The badge now means the agent has not handled the mail,** and an operator viewing it leaves it that way.
+  - **Unchanged:** the server semantics of both `POST …/read` forms, and the UI.
+  - This reverses the earlier acknowledge-on-display behaviour (#785); its component tests were replaced with the new contract, per the Architect's ruling (option B).
+
 - **Codex sessions get their Medusa wakes again when other threads are loaded for the project** (#1978). The engine observer refused to answer whenever a second thread was loaded for the project directory, even though the launch's own thread was recorded and identity-bound. Every wake to that session was then skipped as `engine-thread-unknown` for as long as a subagent or another thread stayed loaded, and the recipient depended on the operator noticing the unread badge. The recorded thread is now observed directly. Another loaded thread for the directory can only hold the wake: it reads busy while it is working (`subagent-active` or `other-thread-active`, from the protocol's own subagent metadata), and unknown when its status is one the protocol does not promise. A resting extra thread no longer blocks. The process, socket, version, launch and channel identity checks are unchanged, and so are the pane's composer and busy-turn gates. A thread bound during the same observation must still be the only one loaded.
 
 - **A dashboard tab that has fallen behind the server now checks for a new service worker when the "TC server is out of date" banner appears** (#411). When a newer worker exists it takes over and the page reloads itself once onto the current assets, so a long-lived tab no longer needs a manual "unregister service worker" to catch up. Nothing visible changes: there is no new banner or hint. This does not address a restart that fails to recycle the server process, which was seen in the same June incident and remains unexplained.
