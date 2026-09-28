@@ -127,6 +127,32 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     acceptance. Start a new log.
   - A lock the run still owns but cannot remove is a different failure, `LOCK_RELEASE_FAILED`. The
     log is intact; only the lock file is left behind.
+- **Every run segment is bracketed by a durable marker, `<log>.segment`.**
+  - It is created and fsynced before any work, and binds the log's path, the owner and the bytes the
+    log held at the start.
+  - It is removed only when every append of the segment is durable and its exact owner released the
+    lock.
+  - **A graceful stop (Ctrl-C, SIGTERM) is committed while the lock is still held:**
+    1. a `stop` record is appended and fsynced;
+    2. the marker is atomically replaced by a `stopped-clean` one that binds the whole log as it now
+       stands;
+    3. the lock is released;
+    4. the marker is removed as cleanup.
+
+    If the process dies before cleanup, a later run checks that the log is byte-for-byte what the
+    stop recorded and resumes, even with no lock. If the lock is lost before the stop commits,
+    neither the stop record nor the transition is written.
+  - While it exists, in either state, the log is not evidence: `readLog` refuses it
+    (`LOG_SEGMENT_OPEN`). A stopped run is never a completed certification.
+  - A later run tells the two ways a segment can be left open apart by the lock:
+    - **An ordinary crash** leaves the marker and the old lock naming the same dead owner on this
+      host. It is reconciled and resumed, and the recovery is recorded (`recoveredFrom`) in the new
+      segment's first record.
+    - **A marker whose lock is gone, replaced or unreadable** may be a lock loss whose sidecar could
+      not be written. It is never resumed (`LOG_SEGMENT_UNRECONCILED`): start a new log, or reset by
+      hand after checking the log.
+  - A marker that was altered, or no longer matches the log, is refused (`LOG_SEGMENT_INVALID`). That
+    includes a `stopped-clean` marker whose log has changed since the stop.
   - An error the run hit for another reason is always reported first, with any lock outcome
     attached.
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
@@ -140,6 +166,11 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - A mismatched seal, damage altered after sealing, a stray seal, or damage in the middle of the log
     with no seal makes the log unreadable (`LOG_UNREADABLE`).
   - A log that survived several crashes, each sealed, still resumes, whichever byte a crash cut.
+  - **Known limit: a check-then-write window.** Ownership is checked immediately before each append,
+    not atomically with it. A process that took a live holder's lock by hand in that instant could
+    precede one append. Release still detects the takeover and condemns the log. Closing the window
+    would need `flock`, a native module this zero-dependency project does not use. Accepted by the
+    Architect.
   - **Known limit: the log is not signed.** Seals detect accidental damage, not forgery. Someone
     who can write the file can compute a correct sha256 and forge a seal that hides a record. Making
     it tamper-evident would need a keyed MAC or a hash chain anchored outside the host.

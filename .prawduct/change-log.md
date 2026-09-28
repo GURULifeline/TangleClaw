@@ -271,6 +271,31 @@ Also fixed:
       - primary-error precedence is kept, with the recorded loss attached as `lockLost`.
       - Tests cover: loss during an event (that event and `end` are unwritten); loss exactly before `end`; rerun refused, taking no lock; five kinds of sidecar tamper; a log cut back after the loss; `LOCK_LOST_UNRECORDED` via an unwritable directory; primary precedence; and `LOCK_RELEASE_FAILED`.
       - Mutation checks: removing the pre-append check fails both loss tests, and removing the reader check fails the rerun and tamper tests. The loss-during-event test first keyed its trigger on the event kind, which event 0 shared, and passed vacuously. Its trigger is now the second executor call.
+    - **TC-RM03 final verification of `79697d96`: GREEN.** The Architect then promoted residual **RA to a final blocker** and accepted RB. The PM dispatched RA and closed PR #2025 until it is done.
+      - *RA:* a lock lost AND a sidecar that could not be written let a later run, once the directory was writable again, resume and complete. The log then read clean. My earlier argument, that a marker cannot tell that from a crash, was wrong. The lock state tells them apart: a crash leaves the marker and the old lock naming the same dead owner, while an unrecorded loss leaves the marker with the lock absent, replaced or unreadable.
+      - **The fix:**
+        - `openSegment` durably writes `<log>.segment` before any work, bound to the log path, the owner, and the log's size and sha256 at the start.
+        - `closeSegment` removes it only after every append is fsynced and exact-owner release succeeds.
+        - **Graceful stop, as ruled by the Architect (refining my first interpretation, which just cleared the marker):**
+          - under exact ownership, a `stop` record is appended and fsynced;
+          - `stopSegment` atomically transitions the marker to `stopped-clean`, bound to the whole log as it stands;
+          - then the lock is released and the marker is cleaned up.
+          - A leftover valid `stopped-clean` marker resumes even with no lock, recorded as `recoveredFrom.state: 'stopped-clean'`.
+          - A loss before the stop commits writes neither the stop record nor the transition, since both are behind the ownership check.
+        - Before work, `runSchedule` reconciles a leftover marker. It resumes only when the stale lock `acquireLogLock` reclaimed names exactly the marker's owner, a same-host process that is dead. It records `recoveredFrom` in the new segment's header or resume record, under the new lock. Otherwise it refuses with `LOG_SEGMENT_UNRECONCILED` and releases the lock it took.
+        - `readLog` refuses an open segment (`LOG_SEGMENT_OPEN`) unless the caller owns it. A tampered or mismatched marker is `LOG_SEGMENT_INVALID`.
+      - **Tests:**
+        - the double fault stays condemned: no sidecar, the marker persists, the rerun is refused and runs nothing, and the log never reads complete;
+        - an ordinary dead-owner crash resumes, with `recoveredFrom` recorded;
+        - a crash between `end` and release reconciles to `already-complete`;
+        - a crash between release and marker-clear is refused, and so is a different old owner;
+        - five kinds of marker tamper are refused;
+        - readers are refused mid-run;
+        - a graceful stop closes the segment;
+        - the stop protocol: stopped-clean at release, then cleanup, then resume; a crash after release but before cleanup resumes with no lock; a judge refuses a leftover stopped-clean marker; four stopped-clean tampers are refused, including a byte appended after the stop; a loss before the stop commit writes neither the stop record nor the transition.
+      - **Mutation checks:** each of these fails the tests that pin it: removing the owner match, the reader refusal, the keep-open-on-loss rule, the stopped-clean transition, the whole-log binding, or the ownership check on the stop append.
+      - *RB* (the check-then-write window) is accepted and documented as a known limit.
+      - The carried root-skip is added to both chmod-based tests.
     - *O1: accepted and documented* as a known limit. The log is unsigned, so seals detect damage, not forgery.
     - *O3: confirmed.* Separate crashes, each exactly sealed, are accepted, and two seals on one region are refused.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.

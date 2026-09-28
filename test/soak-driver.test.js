@@ -1060,7 +1060,7 @@ describe('soak driver — the log lock and header', () => {
       assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST_INVALID');
     });
 
-    it('reports LOCK_LOST_UNRECORDED, and still writes no end, when the sidecar cannot be created', async () => {
+    it('reports LOCK_LOST_UNRECORDED, and still writes no end, when the sidecar cannot be created', { skip: process.getuid && process.getuid() === 0 ? 'running as root: chmod does not deny root' : false }, async () => {
       const s = apiSchedule();
       const executors = recordingExecutors([]);
       const k = s.events[0].kind;
@@ -1117,8 +1117,223 @@ describe('soak driver — the log lock and header', () => {
       (err) => err.code === 'LOCK_RELEASE_FAILED' && err.details.result.status === 'completed'
     );
     assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'no sidecar: the lock was never lost');
-    fs.rmSync(`${logPath}.lock`);
-    assert.equal(driver.readLog(logPath).ended, true, 'the log is intact and complete');
+    // The lock was never released, so the segment stays open until a later
+    // run reconciles it (once this owner is dead). Until then it is not evidence.
+    assert.equal(driver.readSegment(logPath).owner.pid, process.pid);
+    assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+    const raw = fs.readFileSync(logPath, 'utf8');
+    assert.ok(raw.includes('"type":"end"'), 'the log itself is intact and complete');
+  });
+
+  describe('the segment marker', () => {
+    const logLines = () => fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const deadPid = () => require('node:child_process').spawnSync(process.execPath, ['-e', '0']).pid;
+
+    /**
+     * Leave the log as a crashed run would: part-written, with its lock and its
+     * open segment both naming `owner`.
+     * @param {object} s - Schedule
+     * @param {{pid: number, host: string}} owner - The crashed run's owner
+     * @param {object} [o] - `{complete, lock}`: finish the log first; write the lock (default true)
+     */
+    async function crashedRun(s, owner, o = {}) {
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: o.complete ? undefined : afterEvents(2) });
+      driver.openSegment(logPath, owner, T0 + 1);
+      if (o.lock !== false) fs.writeFileSync(`${logPath}.lock`, JSON.stringify(owner));
+    }
+
+    it('opens durably before work and closes on a clean finish or a graceful stop', async () => {
+      const s = apiSchedule();
+      let seenMidRun = null;
+      const executors = recordingExecutors([]);
+      const k = s.events[0].kind;
+      const inner = executors[k];
+      executors[k] = async (...a) => { if (seenMidRun === null) seenMidRun = driver.readSegment(logPath); return inner(...a); };
+      await driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2) });
+      assert.deepEqual(seenMidRun.owner, { pid: process.pid, host: os.hostname() }, 'the marker exists while the run works');
+      assert.equal(driver.readSegment(logPath), null, 'a graceful stop closes the segment, so it can be resumed');
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.equal(driver.readSegment(logPath), null);
+      assert.equal(driver.readLog(logPath).ended, true);
+    });
+
+    it('refuses to be read as evidence while a segment is open, even by a caller mid-run', async () => {
+      const s = apiSchedule();
+      const executors = recordingExecutors([]);
+      const k = s.events[0].kind;
+      const inner = executors[k];
+      let refusal = null;
+      executors[k] = async (...a) => {
+        if (refusal === null) { try { driver.readLog(logPath); refusal = 'none'; } catch (err) { refusal = err.code; } }
+        return inner(...a);
+      };
+      await driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.equal(refusal, 'LOG_SEGMENT_OPEN');
+    });
+
+    it('resumes an ordinary crash, where the lock and the marker name the same dead owner, and records the recovery', async () => {
+      const s = apiSchedule();
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashedRun(s, owner);
+      const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.equal(result.status, 'completed');
+      const resume = logLines().find((r) => r.type === 'resume');
+      assert.deepEqual(resume.recoveredFrom, { owner, segmentStartedAt: T0 + 1, state: 'active' }, 'the recovery is on record, written under the new lock');
+      assert.equal(driver.readSegment(logPath), null);
+      assert.equal(fs.existsSync(`${logPath}.lock`), false);
+      assert.equal(driver.readLog(logPath).ended, true);
+    });
+
+    it('reconciles a crash between end and release: the log is complete, and it closes cleanly', async () => {
+      const s = apiSchedule();
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashedRun(s, owner, { complete: true });
+      const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.deepEqual([result.status, result.recoveredFrom.owner], ['already-complete', owner]);
+      assert.equal(driver.readSegment(logPath), null);
+      assert.equal(driver.readLog(logPath).ended, true);
+    });
+
+    it('fails safe on a crash between release and marker-clear: the lock is gone, so it is never resumed', async () => {
+      const s = apiSchedule();
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashedRun(s, owner, { complete: true, lock: false });
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED');
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+      assert.equal(fs.existsSync(`${logPath}.lock`), false, 'the refused run released the lock it took');
+    });
+
+    it('never resumes when the old lock names a different owner than the marker', async () => {
+      const s = apiSchedule();
+      await crashedRun(s, { pid: deadPid(), host: os.hostname() }, { lock: false });
+      fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: deadPid(), host: os.hostname() }));
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.lockFound !== null);
+    });
+
+    it('keeps the unrecorded double fault condemned: the lock is lost AND the sidecar cannot be written', { skip: process.getuid && process.getuid() === 0 ? 'running as root: chmod does not deny root' : false }, async () => {
+      const s = apiSchedule();
+      const executors = recordingExecutors([]);
+      const k = s.events[0].kind;
+      const inner = executors[k];
+      let fired = false;
+      executors[k] = async (...a) => { if (!fired) { fired = true; fs.rmSync(`${logPath}.lock`); fs.chmodSync(dir, 0o500); } return inner(...a); };
+      try {
+        await assert.rejects(driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOCK_LOST_UNRECORDED');
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'no sidecar could be written');
+      assert.ok(driver.readSegment(logPath), 'but the segment is still open');
+      // Later, with the directory writable again: never resumed, never read.
+      const ran = [];
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED');
+      assert.equal(ran.length, 0);
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+      assert.ok(!fs.readFileSync(logPath, 'utf8').includes('"type":"end"'), 'and it never reads as complete');
+    });
+
+    it('commits a graceful stop under ownership: a stop record, then a stopped-clean marker, then release, then cleanup', async () => {
+      const s = apiSchedule();
+      const seen = [];
+      // Watch the marker's state at each release, via a release-time fs stand-in.
+      const watch = {
+        readFileSync: (p, enc) => { if (p === `${logPath}.lock` && fs.existsSync(driver.segmentPath(logPath))) seen.push(JSON.parse(fs.readFileSync(driver.segmentPath(logPath), 'utf8')).state); return fs.readFileSync(p, enc); },
+        rmSync: fs.rmSync
+      };
+      const r = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2), lockDeps: { releaseFs: watch } });
+      assert.equal(r.status, 'stopped');
+      assert.deepEqual(seen, ['stopped-clean'], 'the marker was stopped-clean when the lock was released');
+      const recs = logLines();
+      assert.deepEqual(recs[recs.length - 1], { type: 'stop', at: recs[recs.length - 1].at, lastIndex: 1 }, 'the stop record is the last thing written');
+      assert.equal(driver.readSegment(logPath), null, 'cleanup removed the marker');
+      const again = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.equal(again.status, 'completed');
+    });
+
+    /**
+     * Leave the log as a clean stop whose cleanup never ran: the stop and the
+     * stopped-clean marker are durable, and the lock is gone.
+     * @param {object} s - Schedule
+     * @returns {Promise<object>} The stopped-clean marker
+     */
+    async function stoppedButNotCleaned(s) {
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), shouldStop: afterEvents(2) });
+      const owner = { pid: deadPid(), host: os.hostname() };
+      driver.openSegment(logPath, owner, T0 + 1);
+      driver.stopSegment(logPath, driver.readSegment(logPath), T0 + 2);
+      return driver.readSegment(logPath);
+    }
+
+    it('resumes a clean stop whose cleanup never ran, even with no lock, and records it', async () => {
+      const s = apiSchedule();
+      const m = await stoppedButNotCleaned(s);
+      assert.equal(m.state, 'stopped-clean');
+      assert.equal(fs.existsSync(`${logPath}.lock`), false);
+      const r = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
+      assert.equal(r.status, 'completed');
+      assert.deepEqual(logLines().find((x) => x.type === 'resume').recoveredFrom, { owner: m.owner, segmentStartedAt: T0 + 1, state: 'stopped-clean' });
+    });
+
+    it('never lets a judge read a leftover stopped-clean segment as evidence', async () => {
+      await stoppedButNotCleaned(apiSchedule());
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+    });
+
+    const stoppedTampers = [
+      ['a byte appended to the log after the stop', () => fs.appendFileSync(logPath, '{"type":"event","index":9}\n')],
+      ['a stopped-clean marker whose whole-log sha256 was altered', (mp) => { const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.logSha256 = '0'.repeat(64); fs.writeFileSync(mp, JSON.stringify(m)); }],
+      ['a stopped-clean marker missing its binding', (mp) => { const m = JSON.parse(fs.readFileSync(mp, 'utf8')); delete m.logBytes; fs.writeFileSync(mp, JSON.stringify(m)); }],
+      ['a marker with an unknown state', (mp) => { const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.state = 'done'; fs.writeFileSync(mp, JSON.stringify(m)); }]
+    ];
+    for (const [label, tamper] of stoppedTampers) {
+      it(`refuses ${label}`, async () => {
+        const s = apiSchedule();
+        await stoppedButNotCleaned(s);
+        tamper(driver.segmentPath(logPath));
+        await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_INVALID', label);
+      });
+    }
+
+    it('writes neither the stop record nor the transition when the lock is lost before the stop commits', async () => {
+      const s = apiSchedule();
+      let n = 0;
+      await assert.rejects(
+        driver.runSchedule({
+          schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0),
+          shouldStop: () => {
+            if (fs.existsSync(logPath) && logLines().filter((r) => r.type === 'event').length >= 2 && n++ === 0) { fs.rmSync(`${logPath}.lock`); return true; }
+            return false;
+          }
+        }),
+        (err) => err.code === 'LOCK_LOST'
+      );
+      assert.ok(!logLines().some((r) => r.type === 'stop'), 'no stop record');
+      assert.ok(fs.existsSync(driver.segmentPath(logPath)), 'the segment stays open');
+      const m = JSON.parse(fs.readFileSync(driver.segmentPath(logPath), 'utf8'));
+      assert.equal(m.state, 'active', 'the marker never became stopped-clean');
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_LOCK_LOST');
+    });
+
+    const tampers = [
+      ['a marker naming another log', (m) => { m.logPath = '/tmp/other.ndjson'; }],
+      ['a marker whose start sha256 was altered', (m) => { m.logSha256AtStart = '0'.repeat(64); }],
+      ['a marker claiming more bytes than the log has', (m) => { m.logBytesAtStart += 100; }],
+      ['a malformed marker', () => '{not json'],
+      ['a marker with no owner', (m) => { delete m.owner; }]
+    ];
+    for (const [label, edit] of tampers) {
+      it(`refuses ${label}, for resume and for reading`, async () => {
+        const s = apiSchedule();
+        const owner = { pid: deadPid(), host: os.hostname() };
+        await crashedRun(s, owner);
+        const mp = driver.segmentPath(logPath);
+        const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
+        const out = edit(m);
+        fs.writeFileSync(mp, typeof out === 'string' ? out : JSON.stringify(m));
+        await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_INVALID', label);
+        assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_INVALID', label);
+      });
+    }
   });
 
   it('never reclaims a lock held on another host', async () => {
