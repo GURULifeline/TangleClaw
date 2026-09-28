@@ -35,6 +35,23 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-28 — Authorize the project-required startup readiness message (#1874)
+
+<!-- prawduct: type=bugfix | scope=startup-readiness-ping-1874 -->
+
+The PM dispatched this over Medusa. The issue carried its own scope: a narrow carve-out plus an authorized launch step. The durable readiness receipt (#1877) is out of scope.
+
+**Problem.** A project rule required a startup readiness message, but the prime's Medusa section said "do NOT act on it at session start", and the launch opening listed no such step as authorized. Agents held the ping for operator approval.
+
+**The change.**
+- **Launch opening.** `LAUNCH_BOOTSTRAP_LINES` step (c) now says: if project rules require a startup message once READY, send exactly that right after attesting; it is part of initialization. That puts it under the existing "(a) through (c) are … already authorized" sentence, and (d) is unchanged.
+- **Session prime.** `MEDUSA_STARTUP_EXCEPTION` is appended to the session prime's "context, not a task" bullet, not added as a bullet of its own. It permits only that message after `tc start ready` and a lookup of its named recipient, with "nothing else". It has two forms. A launch with a `tc start` sequence says "after `tc start ready`". A launch without one says "once you have read this context", because `tc start ready` answers 409 `SEQUENCE_NOT_APPLICABLE` there.
+- **Project Master.** The Master identity carries the same exception inside the `Sending is enabled` branch only. A read-only Master is never told to send.
+- **Engine configs.** The committed engine-config carriers (`lib/engines.js`) were left alone. They forbid exploring "unprompted", and a rule-required ping is prompted.
+
+**Budget trade-off, flagged.** Every character here is prime budget. The fullest no-sequence Claude scenario (`full-silent-claude`) was already about 50 characters under its roughly 10,000-character channel, so the ecosystem primer now yields to its pointer there. That is the designed yield: directives outrank bulk context. The current-path scenario with a launch sequence (`full-silent-claude-pull`) fits, going from 8740 to 9029 characters. The wording was cut from about 600 to about 320 added characters to limit this.
+
+**Evidence.** Tests pin the exception's placement (in the same bullet, after the prohibition), its limits (READY only, named recipient only, nothing else), the step (c) wording under the authorization sentence, and the Master's send-gated inclusion. The golden fixtures were regenerated.
 ## 2026-09-27 — The stale-server banner asks the service worker to update (#411)
 
 <!-- prawduct: type=bugfix | scope=sw-update-stale-banner-411 -->
