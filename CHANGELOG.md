@@ -51,9 +51,9 @@ All notable changes to TangleClaw are documented in this file.
     - An engine cycle cleans up only the harness's own leftover `soak-stub` sessions. It never touches a session on another engine.
     - It reads the token from `TANGLECLAW_SERVICE_TOKEN` only.
     - It logs every outcome to an fsynced, owner-only ndjson file.
-    - Interrupted, it resumes without running any event twice. Ctrl-C takes effect within a second, even during a long wait.
+    - Interrupted, it resumes without running any logged event twice. Only an event in flight at a crash runs again. Ctrl-C takes effect within a second, even during a long wait.
   - **The engine load uses a network-free stub engine** (`deploy/soak/stub-engine/`), because the soak guest has no egress and no vendor credentials. Real-vendor engine behaviour is outside this soak.
-  - **Not built yet:** the browser and fault executors, the isolated guest, and the evidence bundle. Until they exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently.
+  - **Not built yet:** the browser and fault executors, the isolated guest, and the evidence bundle. Also explicitly descoped, pending a ruling: API load against plans and the switchboard, engine sessions that exercise wrap and the switchboard, and generating the synthetic `soak-*` repos (today they must already exist on the target). Until they exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently.
 
 - **The server reports when a session has stopped being woken for its mail** (#1978). When a session's Medusa wake has been held as `engine-thread-unknown` for 10 minutes with mail waiting, the server logs one warning per episode. That code means the engine's channel exists but could not prove the session idle. `/api/server-info` also carries `medusaWakeStalls`: how many sessions are affected, plus the oldest one's project, how long it has waited and the engine's own reason. It is read-only evidence, and no dashboard UI shows it yet. The alert is read from the wake monitor's own verdict, so it clears by itself when the engine answers, the mail is read or the session ends. It never types into a pane, sends a message or starts anything. Before this, the only sign was an unread badge somebody had to notice.
 

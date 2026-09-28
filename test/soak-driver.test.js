@@ -330,6 +330,20 @@ describe('soak driver — resume', () => {
       });
     }
 
+    it('still resumes when the crash cut off only the newline, leaving a complete, valid record', async () => {
+      const s = apiSchedule();
+      const clock = fakeClock(T0);
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(2) });
+      // A whole event record, as the writer would have written it, minus its newline.
+      fs.appendFileSync(logPath, JSON.stringify({ type: 'event', index: 2, kind: s.events[2].kind, startedAt: T0, ok: true }));
+      const first = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(4) });
+      assert.equal(first.tornTail, true);
+      // The next resume must read the sealed log, not refuse it.
+      const second = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
+      assert.equal(second.status, 'completed');
+      assert.equal(driver.readLog(logPath).ended, true);
+    });
+
     it('still resumes a log that survived two crashes, each sealed to its own fragment', async () => {
       const s = apiSchedule();
       const clock = fakeClock(T0);
@@ -697,6 +711,21 @@ describe('soak driver — stopping and record integrity', () => {
       driver.runSchedule({ schedule: tampered, executors, ctx: {}, logPath, clock: fakeClock(T0) }),
       (err) => err.code === 'INVALID_SCHEDULE'
     );
+  });
+});
+
+describe('soak driver — writing every byte', () => {
+  it('keeps writing until a partial write has written everything', () => {
+    const got = [];
+    const partial = (fd, buf, off, len) => { const n = Math.min(3, len); got.push(buf.subarray(off, off + n).toString()); return n; };
+    driver.writeAll(7, Buffer.from('abcdefgh'), partial);
+    assert.equal(got.join(''), 'abcdefgh');
+  });
+
+  it('throws, instead of leaving a partial record, when a write makes no progress', () => {
+    let calls = 0;
+    const stuck = (fd, buf, off, len) => (calls++ === 0 ? Math.min(2, len) : 0);
+    assert.throws(() => driver.writeAll(7, Buffer.from('abcdefgh'), stuck), (err) => err.code === 'ESHORTWRITE' && /2 of 8/.test(err.message));
   });
 });
 

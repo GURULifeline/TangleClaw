@@ -151,6 +151,11 @@ Also fixed:
 
 **Descoped, explicitly:** the `browser` and `fault` executors. They act on processes inside the guest, so they can be neither verified nor safely run until Chunk 1's guest exists. `run` refuses them (`NO_EXECUTOR`) rather than skipping them. They need a follow-on dispatch.
 
+**Also descoped, and not declared until the cumulative Critic `rev-20260928T185141Z-f04421bb` caught it (BLOCKING).** These are Chunk 2 items from the plan that were neither built nor listed. Nobody had ruled on them; they are pending the PM's ruling, now requested. They are recorded in the plan (§4), the README status block and the CHANGELOG:
+- API load against **plans and the switchboard**. Built: health, server-info, projects, ports.
+- Stub-engine sessions exercising **wrap and the switchboard**. Built: launch, commands, kill.
+- **Synthetic repos with a local bare origin**. The README makes existing `soak-*` projects a prerequisite of the target instead; provisioning fits with the Chunk 1 guest.
+
 **Verification.**
 - New suites: `test/soak-{schedule,driver,executors,cli,stub-engine}.test.js`.
 - Baseline suite on `origin/main` 69fc2253: green, with the one ledgered skip.
@@ -224,6 +229,11 @@ Also fixed:
   - *L3: fixed.* With `TANGLECLAW_API` set, `--api` must be an IP literal (`TARGET_NOT_IP_LITERAL`), so the target is never resolved and there is no check-to-connect window to rebind. A test with a rebinding resolver asserts the target is never looked up. The live name is still resolved, to decide whether the live install is local.
     - Verified read-only against the live install: `localtest.me` and the MagicDNS name are refused unresolved, `127.0.0.1` and `[::ffff:127.0.0.1]` on the live port are refused, and a guest IP is allowed.
   - *L4: accepted and documented.* A deferred fault can make queued load stale, and that load is skipped and logged.
+  - *Cumulative Critic `rev-20260928T185141Z-f04421bb` at `3a9f8005`:*
+    - **1 blocking:** the silent descope above, now declared everywhere it applies.
+    - *W2 fixed:* a torn line that was a complete, valid record, missing only its newline, parsed as a record, so its seal was refused as stray and the log could never resume again. `readLog` now identifies a fragment by the seal that follows it, before parsing. There is a regression test, which fails on the old reader.
+    - *W3 fixed:* `appendRecord` and `sealTornTail` ignored partial `writeSync` results, so a nearly full disk could leave an unrepairable partial record mid-log. Both now use `writeAll`, which loops, or throws `ESHORTWRITE` when a write makes no progress. Tested.
+    - *Notes:* the driver header and the CHANGELOG resume wording are corrected. Splitting `driver.js` into guard, log and loop modules is accepted and left for when the fault executors land.
   - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
     - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
     - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.

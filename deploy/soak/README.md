@@ -9,10 +9,17 @@ judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces t
 records what happened.
 
 > **Status: partial.** This directory has the schedule, the runner for the `api` and `engine`
-> load classes, and the stub engine. Three pieces are not built yet:
+> load classes, and the stub engine. Not built yet:
 > - the guest itself;
 > - the executors for the `browser` and `fault` classes;
-> - integrity sampling, the evidence bundle and the operator runbook.
+> - integrity sampling, the evidence bundle and the operator runbook;
+> - **explicitly descoped from this chunk, pending the PM's ruling:**
+>   - API load against plans and the switchboard (the API load built covers health, server-info,
+>     projects and ports);
+>   - stub-engine sessions that exercise wrap and the switchboard (the engine cycle covers launch,
+>     commands and kill);
+>   - generating the synthetic `soak-*` repos with a local bare origin. Today they must already
+>     exist on the target.
 >
 > Until the missing executors exist, `run` **refuses** any schedule containing those kinds
 > (`NO_EXECUTOR`) rather than skipping them. Plan with `--classes api,engine` to run the load
