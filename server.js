@@ -7081,9 +7081,11 @@ function registerMedusaRoutes(prefix, resolve) {
     jsonResponse(res, 200, bridge ? { ...status, bridge } : status);
   });
 
-  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). A pure
-  // read (no mark-read side effect on GET); the read panel clears unread via
-  // POST /read. No live participant → an empty inbox.
+  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). It never
+  // marks mail handled or clears unread: it only records a `read` fact for what
+  // it returned (#1839). The dashboard's inbox panel calls this route and
+  // nothing else, so viewing mail never acts for the agent (#1987). No live
+  // participant → an empty inbox.
   route('GET', `${prefix}/messages`, (req, res, params) => {
     const r = resolve(params, parseQuery(reqUrl(req).search));
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
