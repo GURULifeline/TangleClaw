@@ -1051,8 +1051,8 @@ condition fired or could not be measured. Each row carries its own fix; the back
   runs it from `~/.tangleclaw/bin/ttyd`, and `deploy/install.sh` builds and installs it whenever
   it is missing, broken or out of date, so a normal install needs no extra step. If the ingress
   cutover stops with "the managed ttyd runtime … cannot be used", run
-  `node scripts/ttyd-runtime.js provision` and then the cutover again (not `deploy/install.sh`, which
-  rewrites the terminal's launchd job for direct mode); if the installer itself stops there, its
+  `node scripts/ttyd-runtime.js provision` and then the cutover again (or `deploy/install.sh`, which
+  in caddy mode does both); if the installer itself stops there, its
   message says what failed (see "The ttyd runtime launchd runs"
   in `docs/configuration-reference.md`). To put it in service or take it out again, follow
   [Roll out the owned ttyd runtime](runbooks/roll-out-the-owned-ttyd.md) or
