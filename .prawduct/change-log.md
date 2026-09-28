@@ -35,6 +35,23 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-28 — Opening the dashboard inbox panel is a pure observation (#1987)
+
+<!-- prawduct: type=bugfix | scope=inbox-panel-observational-1987 -->
+
+The PM dispatched this over Medusa (Definition Ready v5.31). B5 echoed the Architect addendum, then flagged a conflict inside it before writing code: the selected bodyless badge clear zeroes `unread`, and the wake monitor reads that as "inbox read" (`lib/medusa-wake.js`), so an operator viewing the panel would cancel the agent's nudge. The Architect ratified option B, a panel that makes no `/read` call at all, and amended the acceptance criteria on the issue.
+
+**The change.** `openInbox()` in `public/api-helper.js` now fetches and renders only. No other frontend path posts `/read`. Every comment and doc describing the old behaviour was corrected: the CSRF notes in `public/api-helper.js`, `server.js` and two tests; the `recordAcknowledged` JSDoc; the CSS and test comments about the badge "self-hiding on read"; and one test title. The review caught the copies outside the first commit. Server semantics and UI are unchanged.
+
+**Tests.** The #785 acknowledge-on-display tests (ack by id, bodyless fallback, badge hidden) encoded the behaviour the ruling reverses, so they were replaced with the ruled contract:
+- no `/read` of either form for id-bearing, id-less or empty inboxes;
+- the unread count and badge are unchanged, with the fake `/read` answering `unread: 0` so a regression is caught;
+- a post-fetch arrival still counts.
+
+The rendering assertions (escaping, newest first, the close button, toggling) are kept. All new tests were red before the fix.
+
+**Evidence.** The targeted ring is green (851 tests: every medusa* suite, the api/master Medusa suites and the frontend guards). The full suite was not run, under the Pilot Envelope.
+
 ## 2026-09-27 — The stale-server banner asks the service worker to update (#411)
 
 <!-- prawduct: type=bugfix | scope=sw-update-stale-banner-411 -->
