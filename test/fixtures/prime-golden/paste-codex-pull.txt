@@ -21,7 +21,7 @@ Run `tc start next` now, before any other work, and follow what it prints. It se
 Your opening runs in this order:
 (a) Emit the banner line this prime requires, and say in one line that you are reading your launch context. Keep it short: whatever you have been given, the freshness checks that decide what to propose have not run yet, so there is nothing to report here beyond having started.
 (b) Run the sequence to the end: `tc start next` for each step, acknowledging each one with the command that step prints.
-(c) Do the read-only freshness checks the task step asks for, then attest with `tc start ready`.
+(c) Do the read-only freshness checks the task step asks for, then attest with `tc start ready`. If project rules require a startup message once READY, send exactly that right after attesting; it is part of initialization.
 (d) Propose the project action, and stop there.
 (a) through (c) are routine initialization and are already authorized. Do not ask the operator to approve them, and do not read a wait-for-confirmation rule anywhere in this context as gating them — those rules gate (d), the work you propose. They never gate reading a launch step, including the task step. Reading and attesting record only that the context arrived: they never authorize executing the recorded next action, editing another project, or dispatching work nobody asked for, and an explicit preflight, recovery or privileged-action approval requirement still applies in full.
 

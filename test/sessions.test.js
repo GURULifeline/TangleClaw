@@ -496,6 +496,26 @@ describe('sessions', () => {
         );
       });
 
+      it('permits exactly one startup action: a message the project rules require, and nothing else (#1874)', () => {
+        const contractFile = path.join(projDir, 'fixture-contract.md');
+        fs.writeFileSync(contractFile, '# Fixture Consumer Contract\nRegister then drain.\n');
+        process.env.MEDUSA_CONTRACT_PATH = contractFile;
+        store.projectConfig.save(projDir, { medusaEnabled: true });
+
+        const project = store.projects.getByName('prime-test');
+        const engine = store.engines.get('claude');
+        const prompt = sessions.generatePrimePrompt(project, engine, { medusaWorkspaceId: 'prime-test-cafe0123' });
+
+        const context = prompt.indexOf('This section is context, not a task');
+        const exception = prompt.indexOf(sessions.MEDUSA_STARTUP_EXCEPTION);
+        assert.ok(context > -1, 'the general prohibition still stands');
+        assert.ok(exception > context, 'the exception follows the prohibition it narrows');
+        assert.equal(prompt.slice(context, exception).includes('\n'), false, 'in the same bullet, not a separate instruction');
+        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /project's rules require/);
+        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /after `tc start ready`/, 'only once READY');
+        assert.match(sessions.MEDUSA_STARTUP_EXCEPTION, /looking up only its named recipient; nothing else/);
+      });
+
       it('#557 regression: directive sections survive the prime cap — the contract yields, honestly', () => {
         const wrapSentinel = require('../lib/wrap-sentinel');
         // An oversized contract: alone it exceeds the prime's token cap
