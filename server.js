@@ -10205,8 +10205,8 @@ async function handleRequest(req, res) {
     // header, and they keep working exactly as written.
     //
     // Keyed on a body being PRESENT, not on the method. The dashboard sends
-    // genuine bodyless writes (`medusa/toggle`, `medusa/read`,
-    // `wrap-sentinel/ack` go through `api()` with no body and no
+    // genuine bodyless writes (`medusa/toggle` and `wrap-sentinel/ack` go
+    // through `api()` with no body and no
     // Content-Type), and refusing those would break the operator's own UI to
     // close nothing — a request with no body carries no forged payload. The
     // residual is a bodyless same-site POST to a route that acts without one;
