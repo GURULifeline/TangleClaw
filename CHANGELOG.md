@@ -278,6 +278,8 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Fixed
 
+- **Roadmap Topic Buckets render as cards again instead of raw block text** (#2006). A `tc-train` block with `"kind": "bucket"` and no `train` was refused because every kind except `unconfigured` required a train identity, so the shared Roadmap Board showed its topic sections (Infrastructure Hardening, Master Control, Version 5 Subsequent) as code with an error. A bucket now renders as a normal collapsible card named **Topic Bucket: <title>**, and never shows or borrows a train number. A bucket that supplies a `train` is refused, which keeps topic buckets distinct from numbered trains. Train, pilot and unconfigured validation are unchanged.
+
 - **Opening the dashboard's Medusa inbox panel no longer acts on the agent's mail** (#1987). The panel acknowledged every message it displayed by ID. For a normal message, that removed it from the agent's inbox and closed the exchange before the agent ever saw it, so the sender never got a reply. The panel now only fetches and renders.
   - **No read record:** the dashboard's fetch no longer records a `read` fact. A read fact took the exchange out of awaiting-read, ended the agent's wake re-arms and made the message unretractable, so viewing still acted for the agent. The agent's own fetch records its read exactly as before.
   - **No clearing:** it no longer sends even the bodyless badge clear. That call sets the unread count to zero, which the wake monitor reads as "inbox read", and so it would cancel the agent's nudge for mail it had not seen.

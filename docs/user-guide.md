@@ -689,7 +689,7 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 
   Optional train fields:
 
-  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. An `unconfigured` card must have no `train`; every other kind needs one.
+  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. A `bucket` or `unconfigured` card must have no `train`, so a Topic Bucket never shows or borrows a train number; `train` and `pilot` cards need one.
   - `version`: a short label such as `v6`, shown as a badge.
   - `status`: one of `planned`, `ready`, `in-progress`, `blocked`, `shipped` or `sunset`, shown as a badge.
 
