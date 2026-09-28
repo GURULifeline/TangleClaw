@@ -44,7 +44,8 @@ node scripts/soak.js validate --schedule soak-certifying.json
   - project names must be synthetic (`soak-…`);
   - lease ports stay at 5000 or above, outside TangleClaw's own ranges;
   - an engine cycle sends at most 20 commands;
-  - the load and fault gaps have floors;
+  - the load and fault gaps have floors, and a certifying schedule keeps at least a minute between
+    faults (the default is ten);
   - a schedule holds at most 300,000 events. A 72-hour run at the one-second floor is 259,200.
 - **`plan` never overwrites** an existing schedule file.
 
@@ -52,7 +53,7 @@ node scripts/soak.js validate --schedule soak-certifying.json
 
 ```sh
 TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying.json \
-  --api http://<guest-address>:<port> --log soak-certifying.ndjson
+  --api http://<guest-ip>:<port> --log soak-certifying.ndjson
 ```
 
 - **`--api` is required and has no fallback.** The load writes port leases and sessions, so before
@@ -64,34 +65,48 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     - `localhost` and any `*.localhost` name, with or without a trailing dot;
     - the hostname or its MagicDNS name;
     - any local interface address.
-  - **By resolution.** It resolves the target's name and refuses when any address it gets is on this
-    machine, which catches names no spelling rule anticipates. It fails closed: a name that does not
-    resolve, or resolves to nothing, is refused (`TARGET_UNRESOLVED`). It resolves `TANGLECLAW_API`'s
-    own name too. When that name is a Tailscale or LAN name rather than the hostname, `127.0.0.1` on
-    the live port is still refused, and a live name that does not resolve counts as this machine.
+  - **By address.** With a live install to protect, `--api` must name the guest by **IP address**
+    (`TARGET_NOT_IP_LITERAL` otherwise), and an address on this machine at the live port is refused.
+    - A hostname is resolved once when checked and again when connected to, and nothing binds the
+      two. A name could resolve elsewhere at the check and to `127.0.0.1` at the connection (DNS
+      rebinding). An IP literal is never resolved, so the address checked is the address connected to.
+    - `TANGLECLAW_API`'s own name *is* resolved. When it is a Tailscale or LAN name rather than the
+      hostname, `127.0.0.1` on the live port is still refused, and a live name that does not resolve
+      counts as this machine.
   - **By identity.** It asks both servers for `/api/server-info` and refuses a target that reports the
     same running server (`startedAt` and `startupSha`), which catches a reverse-proxy route.
 - **If the live install's identity cannot be read, `run` refuses** (`LIVE_IDENTITY_UNREADABLE`).
-  `--allow-unverified-live` overrides this, and the override is recorded in the log header. If only
+  `--allow-unverified-live` overrides this, and the override is recorded in the log. If only
   the target cannot be read, `run` warns (`IDENTITY_UNCHECKED`) and carries on: a target that answers
   nothing, or answers `401`, answers the load the same way.
 - **With no `TANGLECLAW_API`, `run` refuses (`GUARD_CONTEXT_ABSENT`) unless `--no-live-install` is
   given.** Every guard compares against `TANGLECLAW_API`, so without it nothing is guarded, and that
   has to be stated rather than assumed.
   - Inside the soak guest, where the driver targets the guest's own TangleClaw, pass
-    `--no-live-install`. The log header records it.
+    `--no-live-install`. The log records it.
   - Passing it where `TANGLECLAW_API` is set is a usage error.
   - Neither override is ever passed on the operator's behalf, least of all by certification.
+  - **Every run segment records what its guards established and the overrides it ran under.** The
+    first segment's go in the log header. Each resumed segment appends and flushes a `resume` record,
+    with its own `guard` results, its overrides and where it resumed from, before it does any work.
+    An override given only when resuming is still in the evidence.
 - **The target must already have the synthetic projects** (`--projects`, default `soak-a`,
   `soak-b`, `soak-c`) and no delete password. Otherwise every session cycle is logged as a `404`
   or `403`.
 - **The token comes from `TANGLECLAW_SERVICE_TOKEN` only.** `--token` is refused.
-- **The log is `0600`, and one driver holds it at a time** (`<log>.lock`, `LOG_LOCKED`). A lock left
-  by a dead process on this host is reclaimed, and the reclaim is logged. Each record is flushed to
-  disk before the next event.
+- **The log is `0600`, and one driver holds it at a time** (`<log>.lock`, `LOG_LOCKED`).
+  - A lock left by a dead process on this host is reclaimed by exactly one contender, which holds the
+    `<log>.lock.reclaim` mutex and replaces the lock in one atomic rename. The reclaim is logged.
+  - An unreadable lock, a live holder, a holder on another host, or a reclaim already in progress
+    is refused, naming the file to remove if you are sure no driver is running.
+  - Each record is flushed to disk before the next event.
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
-  a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record naming its
-  size. Its event runs again.
+  a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record that binds that
+  exact fragment by byte offset, length and sha256. Its event runs again.
+  - A malformed line is accepted only when a seal matching it byte for byte comes straight after it.
+  - A mismatched seal, a fragment altered after sealing, a stray seal, more than one malformed line
+    under one seal, or an empty line makes the log unreadable (`LOG_UNREADABLE`).
+  - A log that survived several crashes, each sealed to its own fragment, still resumes.
 - **Ctrl-C stops within a second, before the next event** (exit 4), even during a long wait, and says so on stderr. Running the same command again resumes, and no
   logged event runs twice.
 - **An engine cycle cleans up only the harness's own sessions.** It first reads the project's
@@ -107,11 +122,13 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     before the log ends.
   - Overdue load that is not yet stale runs at least a second apart.
   - Each record says what applied (`paced`), and `lateMs` says how late it started.
+  - A deferred fault delays the load queued behind it, and load that goes stale during that wait is
+    skipped and recorded like any other stale load. That is intended: faults take priority over load.
 
 Exit codes: 0 done, 2 usage, 3 refused (the code is printed as JSON on stderr), 4 stopped.
 
 ```sh
-node scripts/soak.js run --schedule s.json --api http://<guest>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install]
+node scripts/soak.js run --schedule s.json --api http://<guest-ip>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install]
 ```
 
 ## The stub engine

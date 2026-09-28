@@ -14,11 +14,14 @@
  * `run` executes against the server named by `--api` and nothing else. There
  * is deliberately no fallback to `TANGLECLAW_API`. Because a soak's load
  * writes (port leases, sessions), it refuses the pane's own TangleClaw by
- * address, by what the target's name resolves to, and by server identity.
+ * spelling, by address (with a live install to protect, `--api` must be an
+ * IP literal, so nothing is resolved between the check and the connection),
+ * and by server identity.
  * When the live install's identity cannot be read, it refuses unless
  * `--allow-unverified-live` is given. With no `TANGLECLAW_API` at all there is
  * nothing to guard against, and it refuses unless `--no-live-install` says so:
- * that is the soak guest's case. The log header records either override.
+ * that is the soak guest's case. Every run segment records the overrides it
+ * ran under: the first in the log header, each resumed one in a `resume` record.
  * Neither is ever passed on the operator's behalf. The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
  * never from a flag that would put it in shell history and process listings.
  *
@@ -216,7 +219,7 @@ async function cmdRun(flags, io, deps) {
   const noLiveInstall = driver.requireGuardContext(liveApi, flags['no-live-install'] === true);
   if (liveApi && flags['no-live-install'] === true) throw new UsageError('--no-live-install contradicts TANGLECLAW_API being set');
   driver.refuseLiveTarget(api.href, liveApi);
-  await driver.refuseLiveResolved({ apiBase: api.href, liveApi, lookup: deps.lookup });
+  const address = await driver.refuseLiveAddress({ apiBase: api.href, liveApi, lookup: deps.lookup });
   const schedule = readSchedule(flags.schedule);
   const token = deps.env.TANGLECLAW_SERVICE_TOKEN || null;
   const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi, fetch: deps.fetch, token, allowUnverifiedLive: flags['allow-unverified-live'] === true });
@@ -235,7 +238,16 @@ async function cmdRun(flags, io, deps) {
     shouldStop: () => stop,
     // An override of the live-identity check is part of the run's record,
     // not just a line on a terminal.
+    // Each run segment records what its guards established and which
+    // overrides it ran under, in the header or in a resume record, so the
+    // evidence shows how every segment was protected.
     headerExtra: {
+      guard: {
+        liveApi: liveApi ? new URL(liveApi).origin : null,
+        target: api.origin,
+        targetAddress: address ? address.targetAddress : null,
+        identity: { checked: identity.checked, reason: identity.reason }
+      },
       ...(identity.liveUnverified ? { liveIdentityOverride: { reason: identity.reason } } : {}),
       ...(noLiveInstall ? { guardContextOverride: 'no-live-install' } : {})
     }

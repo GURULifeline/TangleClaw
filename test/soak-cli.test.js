@@ -134,7 +134,7 @@ describe('soak CLI — run', () => {
       }
       return { status: 200, text: async () => '{}' };
     };
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log],
       { fetch, clock: instantClock(), env: { TANGLECLAW_SERVICE_TOKEN: 'tok', TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 0, r.err);
     assert.equal(JSON.parse(r.out).status, 'completed');
@@ -144,7 +144,7 @@ describe('soak CLI — run', () => {
     assert.deepEqual(live, [{ origin: 'http://localhost:3102', path: '/api/server-info', auth: undefined }]);
     const guest = seen.filter((s) => s.origin !== 'http://localhost:3102');
     assert.ok(guest.length > 1);
-    assert.ok(guest.every((s) => s.origin === 'http://guest.invalid:3102' && s.auth === 'Bearer tok'));
+    assert.ok(guest.every((s) => s.origin === 'http://192.168.64.7:3102' && s.auth === 'Bearer tok'));
   });
 
   it('refuses the pane\'s own TangleClaw with exit 3 and makes no request', async () => {
@@ -162,7 +162,7 @@ describe('soak CLI — run', () => {
     const hits = [];
     const info = JSON.stringify({ startedAt: '2026-09-28T17:27:45.023Z', startupSha: 'b'.repeat(40) });
     const fetch = async (url) => { hits.push(url.pathname); return { status: 200, text: async () => info }; };
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'https://proxy.example:8443', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'https://100.100.100.100:8443', '--log', path.join(dir, 'l')],
       { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 3);
     assert.equal(JSON.parse(r.err).code, 'LIVE_INSTALL_TARGET');
@@ -174,7 +174,7 @@ describe('soak CLI — run', () => {
     const schedulePath = await planApi();
     const hits = [];
     const fetch = async (url) => { hits.push(`${url.origin}${url.pathname}`); return { status: 503, text: async () => '{}' }; };
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l')],
       { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 3);
     assert.equal(JSON.parse(r.err).code, 'LIVE_IDENTITY_UNREADABLE');
@@ -188,7 +188,7 @@ describe('soak CLI — run', () => {
     const fetch = async (url) => (url.origin === 'http://localhost:3102'
       ? { status: 503, text: async () => '{}' }
       : { status: 200, text: async () => '{}' });
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--allow-unverified-live'],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--allow-unverified-live'],
       { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 0, r.err);
     const warning = JSON.parse(r.err.split('\n')[0]);
@@ -200,7 +200,7 @@ describe('soak CLI — run', () => {
   it('refuses to run with no TANGLECLAW_API unless --no-live-install says so', async () => {
     const schedulePath = await planApi();
     let calls = 0;
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l')],
       { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, clock: instantClock() });
     assert.equal(r.code, 3);
     assert.equal(JSON.parse(r.err).code, 'GUARD_CONTEXT_ABSENT');
@@ -216,16 +216,88 @@ describe('soak CLI — run', () => {
     assert.equal(JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]).guardContextOverride, 'no-live-install');
   });
 
+  it('records --no-live-install on a RESUMED segment, even when the first segment ran without it', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const clock = instantClock();
+    const live = { TANGLECLAW_API: 'http://localhost:3102' };
+    const identity = async (url) => (url.pathname === '/api/server-info'
+      ? { status: 200, text: async () => JSON.stringify({ startedAt: url.origin, startupSha: 'e'.repeat(40) }) }
+      : { status: 200, text: async () => '{}' });
+    let fire;
+    let calls = 0;
+    // Segment 1: guarded by TANGLECLAW_API, no override. Stopped early.
+    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log],
+      { fetch: async (...a) => { if (++calls === 4) fire(); return identity(...a); }, clock, env: live, onStopSignal: (fn) => { fire = fn; } });
+    assert.equal(first.code, 4, first.err);
+    // Segment 2: resumed from a plain shell with the override.
+    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'],
+      { fetch: identity, clock });
+    assert.equal(second.code, 0, second.err);
+    const recs = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(recs[0].guardContextOverride, undefined, 'the first segment ran without it');
+    const resume = recs.filter((r) => r.type === 'resume');
+    assert.equal(resume.length, 1);
+    assert.equal(resume[0].guardContextOverride, 'no-live-install');
+    assert.ok(resume[0].resumedFrom > 0);
+    assert.deepEqual(resume[0].guard, { liveApi: null, target: 'http://192.168.64.7:3102', targetAddress: null, identity: { checked: false, reason: 'no TANGLECLAW_API in this pane' } });
+    assert.equal(recs[0].guard.liveApi, 'http://localhost:3102', 'the first segment recorded its own, guarded, context');
+  });
+
+  it('records --allow-unverified-live on a RESUMED segment', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const clock = instantClock();
+    const env = { TANGLECLAW_API: 'http://localhost:3102' };
+    const readable = async (url) => (url.pathname === '/api/server-info'
+      ? { status: 200, text: async () => JSON.stringify({ startedAt: url.origin, startupSha: 'f'.repeat(40) }) }
+      : { status: 200, text: async () => '{}' });
+    let fire;
+    let calls = 0;
+    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log],
+      { fetch: async (...a) => { if (++calls === 4) fire(); return readable(...a); }, clock, env, onStopSignal: (fn) => { fire = fn; } });
+    assert.equal(first.code, 4, first.err);
+    // Segment 2: the live identity has become unreadable; resumed with the override.
+    const liveDown = async (url) => (url.origin === 'http://localhost:3102' ? { status: 503, text: async () => '{}' } : readable(url));
+    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--allow-unverified-live'],
+      { fetch: liveDown, clock, env });
+    assert.equal(second.code, 0, second.err);
+    const recs = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(recs[0].liveIdentityOverride, undefined);
+    const resume = recs.filter((r) => r.type === 'resume');
+    assert.deepEqual(resume[0].liveIdentityOverride, { reason: 'live install server-info: HTTP 503' });
+  });
+
+  it('writes a resume record for every resumed segment, with no overrides when none were given', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const clock = instantClock();
+    let fire;
+    let calls = 0;
+    await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'],
+      { fetch: async () => { if (++calls === 2) fire(); return { status: 200, text: async () => '{}' }; }, clock, onStopSignal: (fn) => { fire = fn; } });
+    const env = { TANGLECLAW_API: 'http://localhost:3102' };
+    const identity = async (url) => (url.pathname === '/api/server-info'
+      ? { status: 200, text: async () => JSON.stringify({ startedAt: url.origin, startupSha: 'a'.repeat(40) }) }
+      : { status: 200, text: async () => '{}' });
+    await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log], { fetch: identity, clock, env });
+    const recs = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(recs[0].guardContextOverride, 'no-live-install');
+    const resume = recs.find((r) => r.type === 'resume');
+    assert.equal(resume.guardContextOverride, undefined, 'the second segment ran guarded, and says nothing it did not do');
+    assert.equal(resume.liveIdentityOverride, undefined);
+  });
+
   it('rejects --no-live-install where TANGLECLAW_API is set, since the claim is false', async () => {
     const schedulePath = await planApi();
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
       { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 2);
   });
 
   it('refuses, with a code, when TANGLECLAW_API is set but is not a URL', async () => {
     const schedulePath = await planApi();
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l')],
       { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'not a url' } });
     assert.equal(r.code, 3);
     assert.equal(JSON.parse(r.err).code, 'GUARD_CONTEXT_ABSENT');
@@ -236,28 +308,43 @@ describe('soak CLI — run', () => {
     let fire;
     let calls = 0;
     const fetch = async () => { if (++calls === 2) { fire(); fire(); } return { status: 200, text: async () => '{}' }; };
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
       { fetch, clock: instantClock(), onStopSignal: (fn) => { fire = fn; } });
     assert.equal(r.code, 4);
     assert.equal(r.err.split('\n').filter((l) => l.includes('"stopping"')).length, 1);
   });
 
-  it('refuses a target whose name does not resolve', async () => {
+  it('with a live install to guard, refuses a hostname target without ever resolving it', async () => {
     const schedulePath = await planApi();
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
-      { fetch: async () => ({ status: 200, text: async () => '{}' }), lookup: async () => { const e = new Error('nope'); e.code = 'ENOTFOUND'; throw e; }, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    let lookups = 0;
+    let calls = 0;
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://soak-guest.example:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, lookup: async () => { lookups++; return ['192.168.64.7']; }, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 3);
-    assert.equal(JSON.parse(r.err).code, 'TARGET_UNRESOLVED');
+    assert.equal(JSON.parse(r.err).code, 'TARGET_NOT_IP_LITERAL');
+    assert.deepEqual([lookups, calls], [0, 0]);
   });
 
-  it('refuses a target name that resolves to this machine on the live port', async () => {
+  it('refuses a loopback IP on the live port', async () => {
     const schedulePath = await planApi();
     let calls = 0;
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://sneaky.example:3102', '--log', path.join(dir, 'l')],
-      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, lookup: async () => ['127.0.0.1'], clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://127.0.0.1:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 3);
     assert.equal(JSON.parse(r.err).code, 'LIVE_INSTALL_TARGET');
     assert.equal(calls, 0);
+  });
+
+  it('records what the guards established in the header of a guarded run', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const fetch = async (url) => (url.pathname === '/api/server-info'
+      ? { status: 200, text: async () => JSON.stringify({ startedAt: url.origin, startupSha: '9'.repeat(40) }) }
+      : { status: 200, text: async () => '{}' });
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log], { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 0, r.err);
+    const header = JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]);
+    assert.deepEqual(header.guard, { liveApi: 'http://localhost:3102', target: 'http://192.168.64.7:3102', targetAddress: '192.168.64.7', identity: { checked: true, reason: null } });
   });
 
   it('warns, and still runs, when only the target cannot be compared', async () => {
@@ -266,7 +353,7 @@ describe('soak CLI — run', () => {
       if (url.origin === 'http://localhost:3102') return { status: 200, text: async () => JSON.stringify({ startedAt: 'live', startupSha: 'd'.repeat(40) }) };
       return { status: 200, text: async () => '{}' };
     };
-    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l')],
       { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
     assert.equal(r.code, 0, r.err);
     const warning = JSON.parse(r.err.split('\n')[0]);
@@ -276,7 +363,7 @@ describe('soak CLI — run', () => {
   it('refuses a schedule whose kinds have no executor with exit 3', async () => {
     const out = path.join(dir, 'full.json');
     await run(['plan', '--seed', 'rc', '--phase', 'certifying', '--duration-hours', '4', '--out', out]);
-    const r = await run(['run', '--schedule', out, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
+    const r = await run(['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
       { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
     assert.equal(r.code, 3);
     const lines = r.err.trim().split('\n');
@@ -291,10 +378,10 @@ describe('soak CLI — run', () => {
     let fire;
     let count = 0;
     const counting = async (...a) => { count++; if (count === 3) fire(); return fetch(...a); };
-    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--no-live-install'],
+    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'],
       { fetch: counting, clock, onStopSignal: (fn) => { fire = fn; } });
     assert.equal(first.code, 4);
-    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--no-live-install'], { fetch, clock });
+    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'], { fetch, clock });
     assert.equal(second.code, 0, second.err);
     assert.equal(JSON.parse(second.out).status, 'completed');
     assert.ok(JSON.parse(second.out).resumedFrom > 0);

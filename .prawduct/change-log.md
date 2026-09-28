@@ -209,6 +209,26 @@ Also fixed:
   - *Notes:* an executor's result can no longer overwrite `type`, `index`, `kind` or `startedAt`. An unparseable `TANGLECLAW_API` is refused with `GUARD_CONTEXT_ABSENT` rather than a stack trace. Two doc contradictions were corrected.
   - *Note accepted:* a narrow race in stale-lock reclaim, where two drivers start at the same moment on a dead holder's lock. Closing it needs an atomic compare-and-swap that the filesystem does not offer portably. It needs a crash plus two simultaneous operator starts on one log, and a later `readLog` of a doubly-written log would show it.
   - The W2 and W3 regression tests were confirmed to fail with their fixes reverted.
+- **TC-RM03 re-review at `2d9deff9`: F1–F8 all verified fixed. NOT GREEN on one blocker, R1.** The final dispatch (PM, matching the Architect) made R1, L1, L2 and L3 blocking and accepted L4:
+  - *R1: fixed.* Every resumed segment appends and fsyncs a `resume` record before any resumed work. It carries the segment's `guard` results (live API, target, checked address, identity outcome), its overrides and `resumedFrom`. A fresh log's header carries the same `guard` results.
+    - Override keys cannot overwrite the fixed fields.
+    - CLI resume tests cover both flags and a no-override segment. With the record removed, all five new tests fail.
+    - Real-process reproduction of TC-RM03's probe: a guarded segment stopped by SIGINT, then resumed with `--no-live-install`. The `resume` record carries the override.
+  - *L1: fixed.* A certifying schedule's `faultQuietMs` must be at least 60,000 ms. A hand edit to 0 with a recomputed digest is `PARAMS`. A destructive schedule may still use 0.
+  - *L2: fixed.* The stale-lock reclaim now has a single winner.
+    - A reclaimer must win `mkdir` of `<log>.lock.reclaim`.
+    - It re-reads the lock under that mutex and replaces it only if it is still the same dead holder.
+    - It replaces it by writing a temp file and doing an atomic `rename`. The first version removed then created, and the concurrency test caught a process on its ordinary first attempt taking the lock in that gap (about 1 run in 25). The rename closes it.
+    - The concurrency test holds eight processes just after their stale check (a test-only hook), so they all reach the reclaim together. It fails 5 of 5 against the old remove-then-create reclaim and passes 12 of 12 against the fix.
+    - `release` never removes a lock it does not hold.
+  - *L3: fixed.* With `TANGLECLAW_API` set, `--api` must be an IP literal (`TARGET_NOT_IP_LITERAL`), so the target is never resolved and there is no check-to-connect window to rebind. A test with a rebinding resolver asserts the target is never looked up. The live name is still resolved, to decide whether the live install is local.
+    - Verified read-only against the live install: `localtest.me` and the MagicDNS name are refused unresolved, `127.0.0.1` and `[::ffff:127.0.0.1]` on the live port are refused, and a guest IP is allowed.
+  - *L4: accepted and documented.* A deferred fault can make queued load stale, and that load is skipped and logged.
+  - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
+    - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
+    - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.
+    - Eight adversarial tests cover these. Five of them fail with the binding check removed; the other three are caught by separate checks.
+    - *Interpretation, stated to the PM and the Architect:* separate crashes, each sealed to its own fragment, still resume (tested with two). Refusing any log with two torn writes would make a 72-hour soak unrecoverable after its second crash.
 - **Real-process smoke, run guest-style with no `TANGLECLAW_API`:**
   - without the flag, `run` refused with `GUARD_CONTEXT_ABSENT`;
   - with `--no-live-install` it completed, and the header recorded the override;

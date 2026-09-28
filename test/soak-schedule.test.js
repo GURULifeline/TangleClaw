@@ -251,6 +251,7 @@ describe('soak schedule — validation of tampered or malformed schedules', () =
       // A deleted key would be filled with its default by validation, while
       // anything reading the file directly would see it missing.
       ['a deleted faultQuietMs', (c) => { delete c.params.faultQuietMs; }],
+      ['a certifying quiet window of zero', (c) => { c.params.faultQuietMs = 0; }],
       ['a deleted classes list', (c) => { delete c.params.classes; }],
       ['an extra params key', (c) => { c.params.note = 'x'; }],
       ['classes out of canonical order', (c) => { c.params.classes = ['fault', 'api', 'engine', 'browser']; }]
@@ -324,6 +325,14 @@ describe('soak schedule — parameter checks', () => {
     const s = sched.buildSchedule(base);
     const big = { ...s, events: new Array(sched.LIMITS.maxEvents + 1).fill(s.events[0]) };
     assert.deepEqual(sched.validateSchedule(big).map((v) => v.code), ['EVENT_CAP']);
+  });
+
+  it('holds a certifying schedule\'s quiet window to its floor, and lets a destructive one go lower', () => {
+    const floor = sched.LIMITS.minCertifyingFaultQuietMs;
+    assert.throws(() => sched.buildSchedule({ ...base, faultQuietMs: floor - 1 }), (err) => err.code === 'PARAMS' && /certifying/.test(err.message));
+    assert.equal(sched.buildSchedule({ ...base, faultQuietMs: floor }).params.faultQuietMs, floor);
+    assert.equal(sched.buildSchedule({ ...base, phase: 'destructive', faultQuietMs: 0 }).params.faultQuietMs, 0);
+    assert.ok(sched.DEFAULTS.faultQuietMs >= floor, 'the default satisfies the floor');
   });
 
   it('records the defaults it used in the params, so the digest covers them', () => {

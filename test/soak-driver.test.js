@@ -211,6 +211,9 @@ describe('soak driver — resume', () => {
 
     const recs = records(logPath);
     assert.equal(recs.filter((r) => r.type === 'header').length, 1, 'one header across both runs');
+    const resume = recs.filter((r) => r.type === 'resume');
+    assert.equal(resume.length, 1, 'the second segment is marked');
+    assert.equal(resume[0].resumedFrom, stopAfter);
     const indexes = recs.filter((r) => r.type === 'event').map((r) => r.index);
     assert.deepEqual(indexes, s.events.map((e) => e.index), 'every event exactly once, in order');
     for (const r of recs.filter((x) => x.type === 'event')) assert.equal(r.scheduledAt, 5_000 + s.events[r.index].atMs);
@@ -258,7 +261,9 @@ describe('soak driver — resume', () => {
     const before = fs.readFileSync(logPath, 'utf8');
 
     const peek = driver.readLog(logPath);
-    assert.deepEqual([peek.tornTail, peek.tornBytes, peek.lastIndex], [true, Buffer.byteLength(fragment), 2]);
+    const crypto = require('node:crypto');
+    assert.deepEqual([peek.tornTail, peek.lastIndex], [true, 2]);
+    assert.deepEqual(peek.torn, { offset: Buffer.byteLength(before) - Buffer.byteLength(fragment), bytes: Buffer.byteLength(fragment), sha256: crypto.createHash('sha256').update(fragment).digest('hex') });
     assert.equal(fs.readFileSync(logPath, 'utf8'), before, 'reading the log changes nothing');
 
     const ran = [];
@@ -269,13 +274,76 @@ describe('soak driver — resume', () => {
     const after = fs.readFileSync(logPath, 'utf8');
     assert.ok(after.startsWith(before), 'every original byte, the fragment included, is still there');
     const seal = after.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((r) => r && r.type === 'torn-tail-sealed');
-    assert.equal(seal.bytes, Buffer.byteLength(fragment));
+    assert.deepEqual([seal.offset, seal.bytes, seal.sha256], [peek.torn.offset, peek.torn.bytes, peek.torn.sha256]);
     const indexes = after.split('\n').filter(Boolean)
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .filter((r) => r && r.type === 'event').map((r) => r.index);
     assert.deepEqual(indexes, s.events.map((e) => e.index));
     // and the sealed log reads back cleanly
     assert.equal(driver.readLog(logPath).ended, true);
+  });
+
+  describe('seals bind their exact fragment', () => {
+    /**
+     * A log with one sealed fragment in it, as a real crash and resume leave it.
+     * @returns {Promise<{text: string, fragment: string}>} The log text and the fragment
+     */
+    async function sealedLog() {
+      const s = apiSchedule();
+      const clock = fakeClock(T0);
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(2) });
+      const fragment = '{"type":"event","index":2,"kind":"api.he';
+      fs.appendFileSync(logPath, fragment);
+      // afterEvents counts the fragment too (it contains "type":"event"), so 4
+      // here means one real event runs after the seal.
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(4) });
+      return { text: fs.readFileSync(logPath, 'utf8'), fragment };
+    }
+    const sealOf = (text) => JSON.parse(text.split('\n').find((l) => l.includes('"torn-tail-sealed"')));
+    const rewriteSeal = (text, edit) => text.split('\n').map((l) => {
+      if (!l.includes('"torn-tail-sealed"')) return l;
+      const r = JSON.parse(l);
+      edit(r);
+      return JSON.stringify(r);
+    }).join('\n');
+
+    it('accepts a genuine seal', async () => {
+      await sealedLog();
+      assert.equal(driver.readLog(logPath).lastIndex, 2);
+    });
+
+    const tampers = [
+      ['a seal with the wrong sha256', (t) => rewriteSeal(t, (r) => { r.sha256 = '0'.repeat(64); })],
+      ['a seal with the wrong length', (t) => rewriteSeal(t, (r) => { r.bytes += 1; })],
+      ['a seal with the wrong offset', (t) => rewriteSeal(t, (r) => { r.offset -= 1; })],
+      ['a seal with no binding at all', (t) => rewriteSeal(t, (r) => { delete r.offset; delete r.bytes; delete r.sha256; })],
+      ['a fragment altered after sealing (same length)', (t, f) => t.replace(f, f.replace('api.he', 'api.xx'))],
+      ['a second malformed line under one seal', (t, f) => t.replace(`${f}\n`, `${f}\n{also-broken\n`)],
+      ['a stray seal with no fragment before it', (t) => { const lines = t.split('\n'); const seal = lines.find((l) => l.includes('"torn-tail-sealed"')); return t.replace(seal, `${seal}\n${seal}`); }],
+      ['an empty line in the middle', (t) => t.replace('\n', '\n\n')]
+    ];
+    for (const [label, tamper] of tampers) {
+      it(`refuses ${label}`, async () => {
+        const { text, fragment } = await sealedLog();
+        fs.writeFileSync(logPath, tamper(text, fragment));
+        assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_UNREADABLE', label);
+      });
+    }
+
+    it('still resumes a log that survived two crashes, each sealed to its own fragment', async () => {
+      const s = apiSchedule();
+      const clock = fakeClock(T0);
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(2) });
+      fs.appendFileSync(logPath, '{"type":"event","index":2');
+      await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: afterEvents(4) });
+      fs.appendFileSync(logPath, '{"type":"eve');
+      const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
+      assert.equal(result.status, 'completed');
+      const seals = fs.readFileSync(logPath, 'utf8').split('\n').filter((l) => l.includes('"torn-tail-sealed"'));
+      assert.equal(seals.length, 2);
+      assert.notEqual(sealOf(seals[0]).offset, sealOf(seals[1]).offset);
+      assert.equal(driver.readLog(logPath).ended, true);
+    });
   });
 
   it('refuses a malformed line that no seal follows', () => {
@@ -420,36 +488,48 @@ describe('soak driver — the same-install identity check', () => {
   });
 });
 
-describe('soak driver — resolving the target', () => {
+describe('soak driver — the target address', () => {
   const names = { exact: new Set(['localhost', '::1', 'devbox', '192.168.1.20']), hostnamePrefix: 'devbox.' };
   const LIVE = 'http://localhost:3102';
   const lookupFrom = (table) => async (host) => {
     if (!(host in table)) { const e = new Error('nope'); e.code = 'ENOTFOUND'; throw e; }
     return table[host];
   };
+  const never = async (host) => { throw new Error(`must not resolve ${host}`); };
 
-  it('refuses a name that resolves to a loopback or local-interface address on the live port', async () => {
-    for (const addrs of [['127.0.0.1'], ['::1'], ['::ffff:127.0.0.1'], ['10.9.9.9', '192.168.1.20']]) {
+  it('requires an IP-literal target when a live install is guarded, and never resolves the target', async () => {
+    // DNS rebinding: a name that resolves elsewhere when checked and to
+    // 127.0.0.1 when connected to. The target is never looked up at all, so
+    // there is no check-to-connect window for it to exploit.
+    let answers = 0;
+    const rebinding = async () => (answers++ === 0 ? ['10.9.9.9'] : ['127.0.0.1']);
+    for (const target of ['http://guest.example:3102', 'http://sneaky.example:3102', 'http://localhost:3202']) {
       await assert.rejects(
-        driver.refuseLiveResolved({ apiBase: 'http://sneaky.example:3102', liveApi: LIVE, names, lookup: lookupFrom({ 'sneaky.example': addrs }) }),
+        driver.refuseLiveAddress({ apiBase: target, liveApi: LIVE, names, lookup: rebinding }),
+        (err) => err.code === 'TARGET_NOT_IP_LITERAL',
+        target
+      );
+    }
+    assert.equal(answers, 0, 'the target name was never resolved');
+  });
+
+  it('refuses an IP-literal target that is this machine on the live port, in any spelling', async () => {
+    for (const target of ['http://127.0.0.1:3102', 'http://[::1]:3102', 'http://[::ffff:127.0.0.1]:3102', 'http://192.168.1.20:3102', 'http://2130706433:3102', 'http://0.0.0.0:3102']) {
+      await assert.rejects(
+        driver.refuseLiveAddress({ apiBase: target, liveApi: LIVE, names, lookup: never }),
         (err) => err.code === 'LIVE_INSTALL_TARGET',
-        addrs.join(',')
+        target
       );
     }
   });
 
-  it('allows a name that resolves elsewhere, and any other port', async () => {
-    await driver.refuseLiveResolved({ apiBase: 'http://guest.example:3102', liveApi: LIVE, names, lookup: lookupFrom({ 'guest.example': ['192.168.64.7'] }) });
-    await driver.refuseLiveResolved({ apiBase: 'http://localhost:3202', liveApi: LIVE, names, lookup: async () => { throw new Error('must not look up'); } });
+  it('allows a guest IP, and a local IP on another port, and reports what it checked', async () => {
+    assert.deepEqual(await driver.refuseLiveAddress({ apiBase: 'http://192.168.64.7:3102', liveApi: LIVE, names, lookup: never }), { targetAddress: '192.168.64.7', liveLocal: true });
+    assert.deepEqual(await driver.refuseLiveAddress({ apiBase: 'http://127.0.0.1:3202', liveApi: LIVE, names, lookup: never }), { targetAddress: '127.0.0.1', liveLocal: true });
   });
 
-  it('fails closed on a name that does not resolve, or resolves to nothing', async () => {
-    for (const lookup of [lookupFrom({}), async () => { const e = new Error('try again'); e.code = 'EAI_AGAIN'; throw e; }, async () => []]) {
-      await assert.rejects(
-        driver.refuseLiveResolved({ apiBase: 'http://nowhere.example:3102', liveApi: LIVE, names, lookup }),
-        (err) => err.code === 'TARGET_UNRESOLVED'
-      );
-    }
+  it('does not apply without a live install, the soak guest\'s case', async () => {
+    assert.equal(await driver.refuseLiveAddress({ apiBase: 'http://localhost:3102', liveApi: undefined, names, lookup: never }), null);
   });
 
   it('refuses 127.0.0.1 on the live port when TANGLECLAW_API names this machine by another name', async () => {
@@ -458,24 +538,25 @@ describe('soak driver — resolving the target', () => {
     const lookup = lookupFrom({ 'tc-box.tail123678.ts.net': ['192.168.1.20'] });
     driver.refuseLiveTarget('http://127.0.0.1:3102', live, names); // the spelling check cannot know
     await assert.rejects(
-      driver.refuseLiveResolved({ apiBase: 'http://127.0.0.1:3102', liveApi: live, names, lookup }),
+      driver.refuseLiveAddress({ apiBase: 'http://127.0.0.1:3102', liveApi: live, names, lookup }),
       (err) => err.code === 'LIVE_INSTALL_TARGET'
     );
   });
 
   it('treats a live name that does not resolve as this machine, the protective answer', async () => {
     await assert.rejects(
-      driver.refuseLiveResolved({ apiBase: 'http://localhost:3102', liveApi: 'http://gone.example:3102', names, lookup: lookupFrom({}) }),
+      driver.refuseLiveAddress({ apiBase: 'http://127.0.0.1:3102', liveApi: 'http://gone.example:3102', names, lookup: lookupFrom({}) }),
       (err) => err.code === 'LIVE_INSTALL_TARGET'
     );
   });
 
   it('allows a local target when the live install resolves to another machine', async () => {
-    await driver.refuseLiveResolved({ apiBase: 'http://localhost:3102', liveApi: 'http://far.example:3102', names, lookup: lookupFrom({ 'far.example': ['10.0.0.9'], localhost: ['127.0.0.1'] }) });
+    const r = await driver.refuseLiveAddress({ apiBase: 'http://127.0.0.1:3102', liveApi: 'http://far.example:3102', names, lookup: lookupFrom({ 'far.example': ['10.0.0.9'] }) });
+    assert.deepEqual(r, { targetAddress: '127.0.0.1', liveLocal: false });
   });
 
-  it('really resolves localhost through the system resolver', async () => {
-    await assert.rejects(driver.refuseLiveResolved({ apiBase: 'http://localhost.:3102', liveApi: LIVE }), (err) => err.code === 'LIVE_INSTALL_TARGET');
+  it('knows the real loopback addresses of this machine', async () => {
+    await assert.rejects(driver.refuseLiveAddress({ apiBase: 'http://127.0.0.1:3102', liveApi: LIVE }), (err) => err.code === 'LIVE_INSTALL_TARGET');
   });
 });
 
@@ -581,6 +662,20 @@ describe('soak driver — stopping and record integrity', () => {
     assert.ok(clock.now() - asked <= 5000 + 1000, 'stopped within one poll of the request');
   });
 
+  it('never lets an override key overwrite the header or resume record fields', async () => {
+    const s = apiSchedule();
+    const clock = fakeClock(T0);
+    const headerExtra = { type: 'end', schema: 'x', startEpochMs: 1, scheduleDigest: 'x', resumedFrom: -1, guardContextOverride: 'no-live-install' };
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, headerExtra, shouldStop: afterEvents(1) });
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, headerExtra });
+    const recs = records(logPath);
+    assert.deepEqual([recs[0].type, recs[0].schema, recs[0].startEpochMs, recs[0].scheduleDigest], ['header', driver.LOG_SCHEMA, T0, s.digest]);
+    const resume = recs.find((r) => r.type === 'resume');
+    assert.equal(resume.resumedFrom, 1);
+    assert.equal(resume.guardContextOverride, 'no-live-install');
+    assert.equal(recs[recs.length - 1].type, 'end');
+  });
+
   it('never lets an executor overwrite the fields resume depends on', async () => {
     const s = apiSchedule();
     const executors = recordingExecutors([]);
@@ -639,6 +734,65 @@ describe('soak driver — the log lock and header', () => {
     await driver.runSchedule({ schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { isAlive: () => false } });
     const reclaim = records(logPath).find((r) => r.type === 'lock-reclaimed');
     assert.deepEqual(reclaim.holder, { pid: 999999, host: os.hostname() });
+  });
+
+  it('lets exactly one of many concurrent processes reclaim a stale lock: never two holders at once', async () => {
+    const { spawn, spawnSync } = require('node:child_process');
+    // A pid that is certainly dead: a process that has already exited.
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+    fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: dead, host: os.hostname() }));
+    const child = `
+      const driver = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'soak', 'driver.js'))});
+      try {
+        // Every contender waits here after finding the lock stale, so they
+        // all reach the reclaim together: the window a naive reclaim loses in.
+        const hold = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+        const lock = driver.acquireLogLock(${JSON.stringify(logPath)}, { afterStaleCheck: hold });
+        const t0 = Date.now();
+        setTimeout(() => { const t1 = Date.now(); lock.release(); console.log(JSON.stringify({ won: true, t0, t1, reclaimed: lock.reclaimed !== null })); }, 1500);
+      } catch (err) {
+        console.log(JSON.stringify({ won: false, code: err.code }));
+      }`;
+    const runs = await Promise.all(Array.from({ length: 8 }, () => new Promise((resolve) => {
+      const c = spawn(process.execPath, ['-e', child]);
+      let out = '';
+      c.stdout.on('data', (d) => { out += d; });
+      c.on('close', () => resolve(JSON.parse(out.trim())));
+    })));
+    const winners = runs.filter((r) => r.won).sort((a, b) => a.t0 - b.t0);
+    assert.ok(winners.length >= 1, 'someone takes the lock');
+    for (let i = 1; i < winners.length; i++) assert.ok(winners[i].t0 >= winners[i - 1].t1, 'no two holders overlap');
+    assert.equal(winners.filter((w) => w.reclaimed).length, 1, 'the stale lock is reclaimed exactly once');
+    assert.ok(runs.filter((r) => !r.won).every((r) => r.code === 'LOG_LOCKED'));
+    assert.equal(fs.existsSync(`${logPath}.lock.reclaim`), false, 'the reclaim mutex is gone');
+  });
+
+  it('refuses while another process is mid-reclaim, naming the mutex', () => {
+    fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 999999, host: os.hostname() }));
+    fs.mkdirSync(`${logPath}.lock.reclaim`);
+    assert.throws(() => driver.acquireLogLock(logPath, { isAlive: () => false }), (err) => err.code === 'LOG_LOCKED' && /reclaiming/.test(err.details.why));
+    assert.ok(fs.existsSync(`${logPath}.lock`), 'the stale lock was left alone');
+  });
+
+  it('does not reclaim a lock that changed hands between the first read and the mutex', () => {
+    fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 999999, host: os.hostname() }));
+    let checks = 0;
+    // isAlive runs after the first read; swap the holder at that moment, as a
+    // faster reclaimer would.
+    const isAlive = () => {
+      if (checks++ === 0) fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 424242, host: os.hostname() }));
+      return false;
+    };
+    assert.throws(() => driver.acquireLogLock(logPath, { isAlive }), (err) => err.code === 'LOG_LOCKED' && /changed hands/.test(err.details.why));
+    assert.equal(JSON.parse(fs.readFileSync(`${logPath}.lock`, 'utf8')).pid, 424242, 'the new holder keeps its lock');
+    assert.equal(fs.existsSync(`${logPath}.lock.reclaim`), false);
+  });
+
+  it('never releases a lock it does not hold', () => {
+    const lock = driver.acquireLogLock(logPath);
+    fs.writeFileSync(`${logPath}.lock`, JSON.stringify({ pid: 1, host: 'someone-else' }));
+    lock.release();
+    assert.ok(fs.existsSync(`${logPath}.lock`), 'another holder\'s lock survives our release');
   });
 
   it('never reclaims a lock held on another host', async () => {
