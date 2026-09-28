@@ -103,9 +103,9 @@ describe('soak schedule — shape', () => {
   });
 
   it('draws event params from the configured projects and port range', () => {
-    const s = build({ projects: ['only-one'], leasePortRange: [5510, 5512] });
+    const s = build({ projects: ['soak-only'], leasePortRange: [5510, 5512] });
     for (const e of s.events) {
-      if (e.params.project !== undefined) assert.equal(e.params.project, 'only-one');
+      if (e.params.project !== undefined) assert.equal(e.params.project, 'soak-only');
       if (e.kind === 'api.ports.lease-release') assert.ok(e.params.port >= 5510 && e.params.port <= 5512);
       if (e.kind === 'engine.session.cycle') assert.equal(e.params.commands, s.params.commandsPerCycle);
     }
@@ -229,6 +229,33 @@ describe('soak schedule — validation of tampered or malformed schedules', () =
     }
   });
 
+  describe('params, events and digest tampered together', () => {
+    // The dangerous edit changes the params AND the events to match them AND
+    // recomputes the digest, so nothing is checked against a value the editor
+    // also controlled. These must fail on the fixed limits alone.
+    const s = build({ durationMs: 24 * HOUR });
+    const retarget = [
+      ['a real project name', (c) => {
+        c.params.projects = ['TangleClaw'];
+        for (const e of c.events) if (e.params.project !== undefined) e.params.project = 'TangleClaw';
+      }],
+      ['a command count past the cap', (c) => {
+        c.params.commandsPerCycle = 100000;
+        for (const e of c.events) if (e.kind === 'engine.session.cycle') e.params.commands = 100000;
+      }],
+      ['lease ports in TangleClaw\'s own range', (c) => {
+        c.params.leasePortRange = [3100, 3199];
+        for (const e of c.events) if (e.kind === 'api.ports.lease-release') e.params.port = 3102;
+      }],
+      ['a load gap below the floor', (c) => { c.params.loadMeanMs = 1; }]
+    ];
+    for (const [label, mutate] of retarget) {
+      it(`rejects ${label}`, () => {
+        assert.deepEqual(codes(edited(s, mutate)), ['PARAMS']);
+      });
+    }
+  });
+
   it('reports a broken index sequence', () => {
     const s = build();
     assert.ok(codes(edited(s, (c) => { c.events[3].index = 99; })).includes('INDEX'));
@@ -258,7 +285,15 @@ describe('soak schedule — parameter checks', () => {
     ['an inverted port range', { leasePortRange: [5600, 5500] }],
     ['an unknown class', { classes: ['api', 'cosmic-ray'] }],
     ['a repeated class', { classes: ['api', 'api'] }],
-    ['faults with no load', { classes: ['fault'] }]
+    ['faults with no load', { classes: ['fault'] }],
+    ['a project name that is not synthetic', { projects: ['TangleClaw'] }],
+    ['a project name that only starts like one', { projects: ['soak-a/../x'] }],
+    ['a repeated project', { projects: ['soak-a', 'soak-a'] }],
+    ['more projects than the cap', { projects: Array.from({ length: sched.LIMITS.maxProjects + 1 }, (_, i) => `soak-${i}`) }],
+    ['lease ports below the ad hoc range', { leasePortRange: [3100, 3199] }],
+    ['a command count past the cap', { commandsPerCycle: sched.LIMITS.maxCommandsPerCycle + 1 }],
+    ['a load gap below the floor', { loadMeanMs: sched.LIMITS.minLoadMeanMs - 1 }],
+    ['a fault gap below the floor', { faultMeanMs: sched.LIMITS.minFaultMeanMs - 1 }]
   ];
   for (const [label, over] of bad) {
     it(`refuses ${label}`, () => {

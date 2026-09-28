@@ -9,12 +9,15 @@
  *                 [--classes api,engine,browser,fault] [--projects a,b,c]
  *                 [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]
  *   soak validate --schedule <file>
- *   soak run      --schedule <file> --api <url> --log <file>
+ *   soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live]
  *
  * `run` executes against the server named by `--api` and nothing else. There
- * is deliberately no fallback to `TANGLECLAW_API`, and it refuses the
- * pane's own TangleClaw, because a soak's load writes (port leases,
- * sessions). The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
+ * is deliberately no fallback to `TANGLECLAW_API`. Because a soak's load
+ * writes (port leases, sessions), it refuses the pane's own TangleClaw by
+ * address, by what the target's name resolves to, and by server identity.
+ * When the live install's identity cannot be read, it refuses unless
+ * `--allow-unverified-live` is given, and the log header records that
+ * override. The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
  * never from a flag that would put it in shell history and process listings.
  *
  * Interrupting `run` (SIGINT/SIGTERM) stops before the next event. Running it
@@ -38,18 +41,21 @@ const USAGE = [
   '                     [--classes api,engine,browser,fault] [--projects a,b,c]',
   '                     [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]',
   '       soak validate --schedule <file>',
-  '       soak run      --schedule <file> --api <url> --log <file>'
+  '       soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live]'
 ].join('\n');
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/** Flags that take no value. */
+const BOOLEAN = new Set(['allow-unverified-live']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
 class UsageError extends Error {}
 
 /**
- * Parse `--flag value` pairs. Every flag takes a value.
+ * Parse `--flag value` pairs. A flag in `BOOLEAN` takes no value and reads as `true`.
  * @param {string[]} argv - Arguments after the command
- * @returns {Object<string, string>} Flags
+ * @returns {Object<string, string|boolean>} Flags
  * @throws {UsageError} On a stray argument, a missing value or a repeated flag
  */
 function parseFlags(argv) {
@@ -58,6 +64,11 @@ function parseFlags(argv) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new UsageError(`unexpected argument: ${a}`);
     const name = a.slice(2);
+    if (BOOLEAN.has(name)) {
+      if (Object.prototype.hasOwnProperty.call(flags, name)) throw new UsageError(`--${name} given twice`);
+      flags[name] = true;
+      continue;
+    }
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) throw new UsageError(`--${name} needs a value`);
     if (Object.prototype.hasOwnProperty.call(flags, name)) throw new UsageError(`--${name} given twice`);
@@ -177,11 +188,11 @@ function cmdValidate(flags, io) {
  * `run`: execute a schedule against the named server.
  * @param {Object<string, string>} flags - Flags
  * @param {object} io - `{stdout, stderr}`
- * @param {object} deps - `{env, fetch, clock, onStopSignal}`
+ * @param {object} deps - `{env, fetch, lookup, clock, onStopSignal}`
  * @returns {Promise<number>} Exit code
  */
 async function cmdRun(flags, io, deps) {
-  expectFlags(flags, ['schedule', 'api', 'log']);
+  expectFlags(flags, ['schedule', 'api', 'log'], ['allow-unverified-live']);
   let api;
   try {
     api = new URL(flags.api);
@@ -190,11 +201,13 @@ async function cmdRun(flags, io, deps) {
     throw new UsageError(`--api is not a URL: ${flags.api}`);
   }
   if (api.protocol !== 'http:' && api.protocol !== 'https:') throw new UsageError('--api must be http or https');
-  driver.refuseLiveTarget(api.href, deps.env.TANGLECLAW_API);
+  const liveApi = deps.env.TANGLECLAW_API;
+  driver.refuseLiveTarget(api.href, liveApi);
+  await driver.refuseLiveResolved({ apiBase: api.href, liveApi, lookup: deps.lookup });
   const schedule = readSchedule(flags.schedule);
   const token = deps.env.TANGLECLAW_SERVICE_TOKEN || null;
-  const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi: deps.env.TANGLECLAW_API, fetch: deps.fetch, token });
-  if (!identity.checked) io.stderr.write(`${JSON.stringify({ warning: 'IDENTITY_UNCHECKED', reason: identity.reason })}\n`);
+  const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi, fetch: deps.fetch, token, allowUnverifiedLive: flags['allow-unverified-live'] === true });
+  if (!identity.checked) io.stderr.write(`${JSON.stringify({ warning: 'IDENTITY_UNCHECKED', reason: identity.reason, liveUnverified: identity.liveUnverified })}\n`);
   let stop = false;
   deps.onStopSignal(() => { stop = true; });
   const result = await driver.runSchedule({
@@ -203,7 +216,10 @@ async function cmdRun(flags, io, deps) {
     ctx: { apiBase: api.href, token, fetch: deps.fetch },
     logPath: flags.log,
     clock: deps.clock,
-    shouldStop: () => stop
+    shouldStop: () => stop,
+    // An override of the live-identity check is part of the run's record,
+    // not just a line on a terminal.
+    headerExtra: identity.liveUnverified ? { liveIdentityOverride: { reason: identity.reason } } : undefined
   });
   io.stdout.write(`${JSON.stringify(result)}\n`);
   return result.status === 'stopped' ? 4 : 0;
@@ -212,7 +228,7 @@ async function cmdRun(flags, io, deps) {
 /**
  * Entry point, with every side effect injectable for tests.
  * @param {string[]} argv - Arguments after the script name
- * @param {object} [deps] - `{stdout, stderr, env, fetch, clock, onStopSignal}`
+ * @param {object} [deps] - `{stdout, stderr, env, fetch, lookup, clock, onStopSignal}`
  * @returns {Promise<number>} Exit code
  */
 async function main(argv, deps = {}) {
@@ -220,6 +236,7 @@ async function main(argv, deps = {}) {
   const full = {
     env: deps.env || process.env,
     fetch: deps.fetch || globalThis.fetch,
+    lookup: deps.lookup,
     clock: deps.clock || { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
     onStopSignal: deps.onStopSignal || ((fn) => { process.once('SIGINT', fn); process.once('SIGTERM', fn); })
   };

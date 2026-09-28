@@ -35,7 +35,7 @@ async function run(argv, deps = {}) {
  * @returns {{now: () => number, sleep: (ms: number) => Promise<void>}} Clock
  */
 function instantClock() {
-  let t = 0;
+  let t = 1_790_000_000_000;
   return { now: () => t, sleep: async (ms) => { t += ms; } };
 }
 
@@ -67,11 +67,11 @@ describe('soak CLI — plan and validate', () => {
   it('passes classes, projects and intervals through to the schedule', async () => {
     const out = path.join(dir, 's.json');
     const r = await run(['plan', '--seed', 'rc', '--phase', 'destructive', '--duration-hours', '0.5', '--out', out,
-      '--classes', 'api,engine', '--projects', 'p1,p2', '--load-mean-ms', '10000', '--fault-mean-ms', '60000', '--fault-quiet-ms', '0']);
+      '--classes', 'api,engine', '--projects', 'soak-p1,soak-p2', '--load-mean-ms', '10000', '--fault-mean-ms', '60000', '--fault-quiet-ms', '0']);
     assert.equal(r.code, 0, r.err);
     const p = JSON.parse(fs.readFileSync(out, 'utf8')).params;
     assert.deepEqual([p.phase, p.classes, p.projects, p.loadMeanMs, p.faultMeanMs, p.faultQuietMs, p.durationMs],
-      ['destructive', ['api', 'engine'], ['p1', 'p2'], 10000, 60000, 0, 30 * 60 * 1000]);
+      ['destructive', ['api', 'engine'], ['soak-p1', 'soak-p2'], 10000, 60000, 0, 30 * 60 * 1000]);
   });
 
   it('exits 3 and lists violations for a tampered schedule', async () => {
@@ -92,6 +92,8 @@ describe('soak CLI — plan and validate', () => {
     ['an unknown flag', ['validate', '--schedule', 'x', '--verbose', 'yes']],
     ['a flag with no value', ['validate', '--schedule']],
     ['a repeated flag', ['validate', '--schedule', 'a', '--schedule', 'b']],
+    ['a repeated boolean flag', ['run', '--schedule', 'a', '--api', 'http://h:1', '--log', 'l', '--allow-unverified-live', '--allow-unverified-live']],
+    ['a boolean flag on a command that does not take it', ['validate', '--schedule', 'a', '--allow-unverified-live']],
     ['a bad phase', ['plan', '--seed', 'x', '--phase', 'nope', '--duration-hours', '1', '--out', 'y']],
     ['a non-numeric interval', ['plan', '--seed', 'x', '--phase', 'certifying', '--duration-hours', '1', '--out', 'y', '--load-mean-ms', '1e3']],
     ['a token on the command line', ['run', '--schedule', 'a', '--api', 'http://h:1', '--log', 'l', '--token', 'secret']],
@@ -125,6 +127,9 @@ describe('soak CLI — run', () => {
     const seen = [];
     const fetch = async (url, init) => {
       seen.push({ origin: url.origin, path: url.pathname, auth: init.headers.authorization });
+      if (url.pathname === '/api/server-info') {
+        return { status: 200, text: async () => JSON.stringify({ startedAt: url.origin, startupSha: 'c'.repeat(40) }) };
+      }
       return { status: 200, text: async () => '{}' };
     };
     const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log],
@@ -163,12 +168,54 @@ describe('soak CLI — run', () => {
     assert.equal(fs.existsSync(path.join(dir, 'l')), false);
   });
 
-  it('warns, and still runs, when the identity check cannot compare', async () => {
+  it('refuses when the live identity cannot be read, and makes no load request', async () => {
     const schedulePath = await planApi();
+    const hits = [];
+    const fetch = async (url) => { hits.push(`${url.origin}${url.pathname}`); return { status: 503, text: async () => '{}' }; };
     const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
-      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
-    assert.equal(r.code, 0);
-    assert.equal(JSON.parse(r.err.split('\n')[0]).warning, 'IDENTITY_UNCHECKED');
+      { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'LIVE_IDENTITY_UNREADABLE');
+    assert.ok(hits.every((h) => h.endsWith('/api/server-info')));
+    assert.equal(fs.existsSync(path.join(dir, 'l')), false);
+  });
+
+  it('runs past an unreadable live identity only with --allow-unverified-live, and records the override in the log', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const fetch = async (url) => (url.origin === 'http://localhost:3102'
+      ? { status: 503, text: async () => '{}' }
+      : { status: 200, text: async () => '{}' });
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--allow-unverified-live'],
+      { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 0, r.err);
+    const warning = JSON.parse(r.err.split('\n')[0]);
+    assert.deepEqual([warning.warning, warning.liveUnverified], ['IDENTITY_UNCHECKED', true]);
+    const header = JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]);
+    assert.deepEqual(header.liveIdentityOverride, { reason: 'live install server-info: HTTP 503' });
+  });
+
+  it('refuses a target name that resolves to this machine on the live port', async () => {
+    const schedulePath = await planApi();
+    let calls = 0;
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://sneaky.example:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, lookup: async () => ['127.0.0.1'], clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'LIVE_INSTALL_TARGET');
+    assert.equal(calls, 0);
+  });
+
+  it('warns, and still runs, when only the target cannot be compared', async () => {
+    const schedulePath = await planApi();
+    const fetch = async (url) => {
+      if (url.origin === 'http://localhost:3102') return { status: 200, text: async () => JSON.stringify({ startedAt: 'live', startupSha: 'd'.repeat(40) }) };
+      return { status: 200, text: async () => '{}' };
+    };
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+      { fetch, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 0, r.err);
+    const warning = JSON.parse(r.err.split('\n')[0]);
+    assert.deepEqual([warning.warning, warning.liveUnverified], ['IDENTITY_UNCHECKED', false]);
   });
 
   it('refuses a schedule whose kinds have no executor with exit 3', async () => {

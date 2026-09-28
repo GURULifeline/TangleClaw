@@ -171,6 +171,25 @@ Also fixed:
   - A resumed run fires overdue events back to back, which would bunch faults. That is for the fault-executor follow-on to decide, and it is recorded in the handoff notes.
   - The target's projects and delete-password prerequisites are now stated in the README.
 
+**Independent review by TC-RM03 at `b852888b`: NOT GREEN, 4 blocking and 4 low.** The PM dispatched the remediation, and all eight findings were addressed in one commit:
+- *F1, params unbounded: fixed.* Validation compared events with the schedule's own params, and a hand edit could change both. `LIMITS` now holds the params to fixed bounds: synthetic `soak-` names, lease ports of 5000 and above, a cap on commands, and floors on the gaps. New tests tamper with params, events and digest together.
+- *F2, alias bypass: fixed.* `[::ffff:127.0.0.1]`, `localhost.` and `foo.localhost` reached the live server.
+  - `canonicalHost` now unwraps IPv4-mapped forms, strips trailing dots and treats `*.localhost` as loopback.
+  - `refuseLiveResolved` refuses a name that DNS resolves to this machine.
+  - Verified read-only against the live install: all of TC-RM03's spellings were refused. `localtest.me` passed the spelling check and was refused on resolution to `::1`.
+- *F3, identity check failed open: fixed.* An unreadable live identity now refuses (`LIVE_IDENTITY_UNREADABLE`) unless `--allow-unverified-live` is given, and the log header records that override. An unreadable target still only warns, since it cannot be written through.
+- *F4, overdue burst: fixed.*
+  - The driver enforces `faultQuietMs` at run time from the previous executed fault, including one read back from the log after a restart.
+  - It spaces overdue events by `CATCH_UP_GAP_MS`, and records `paced`.
+  - The restart test was confirmed to fail with the log read-back removed.
+- *F5, a torn cycle leaked its session: fixed.* The engine cycle first clears any leftover session (`preKilled`).
+- *F6, no guard without `TANGLECLAW_API`: not fixed as suggested, by decision.*
+  - The intended deployment runs the driver inside the guest, from a plain shell, against the guest's own localhost TangleClaw.
+  - A fallback to "the local install's port" would refuse exactly that legitimate target.
+  - This is documented in the README. The proper guard is a soak-target marker set when the Chunk 1 guest is provisioned, and that has been proposed to the PM.
+- *F7, no lock and an unvalidated header: fixed.* `acquireLogLock` gives one driver per log, reclaims only a dead holder on this host, and logs the reclaim. A header without a real `startEpochMs` is refused.
+- *F8, no floor on the load gap: fixed* by the `LIMITS` floors.
+
 **Bugs the tests caught while building:**
 - The stub answered lines that `readline` had buffered after `/exit`.
 - A fake hung request let the event loop exit, because `AbortSignal.timeout`'s timer is unref'd.

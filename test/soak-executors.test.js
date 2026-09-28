@@ -134,29 +134,59 @@ describe('soak executors — port lease and release', () => {
 });
 
 describe('soak executors — engine session cycle', () => {
-  it('launches with the stub engine, injects each command, then kills the session', async () => {
-    const f = fakeFetch(() => ({ status: 200, body: {} }));
+  /**
+   * A fetch where the first DELETE (the leftover-session sweep) answers
+   * `preKill`, and every other request answers `rest(req)`.
+   * @param {number} preKill - Status for the sweep
+   * @param {(req: object) => object} [rest] - Answer for everything else
+   * @returns {{fetch: Function, calls: object[]}} Fake
+   */
+  function cycleFetch(preKill, rest = () => ({ status: 200, body: {} })) {
+    let swept = false;
+    return fakeFetch((req) => {
+      if (req.method === 'DELETE' && !swept) { swept = true; return { status: preKill, body: {} }; }
+      return rest(req);
+    });
+  }
+
+  it('sweeps a leftover session, launches with the stub engine, injects each command, then kills the session', async () => {
+    const f = cycleFetch(404);
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak a', commands: 2 });
     assert.deepEqual(r, { ok: true, code: 'OK', status: null, step: null, steps: 4 });
     assert.deepEqual(f.calls.map((c) => `${c.method} ${c.path}`), [
+      'DELETE /api/sessions/soak%20a',
       'POST /api/sessions/soak%20a',
       'POST /api/sessions/soak%20a/command',
       'POST /api/sessions/soak%20a/command',
       'DELETE /api/sessions/soak%20a'
     ]);
-    assert.equal(f.calls[0].body.engineOverride, ex.STUB_ENGINE_ID);
-    assert.equal(f.calls[0].body.primePrompt, false);
+    assert.equal(f.calls[1].body.engineOverride, ex.STUB_ENGINE_ID);
+    assert.equal(f.calls[1].body.primePrompt, false);
+  });
+
+  it('reports a leftover session it cleaned up, as a cycle torn by a crash leaves', async () => {
+    const r = await ex.EXECUTORS['engine.session.cycle'](ctx(cycleFetch(200).fetch), { project: 'soak-a', commands: 1 });
+    assert.equal(r.ok, true);
+    assert.equal(r.preKilled, true);
+  });
+
+  it('reports an unexpected sweep answer and still attempts the cycle', async () => {
+    const f = cycleFetch(500);
+    const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
+    assert.equal(r.ok, true);
+    assert.deepEqual([r.preKillStatus, r.preKillCode], [500, 'HTTP_STATUS']);
+    assert.equal(f.calls.length, 4);
   });
 
   it('stops without a kill when the launch fails', async () => {
-    const f = fakeFetch(() => ({ status: 404, body: {} }));
+    const f = cycleFetch(404, () => ({ status: 404, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 3 });
     assert.equal(r.step, 0);
-    assert.equal(f.calls.length, 1);
+    assert.deepEqual(f.calls.map((c) => c.method), ['DELETE', 'POST']);
   });
 
   it('still kills the session when a command fails, and reports the failing command', async () => {
-    const f = fakeFetch((req) => (req.path.endsWith('/command') && req.body.command === 'soak ping 2' ? { status: 500, body: {} } : { status: 200, body: {} }));
+    const f = cycleFetch(404, (req) => (req.path.endsWith('/command') && req.body.command === 'soak ping 2' ? { status: 500, body: {} } : { status: 200, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 3 });
     assert.deepEqual(r, { ok: false, code: 'HTTP_STATUS', status: 500, step: 2, steps: 5, cleanupFailed: false });
     assert.equal(f.calls[f.calls.length - 1].method, 'DELETE');
@@ -164,14 +194,14 @@ describe('soak executors — engine session cycle', () => {
   });
 
   it('records a failed kill after a failed command as cleanupFailed', async () => {
-    const f = fakeFetch((req) => (req.method === 'POST' && !req.path.endsWith('/command') ? { status: 200, body: {} } : { status: 500, body: {} }));
+    const f = cycleFetch(404, (req) => (req.method === 'POST' && !req.path.endsWith('/command') ? { status: 200, body: {} } : { status: 500, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
     assert.equal(r.step, 1);
     assert.equal(r.cleanupFailed, true);
   });
 
   it('reports a failed kill after a clean cycle at the kill step', async () => {
-    const f = fakeFetch((req) => (req.method === 'DELETE' ? { status: 500, body: {} } : { status: 200, body: {} }));
+    const f = cycleFetch(404, (req) => (req.method === 'DELETE' ? { status: 500, body: {} } : { status: 200, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
     assert.deepEqual({ ok: r.ok, step: r.step, steps: r.steps }, { ok: false, step: 2, steps: 3 });
   });
