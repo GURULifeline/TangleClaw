@@ -171,6 +171,8 @@ All notable changes to TangleClaw are documented in this file.
   - Informational only: nothing here pulls, checks out, restarts or gates anything. `lib/checkout-fleet.js`.
 
 ### Changed
+
+- **New installs default the projects directory to `~/Projects`, not `~/Documents/Projects`** (#880). The setup wizard warns about `~/Documents`, `~/Desktop` and `~/Downloads`, which macOS protects, and the old default sat under `~/Documents`, so every fresh Mac opened the wizard with a caution about its own pre-filled value. The new default draws no caution, and the wizard's Create-it offer makes it. Typing a protected folder still draws the caution. **Existing installs keep the directory they chose.** The protected-folder list and its wording now come from one place (`lib/tcc-folders.js`) for every server-side message. The installer and the browser keep their own copies, and a test holds them to the shipped default.
 - **Table cells on served plan pages no longer break words mid-way** (#1930). Issue numbers like `#1234` and short words like `enhancement` stay on one line; a wide table scrolls sideways inside its box instead.
 
 - **A served plan page shows its "updated" time in the server's local time zone** (#1928). A plan read in Los Angeles now shows `2026-09-26 17:50:36 PDT` (or `PST` in winter) instead of `2026-09-27 00:50:36 UTC`. The zone is the host's own IANA zone, so no configuration is involved. The `<time datetime>` attribute still carries the ISO UTC value for machine readers, and hovering the stamp shows the UTC reading. The plan-list API is unchanged: `modifiedAt` stays ISO UTC.

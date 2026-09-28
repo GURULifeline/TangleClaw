@@ -485,8 +485,8 @@ describe('Setup Wizard', () => {
       assert.equal(goFound.detected, true, 'go.mod should trigger detection');
     });
 
-    // #859, second call site. On a stock macOS install the directory this route
-    // scans is ~/Documents/Projects, which TCC blocks for a launchd-spawned
+    // #859, second call site. The directory this route scans can sit under
+    // ~/Documents, which TCC blocks for a launchd-spawned
     // node with no Full Disk Access — and it blocks by never completing the
     // open(), not by returning EPERM. Read synchronously that stopped the event
     // loop, so one click on wizard step 2 killed every route in the process,

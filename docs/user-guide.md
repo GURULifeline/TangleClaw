@@ -47,7 +47,7 @@ Open http://localhost:3102 in your browser. On a fresh install, a **setup wizard
 through initial configuration:
 
 1. **Welcome** — overview of what TangleClaw does
-2. **Projects Directory** — set where your project folders live (defaults to `~/Documents/Projects`).
+2. **Projects Directory** — set where your project folders live (defaults to `~/Projects`).
    If that folder does not exist yet — it does not on a fresh Mac — the wizard offers to create it.
    On macOS it also warns you when the path is under `~/Documents`, `~/Desktop` or `~/Downloads`,
    which the system keeps background services out of (see below).
@@ -268,7 +268,7 @@ Tap **+ New** to open the create project drawer:
 2. **Engine** — select an AI engine from the dropdown
 3. **Tags** — optional tags for organization
 
-The project is created in your configured `projectsDir` (default: `~/Documents/Projects`). TangleClaw scaffolds the project directory, registers ports with PortHub (if available), and generates the engine-specific config file. See the [Engine Guide](engine-guide.md) for details on custom engines.
+The project is created in your configured `projectsDir` (default: `~/Projects`). TangleClaw scaffolds the project directory, registers ports with PortHub (if available), and generates the engine-specific config file. See the [Engine Guide](engine-guide.md) for details on custom engines.
 
 ### Deleting a Project
 

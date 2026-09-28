@@ -229,7 +229,7 @@ tcc_protected_path() {
 # Config stores the projects directory as a literal "~/..." string, and a tilde
 # inside a quoted shell variable is never expanded by the shell. Passing one
 # straight to tcc_protected_path matches no case arm and reports "safe" — the
-# quiet wrong answer, on the exact default the check exists for. Separated so it
+# quiet wrong answer, on the exact paths the check exists for. Separated so it
 # can be exercised directly rather than only through its caller.
 expand_tilde() {
   case "$1" in
@@ -276,14 +276,14 @@ if [ "$(uname)" = "Darwin" ]; then
   # one blocked open() takes down every route, with no error, no log and no
   # recovery, while launchd still reports the process healthy. Nothing downstream
   # can warn about it, which is why it is warned about here.
-  PROJECTS_DIR_RAW="$HOME/Documents/Projects"   # mirrors lib/store.js DEFAULT_CONFIG.projectsDir
+  PROJECTS_DIR_RAW="$HOME/Projects"   # mirrors lib/store.js DEFAULT_CONFIG.projectsDir
   if [ -f "$HOME/.tangleclaw/config.json" ]; then
     PROJECTS_DIR_RAW="$("$NODE_PATH" -e '
       try {
         const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-        process.stdout.write(typeof c.projectsDir === "string" && c.projectsDir ? c.projectsDir : "~/Documents/Projects");
-      } catch { process.stdout.write("~/Documents/Projects"); }
-    ' "$HOME/.tangleclaw/config.json" 2>/dev/null || echo "$HOME/Documents/Projects")"
+        process.stdout.write(typeof c.projectsDir === "string" && c.projectsDir ? c.projectsDir : "~/Projects");
+      } catch { process.stdout.write("~/Projects"); }
+    ' "$HOME/.tangleclaw/config.json" 2>/dev/null || echo "$HOME/Projects")"
   fi
   PROJECTS_DIR="$(expand_tilde "$PROJECTS_DIR_RAW")"
 

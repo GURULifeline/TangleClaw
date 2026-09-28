@@ -265,6 +265,7 @@ const tmux = require('./lib/tmux');
 const projects = require('./lib/projects');
 const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
+const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
 const ciStatus = require('./lib/ci-status');
 const master = require('./lib/master');
@@ -1755,13 +1756,7 @@ function _protectedRoots() {
   // read simply never returns (#859), which is why this is worth saying BEFORE
   // someone points the product at one of them rather than only after.
   if (process.platform !== 'darwin') return [];
-  const home = process.env.HOME || '';
-  const roots = [];
-  for (const name of ['Documents', 'Desktop', 'Downloads']) {
-    roots.push(`~/${name}`);
-    if (home) roots.push(path.join(home, name));
-  }
-  return roots;
+  return protectedRootsFor(process.env.HOME || '');
 }
 
 /**
@@ -3634,8 +3629,8 @@ route('POST', '/api/setup/generate-cert', (_req, res, _params, body) => {
 // POST /api/setup/scan — Scan a directory for existing projects
 //
 // The scan itself lives in lib/projects because it must run off the main thread
-// under a deadline: this route reads a directory the operator types in, and the
-// value the wizard pre-fills (~/Documents/Projects) is TCC-protected on macOS,
+// under a deadline: this route reads a directory the operator types in, and on
+// macOS that can be a TCC-protected folder (~/Documents and its siblings),
 // where a read does not fail — it never returns. Inline and synchronous, that
 // blocked the event loop and took the whole server down on the first click of a
 // fresh install (#859).
@@ -3657,8 +3652,8 @@ route('POST', '/api/setup/scan', async (_req, res, _params, body) => {
 
 // POST /api/setup/create-dir — Create the projects directory the operator named.
 //
-// The shipped default is ~/Documents/Projects and a stock Mac does not have it,
-// so the first thing a new install does — accept the pre-filled path, press
+// The shipped default (~/Projects) does not exist on a stock Mac, so the first
+// thing a new install does — accept the pre-filled path, press
 // Next — used to answer "Directory does not exist" and stop, with no action
 // available anywhere in the product.
 //
