@@ -52,6 +52,7 @@ The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-project
 **Review.** The first Critic pass (rev-20260928T000124Z-734ba1ca) found 0 blocking. Its observations were fixed: a helper only tests called was replaced by the roots builder the server uses; an unpinned third copy; two wrong comments. The verify pass (rev-20260928T000637Z-0f0b6f70) was clean.
 
 **Evidence.** The full suite is green (a clean run at 2026-09-28T00:27Z). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
+
 ## 2026-09-27 — Codex wakes observe the bound thread; a stalled wake is logged and reported (#1978)
 
 <!-- prawduct: type=bugfix | scope=codex-bound-thread-wake-1978 -->
