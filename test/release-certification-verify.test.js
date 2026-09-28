@@ -265,6 +265,39 @@ describe('verifyChange: the timeline must be internally consistent (PR #1975 rev
     });
   }
 
+  it('refuses qualified time beyond the elapsed time, with every other time consistent', () => {
+    const found = judge({ [P.admission]: d.admission }, forged({ ...consistent, qualifiedMs: H72 + 1, targetMs: H72 }));
+    assert.ok(found.includes(RULES.TIMELINE_INCONSISTENT), `${found}`);
+  });
+
+  /**
+   * A consistent terminal scorecard ended by a failure or a cancellation.
+   * @param {'failed'|'cancelled'} state - Terminal state
+   * @param {number} at - The failure's or cancellation's time
+   * @returns {{[path: string]: string}} The tree after the commit
+   */
+  function ended(state, at) {
+    const card = {
+      ...JSON.parse(d.card1), state, updatedAt: T0 + MIN, lastSampleAt: T0 + MIN, elapsedMs: MIN, publishedAt: T0 + MIN,
+      failure: state === 'failed' ? { code: 'LEAK_FIRED', at } : null,
+      cancellation: state === 'cancelled' ? { actor: 'x', at } : null
+    };
+    const last = state === 'failed' ? line('running', 'failed', 'LEAK_FIRED', T0 + MIN, 2) : line('running', 'cancelled', 'OPERATOR_CANCELLED', T0 + MIN);
+    return {
+      [P.admission]: d.admission, [P.scorecard]: sc.serialize(card),
+      [P.events]: log(line('not-started', 'running', 'ADMITTED', T0, 1), last),
+      [sc.INDEX_PATH]: sc.serialize(sc.indexDoc([card]))
+    };
+  }
+
+  for (const state of ['failed', 'cancelled']) {
+    it(`refuses a ${state} time outside the run, and accepts one inside it`, () => {
+      assert.deepEqual(judge({ [P.admission]: d.admission }, ended(state, T0 + MIN)), []);
+      assert.ok(judge({ [P.admission]: d.admission }, ended(state, T0 - 1)).includes(RULES.TIMELINE_INCONSISTENT));
+      assert.ok(judge({ [P.admission]: d.admission }, ended(state, T0 + MIN + 1)).includes(RULES.TIMELINE_INCONSISTENT));
+    });
+  }
+
   it('judges a transition log changed without its scorecard against the admission', () => {
     const before = { [P.admission]: d.admission, [P.scorecard]: d.card1, [P.events]: d.events1, [sc.INDEX_PATH]: d.index1 };
     const early = `${d.events1}${log(line('running', 'extended', 'PROBE_UNKNOWN', T0 - 1, 2))}`;
