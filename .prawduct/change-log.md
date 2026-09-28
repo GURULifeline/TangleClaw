@@ -171,24 +171,42 @@ Also fixed:
   - A resumed run fires overdue events back to back, which would bunch faults. That is for the fault-executor follow-on to decide, and it is recorded in the handoff notes.
   - The target's projects and delete-password prerequisites are now stated in the README.
 
-**Independent review by TC-RM03 at `b852888b`: NOT GREEN, 4 blocking and 4 low.** The PM dispatched the remediation, and all eight findings were addressed in one commit:
-- *F1, params unbounded: fixed.* Validation compared events with the schedule's own params, and a hand edit could change both. `LIMITS` now holds the params to fixed bounds: synthetic `soak-` names, lease ports of 5000 and above, a cap on commands, and floors on the gaps. New tests tamper with params, events and digest together.
-- *F2, alias bypass: fixed.* `[::ffff:127.0.0.1]`, `localhost.` and `foo.localhost` reached the live server.
-  - `canonicalHost` now unwraps IPv4-mapped forms, strips trailing dots and treats `*.localhost` as loopback.
-  - `refuseLiveResolved` refuses a name that DNS resolves to this machine.
-  - Verified read-only against the live install: all of TC-RM03's spellings were refused. `localtest.me` passed the spelling check and was refused on resolution to `::1`.
-- *F3, identity check failed open: fixed.* An unreadable live identity now refuses (`LIVE_IDENTITY_UNREADABLE`) unless `--allow-unverified-live` is given, and the log header records that override. An unreadable target still only warns, since it cannot be written through.
-- *F4, overdue burst: fixed.*
-  - The driver enforces `faultQuietMs` at run time from the previous executed fault, including one read back from the log after a restart.
-  - It spaces overdue events by `CATCH_UP_GAP_MS`, and records `paced`.
+**Independent review by TC-RM03 at `b852888b`: NOT GREEN, 4 blocking and 4 low.**
+- The PM and the Architect dispatched all eight findings, with architectural requirements, as one bounded batch.
+- The intermediate commit `c491995c` was written before those requirements arrived, and was never handed over for review.
+- The commit after it aligns every finding to them:
+- *F1: fixed.* `LIMITS` holds the params to fixed bounds, so validation no longer trusts params a hand edit also controls: synthetic `soak-` names, lease ports of 5000 and above, a cap on commands, and floors on the gaps. New tests tamper with params, events and digest together.
+- *F2: fixed.*
+  - `canonicalHost` unwraps IPv4-mapped forms, strips trailing dots and treats `*.localhost` as loopback.
+  - `refuseLiveResolved` refuses a name that resolves to this machine, and fails closed on one that does not resolve (`TARGET_UNRESOLVED`).
+  - Verified read-only against the live install: all of TC-RM03's spellings were refused. `localtest.me` was refused on resolution to `::1`.
+- *F3: fixed.* An unreadable live identity refuses (`LIVE_IDENTITY_UNREADABLE`) unless `--allow-unverified-live` is given. The log header records that override, it is tested, and it is never passed on the operator's behalf.
+- *F4: fixed.*
+  - Stale load, more than `STALE_LOAD_MS` late, is skipped and recorded as `SKIPPED_STALE`.
+  - Faults are deferred, never skipped. They keep `faultQuietMs` from the previous executed fault, including one read back from the log after a restart, and all of them drain before the end record.
+  - Other overdue load is spaced by `CATCH_UP_GAP_MS`.
   - The restart test was confirmed to fail with the log read-back removed.
-- *F5, a torn cycle leaked its session: fixed.* The engine cycle first clears any leftover session (`preKilled`).
-- *F6, no guard without `TANGLECLAW_API`: not fixed as suggested, by decision.*
-  - The intended deployment runs the driver inside the guest, from a plain shell, against the guest's own localhost TangleClaw.
-  - A fallback to "the local install's port" would refuse exactly that legitimate target.
-  - This is documented in the README. The proper guard is a soak-target marker set when the Chunk 1 guest is provisioned, and that has been proposed to the PM.
-- *F7, no lock and an unvalidated header: fixed.* `acquireLogLock` gives one driver per log, reclaims only a dead holder on this host, and logs the reclaim. A header without a real `startEpochMs` is refused.
-- *F8, no floor on the load gap: fixed* by the `LIMITS` floors.
+- *F5: fixed.* The engine cycle reads session status first:
+  - it kills only a leftover `soak-stub` session;
+  - it never touches another engine's session (`FOREIGN_SESSION`);
+  - it kills nothing when the status is unreadable.
+  - The server's `404`/`200` answers were checked against `server.js` and `sessions.killSession`.
+- *F6: fixed as the Architect required.* With no `TANGLECLAW_API`, `run` refuses (`GUARD_CONTEXT_ABSENT`) unless `--no-live-install` is given.
+  - That is the guest's case, and the override is recorded in the header.
+  - Passing it while `TANGLECLAW_API` is set is a usage error.
+  - My earlier objection, that a fallback would refuse the guest's own localhost, is answered by the override being explicit rather than a fallback.
+- *F7: fixed.*
+  - `readLog` is read-only.
+  - `sealTornTail` closes a torn tail by appending a newline and a seal record, so no byte of evidence is rewritten.
+  - A malformed line is accepted only when a seal directly follows it.
+  - `acquireLogLock` gives one driver per log, reclaims only a dead holder on this host, and logs the reclaim. An empty or unreadable lock fails safe.
+  - A header without a real `startEpochMs` is refused.
+- *F8: fixed.* There are floors on the gaps, and an absolute cap of 300,000 events, enforced while generating and in validation.
+- **Real-process smoke, run guest-style with no `TANGLECLAW_API`:**
+  - without the flag, `run` refused with `GUARD_CONTEXT_ABSENT`;
+  - with `--no-live-install` it completed, and the header recorded the override;
+  - each engine cycle read status first;
+  - the lock was released.
 
 **Bugs the tests caught while building:**
 - The stub answered lines that `readline` had buffered after `/exit`.

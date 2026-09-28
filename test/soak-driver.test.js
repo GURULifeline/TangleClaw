@@ -77,7 +77,7 @@ describe('soak driver — a complete run', () => {
     const clock = fakeClock(1_000_000);
     const ran = [];
     const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock });
-    assert.deepEqual(result, { status: 'completed', ran: s.events.length, resumedFrom: 0, truncated: false });
+    assert.deepEqual(result, { status: 'completed', ran: s.events.length, resumedFrom: 0, tornTail: false, skipped: 0 });
     assert.deepEqual(ran, s.events.map((e) => e.kind));
 
     const recs = records(logPath);
@@ -207,32 +207,79 @@ describe('soak driver — resume', () => {
     for (const r of recs.filter((x) => x.type === 'event')) assert.equal(r.scheduledAt, 5_000 + s.events[r.index].atMs);
   });
 
-  it('runs events whose slot passed while it was down at once, and records how late', async () => {
+  it('runs an event that is only slightly late at once, and records how late', async () => {
     const s = apiSchedule();
     const clock = fakeClock(T0);
     let n = 0;
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
-    clock.advance(5 * MIN); // the driver was down for five minutes
+    const next = s.events[1];
+    clock.advance(next.atMs - s.events[0].atMs + 20 * 1000); // resume 20 s after the next slot
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock });
-    const resumed = records(logPath).filter((r) => r.type === 'event' && r.index >= 1);
-    assert.ok(resumed[0].lateMs > 0, 'the first missed event is late');
-    assert.equal(resumed[0].startedAt - resumed[0].scheduledAt, resumed[0].lateMs);
-    assert.equal(resumed[resumed.length - 1].lateMs, 0, 'later events are back on their slots');
+    const r = records(logPath).find((x) => x.type === 'event' && x.index === 1);
+    assert.equal(r.skipped, undefined);
+    assert.ok(r.lateMs >= 20 * 1000 && r.lateMs < driver.STALE_LOAD_MS);
+    assert.equal(r.startedAt - r.scheduledAt, r.lateMs);
   });
 
-  it('cuts a torn final line and runs that event again', async () => {
+  it('skips and records load that went stale while it was down, then runs the rest on time', async () => {
+    const s = apiSchedule();
+    const clock = fakeClock(T0);
+    let n = 0;
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
+    clock.advance(5 * MIN);
+    const ran = [];
+    const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock });
+    const ev = records(logPath).filter((r) => r.type === 'event');
+    const stale = ev.filter((r) => r.skipped);
+    assert.ok(stale.length > 0);
+    assert.equal(result.skipped, stale.length);
+    for (const r of stale) {
+      assert.deepEqual([r.code, r.ok, r.startedAt], ['SKIPPED_STALE', null, null]);
+      assert.ok(r.lateMs > driver.STALE_LOAD_MS);
+    }
+    assert.equal(ran.length + stale.length, s.events.length - 1, 'every remaining event is either run or recorded as skipped');
+    assert.deepEqual(ev.map((r) => r.index), s.events.map((e) => e.index), 'still exactly once each, in order');
+    assert.equal(ev[ev.length - 1].lateMs, 0, 'later events are back on their slots');
+  });
+
+  it('seals a torn final line by appending, never rewriting, and runs that event again', async () => {
     const s = apiSchedule();
     const clock = fakeClock(T0);
     let n = 0;
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 6 });
-    fs.appendFileSync(logPath, '{"type":"event","index":3,"kind":"api.he');
+    const fragment = '{"type":"event","index":3,"kind":"api.he';
+    fs.appendFileSync(logPath, fragment);
+    const before = fs.readFileSync(logPath, 'utf8');
+
+    const peek = driver.readLog(logPath);
+    assert.deepEqual([peek.tornTail, peek.tornBytes, peek.lastIndex], [true, Buffer.byteLength(fragment), 2]);
+    assert.equal(fs.readFileSync(logPath, 'utf8'), before, 'reading the log changes nothing');
+
     const ran = [];
     const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock });
-    assert.equal(result.truncated, true);
+    assert.equal(result.tornTail, true);
     assert.equal(result.resumedFrom, 3);
     assert.equal(ran[0], s.events[3].kind);
-    const indexes = records(logPath).filter((r) => r.type === 'event').map((r) => r.index);
+    const after = fs.readFileSync(logPath, 'utf8');
+    assert.ok(after.startsWith(before), 'every original byte, the fragment included, is still there');
+    const seal = after.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((r) => r && r.type === 'torn-tail-sealed');
+    assert.equal(seal.bytes, Buffer.byteLength(fragment));
+    const indexes = after.split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((r) => r && r.type === 'event').map((r) => r.index);
     assert.deepEqual(indexes, s.events.map((e) => e.index));
+    // and the sealed log reads back cleanly
+    assert.equal(driver.readLog(logPath).ended, true);
+  });
+
+  it('refuses a malformed line that no seal follows', () => {
+    fs.writeFileSync(logPath, `${JSON.stringify({ type: 'header', schema: driver.LOG_SCHEMA, scheduleDigest: 'x', startEpochMs: T0 })}\n{broken\n${JSON.stringify({ type: 'event', index: 0 })}\n`);
+    assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_UNREADABLE');
+  });
+
+  it('refuses a log whose only content is a torn header', () => {
+    fs.writeFileSync(logPath, '{"type":"header","sch');
+    assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_UNREADABLE');
   });
 
   it('does nothing for a log that already ended', async () => {
@@ -385,10 +432,18 @@ describe('soak driver — resolving the target', () => {
     }
   });
 
-  it('allows a name that resolves elsewhere, one that does not resolve, and any other port', async () => {
+  it('allows a name that resolves elsewhere, and any other port', async () => {
     await driver.refuseLiveResolved({ apiBase: 'http://guest.example:3102', liveApi: LIVE, names, lookup: lookupFrom({ 'guest.example': ['192.168.64.7'] }) });
-    await driver.refuseLiveResolved({ apiBase: 'http://nowhere.example:3102', liveApi: LIVE, names, lookup: lookupFrom({}) });
     await driver.refuseLiveResolved({ apiBase: 'http://localhost:3202', liveApi: LIVE, names, lookup: async () => { throw new Error('must not look up'); } });
+  });
+
+  it('fails closed on a name that does not resolve, or resolves to nothing', async () => {
+    for (const lookup of [lookupFrom({}), async () => { const e = new Error('try again'); e.code = 'EAI_AGAIN'; throw e; }, async () => []]) {
+      await assert.rejects(
+        driver.refuseLiveResolved({ apiBase: 'http://nowhere.example:3102', liveApi: LIVE, names, lookup }),
+        (err) => err.code === 'TARGET_UNRESOLVED'
+      );
+    }
   });
 
   it('really resolves localhost through the system resolver', async () => {
@@ -426,6 +481,12 @@ describe('soak driver — run-time pacing', () => {
     assert.ok(faults.length >= 3, 'the fixture must have several overdue faults');
     for (let i = 1; i < faults.length; i++) assert.ok(faults[i].startedAt - faults[i - 1].startedAt >= s.params.faultQuietMs, `fault ${i}`);
     assert.ok(faults.some((f) => f.paced === 'quiet-window'));
+    // Faults are deferred, never skipped, and all of them run before the log ends.
+    assert.equal(faults.length, s.events.filter((e) => e.class === 'fault').length);
+    assert.ok(faults.every((f) => !f.skipped && f.ok === true));
+    const all = records(logPath);
+    assert.equal(all[all.length - 1].type, 'end');
+    assert.ok(all[all.length - 1].completedAt >= faults[faults.length - 1].startedAt);
   });
 
   it('counts a fault that ran before a restart, read back from the log', async () => {
@@ -454,7 +515,8 @@ describe('soak driver — run-time pacing', () => {
     let n = 0;
     await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, shouldStop: () => n++ >= 2 });
     clock.advance(50 * MIN);
-    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, catchUpGapMs: 2000 });
+    // Stale-skipping is turned off here so the catch-up spacing itself is what is measured.
+    await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock, catchUpGapMs: 2000, staleLoadMs: Infinity });
     const ev = records(logPath).filter((r) => r.type === 'event');
     const overdue = ev.filter((r) => r.lateMs > 0);
     assert.ok(overdue.length > 3);
@@ -471,6 +533,14 @@ describe('soak driver — run-time pacing', () => {
       assert.equal(r.paced, null);
       assert.equal(r.lateMs, 0);
     }
+  });
+});
+
+describe('soak driver — the guard context', () => {
+  it('refuses to run unguarded with no TANGLECLAW_API unless told so explicitly', () => {
+    assert.throws(() => driver.requireGuardContext(undefined, false), (err) => err.code === 'GUARD_CONTEXT_ABSENT');
+    assert.equal(driver.requireGuardContext(undefined, true), true);
+    assert.equal(driver.requireGuardContext('http://localhost:3102', false), false);
   });
 });
 

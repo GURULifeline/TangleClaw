@@ -26,7 +26,9 @@ function sink() {
 async function run(argv, deps = {}) {
   const stdout = sink();
   const stderr = sink();
-  const code = await cli.main(argv, { stdout, stderr, env: {}, onStopSignal: () => {}, ...deps });
+  // Names resolve to a guest-like address unless a test says otherwise, so no
+  // test depends on this machine's DNS.
+  const code = await cli.main(argv, { stdout, stderr, env: {}, onStopSignal: () => {}, lookup: async () => ['192.168.64.7'], ...deps });
   return { code, out: stdout.text(), err: stderr.text() };
 }
 
@@ -195,6 +197,40 @@ describe('soak CLI — run', () => {
     assert.deepEqual(header.liveIdentityOverride, { reason: 'live install server-info: HTTP 503' });
   });
 
+  it('refuses to run with no TANGLECLAW_API unless --no-live-install says so', async () => {
+    const schedulePath = await planApi();
+    let calls = 0;
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, clock: instantClock() });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'GUARD_CONTEXT_ABSENT');
+    assert.equal(calls, 0);
+  });
+
+  it('runs in the guest with --no-live-install, and records the override in the log header', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'l');
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://localhost:3102', '--log', log, '--no-live-install'],
+      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
+    assert.equal(r.code, 0, r.err);
+    assert.equal(JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]).guardContextOverride, 'no-live-install');
+  });
+
+  it('rejects --no-live-install where TANGLECLAW_API is set, since the claim is false', async () => {
+    const schedulePath = await planApi();
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
+      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 2);
+  });
+
+  it('refuses a target whose name does not resolve', async () => {
+    const schedulePath = await planApi();
+    const r = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+      { fetch: async () => ({ status: 200, text: async () => '{}' }), lookup: async () => { const e = new Error('nope'); e.code = 'ENOTFOUND'; throw e; }, clock: instantClock(), env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err).code, 'TARGET_UNRESOLVED');
+  });
+
   it('refuses a target name that resolves to this machine on the live port', async () => {
     const schedulePath = await planApi();
     let calls = 0;
@@ -221,7 +257,7 @@ describe('soak CLI — run', () => {
   it('refuses a schedule whose kinds have no executor with exit 3', async () => {
     const out = path.join(dir, 'full.json');
     await run(['plan', '--seed', 'rc', '--phase', 'certifying', '--duration-hours', '4', '--out', out]);
-    const r = await run(['run', '--schedule', out, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l')],
+    const r = await run(['run', '--schedule', out, '--api', 'http://guest.invalid:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
       { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
     assert.equal(r.code, 3);
     const lines = r.err.trim().split('\n');
@@ -236,10 +272,10 @@ describe('soak CLI — run', () => {
     let fire;
     let count = 0;
     const counting = async (...a) => { count++; if (count === 3) fire(); return fetch(...a); };
-    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log],
+    const first = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--no-live-install'],
       { fetch: counting, clock, onStopSignal: (fn) => { fire = fn; } });
     assert.equal(first.code, 4);
-    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log], { fetch, clock });
+    const second = await run(['run', '--schedule', schedulePath, '--api', 'http://guest.invalid:3102', '--log', log, '--no-live-install'], { fetch, clock });
     assert.equal(second.code, 0, second.err);
     assert.equal(JSON.parse(second.out).status, 'completed');
     assert.ok(JSON.parse(second.out).resumedFrom > 0);

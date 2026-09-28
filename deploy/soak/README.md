@@ -42,7 +42,8 @@ node scripts/soak.js validate --schedule soak-certifying.json
   - project names must be synthetic (`soak-…`);
   - lease ports stay at 5000 or above, outside TangleClaw's own ranges;
   - an engine cycle sends at most 20 commands;
-  - the load and fault gaps have floors.
+  - the load and fault gaps have floors;
+  - a schedule holds at most 300,000 events. A 72-hour run at the one-second floor is 259,200.
 - **`plan` never overwrites** an existing schedule file.
 
 ## Run it
@@ -62,17 +63,21 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     - the hostname or its MagicDNS name;
     - any local interface address.
   - **By resolution.** It resolves the target's name and refuses when any address it gets is on this
-    machine, which catches names no spelling rule anticipates. A name that does not resolve is let
-    through, since nothing can connect to it.
+    machine, which catches names no spelling rule anticipates. It fails closed: a name that does not
+    resolve, or resolves to nothing, is refused (`TARGET_UNRESOLVED`).
   - **By identity.** It asks both servers for `/api/server-info` and refuses a target that reports the
     same running server (`startedAt` and `startupSha`), which catches a reverse-proxy route.
 - **If the live install's identity cannot be read, `run` refuses** (`LIVE_IDENTITY_UNREADABLE`).
   `--allow-unverified-live` overrides this, and the override is recorded in the log header. If only
   the target cannot be read, `run` warns (`IDENTITY_UNCHECKED`) and carries on: a target that answers
   nothing, or answers `401`, answers the load the same way.
-- **With no `TANGLECLAW_API` there is nothing to compare against.** That is the intended deployment:
-  the driver runs inside the soak guest against the guest's own TangleClaw. Run from a plain host
-  shell, it has no live install to protect, so point it only at a guest.
+- **With no `TANGLECLAW_API`, `run` refuses (`GUARD_CONTEXT_ABSENT`) unless `--no-live-install` is
+  given.** Every guard compares against `TANGLECLAW_API`, so without it nothing is guarded, and that
+  has to be stated rather than assumed.
+  - Inside the soak guest, where the driver targets the guest's own TangleClaw, pass
+    `--no-live-install`. The log header records it.
+  - Passing it where `TANGLECLAW_API` is set is a usage error.
+  - Neither override is ever passed on the operator's behalf, least of all by certification.
 - **The target must already have the synthetic projects** (`--projects`, default `soak-a`,
   `soak-b`, `soak-c`) and no delete password. Otherwise every session cycle is logged as a `404`
   or `403`.
@@ -80,21 +85,29 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
 - **The log is `0600`, and one driver holds it at a time** (`<log>.lock`, `LOG_LOCKED`). A lock left
   by a dead process on this host is reclaimed, and the reclaim is logged. Each record is flushed to
   disk before the next event.
+- **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
+  a crash is sealed by appending after it: a newline, then a `torn-tail-sealed` record naming its
+  size. Its event runs again.
 - **Ctrl-C stops before the next event** (exit 4). Running the same command again resumes, and no
-  logged event runs twice. An event that was in flight at a crash has no logged outcome, so it runs
-  again. An engine cycle first clears any session its torn predecessor left running
-  (`preKilled: true`).
-- **On time, every event runs at its slot. Behind schedule, the run is paced, and each record says
-  how (`paced`):**
-  - A fault never starts within the schedule's quiet window of the previous fault. That includes a
-    fault the log shows ran before a restart.
-  - Overdue events run at least a second apart, never as one burst.
-  - `lateMs` records how late each event started.
+  logged event runs twice.
+- **An engine cycle cleans up only the harness's own sessions.** It first reads the project's
+  session status:
+  - a leftover `soak-stub` session, left by a cycle torn by a crash, is killed (`preKilled: true`);
+  - a session on any other engine is never touched, and the cycle fails with `FOREIGN_SESSION`;
+  - if the status cannot be read, the cycle kills nothing.
+- **On time, every event runs at its slot. Behind schedule:**
+  - Load more than a minute past its slot is **skipped and recorded** (`skipped: true`,
+    `SKIPPED_STALE`), never replayed as a backlog.
+  - Faults are **never skipped, only deferred**. A fault never starts within the quiet window of the
+    previous executed fault, including one the log shows ran before a restart. Every fault runs
+    before the log ends.
+  - Overdue load that is not yet stale runs at least a second apart.
+  - Each record says what applied (`paced`), and `lateMs` says how late it started.
 
 Exit codes: 0 done, 2 usage, 3 refused (the code is printed as JSON on stderr), 4 stopped.
 
 ```sh
-node scripts/soak.js run --schedule s.json --api http://<guest>:<port> --log s.ndjson [--allow-unverified-live]
+node scripts/soak.js run --schedule s.json --api http://<guest>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install]
 ```
 
 ## The stub engine

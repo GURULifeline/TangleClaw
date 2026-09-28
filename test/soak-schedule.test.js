@@ -301,6 +301,25 @@ describe('soak schedule — parameter checks', () => {
     });
   }
 
+  it('refuses a request that would exceed the event cap, while generating', () => {
+    // A week at the one-second floor is about 604,800 events, over the cap.
+    assert.throws(
+      () => sched.buildSchedule({ ...base, durationMs: sched.MAX_DURATION_MS, loadMeanMs: sched.LIMITS.minLoadMeanMs }),
+      (err) => err.code === 'PARAMS' && /exceed/.test(err.message)
+    );
+  });
+
+  it('accepts a 72-hour schedule at the load floor, which the cap is sized for', () => {
+    const s = sched.buildSchedule({ ...base, durationMs: 72 * HOUR, loadMeanMs: sched.LIMITS.minLoadMeanMs, classes: ['api'] });
+    assert.ok(s.events.length <= sched.LIMITS.maxEvents);
+  });
+
+  it('rejects a schedule file holding more events than the cap', () => {
+    const s = sched.buildSchedule(base);
+    const big = { ...s, events: new Array(sched.LIMITS.maxEvents + 1).fill(s.events[0]) };
+    assert.deepEqual(sched.validateSchedule(big).map((v) => v.code), ['EVENT_CAP']);
+  });
+
   it('records the defaults it used in the params, so the digest covers them', () => {
     const s = sched.buildSchedule(base);
     assert.equal(s.params.loadMeanMs, sched.DEFAULTS.loadMeanMs);

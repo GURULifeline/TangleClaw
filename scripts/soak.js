@@ -9,15 +9,17 @@
  *                 [--classes api,engine,browser,fault] [--projects a,b,c]
  *                 [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]
  *   soak validate --schedule <file>
- *   soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live]
+ *   soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]
  *
  * `run` executes against the server named by `--api` and nothing else. There
  * is deliberately no fallback to `TANGLECLAW_API`. Because a soak's load
  * writes (port leases, sessions), it refuses the pane's own TangleClaw by
  * address, by what the target's name resolves to, and by server identity.
  * When the live install's identity cannot be read, it refuses unless
- * `--allow-unverified-live` is given, and the log header records that
- * override. The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
+ * `--allow-unverified-live` is given. With no `TANGLECLAW_API` at all there is
+ * nothing to guard against, and it refuses unless `--no-live-install` says so:
+ * that is the soak guest's case. The log header records either override.
+ * Neither is ever passed on the operator's behalf. The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
  * never from a flag that would put it in shell history and process listings.
  *
  * Interrupting `run` (SIGINT/SIGTERM) stops before the next event. Running it
@@ -41,13 +43,13 @@ const USAGE = [
   '                     [--classes api,engine,browser,fault] [--projects a,b,c]',
   '                     [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]',
   '       soak validate --schedule <file>',
-  '       soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live]'
+  '       soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]'
 ].join('\n');
 
 const HOUR_MS = 60 * 60 * 1000;
 
 /** Flags that take no value. */
-const BOOLEAN = new Set(['allow-unverified-live']);
+const BOOLEAN = new Set(['allow-unverified-live', 'no-live-install']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
 class UsageError extends Error {}
@@ -192,7 +194,7 @@ function cmdValidate(flags, io) {
  * @returns {Promise<number>} Exit code
  */
 async function cmdRun(flags, io, deps) {
-  expectFlags(flags, ['schedule', 'api', 'log'], ['allow-unverified-live']);
+  expectFlags(flags, ['schedule', 'api', 'log'], ['allow-unverified-live', 'no-live-install']);
   let api;
   try {
     api = new URL(flags.api);
@@ -202,6 +204,8 @@ async function cmdRun(flags, io, deps) {
   }
   if (api.protocol !== 'http:' && api.protocol !== 'https:') throw new UsageError('--api must be http or https');
   const liveApi = deps.env.TANGLECLAW_API;
+  const noLiveInstall = driver.requireGuardContext(liveApi, flags['no-live-install'] === true);
+  if (liveApi && flags['no-live-install'] === true) throw new UsageError('--no-live-install contradicts TANGLECLAW_API being set');
   driver.refuseLiveTarget(api.href, liveApi);
   await driver.refuseLiveResolved({ apiBase: api.href, liveApi, lookup: deps.lookup });
   const schedule = readSchedule(flags.schedule);
@@ -219,7 +223,10 @@ async function cmdRun(flags, io, deps) {
     shouldStop: () => stop,
     // An override of the live-identity check is part of the run's record,
     // not just a line on a terminal.
-    headerExtra: identity.liveUnverified ? { liveIdentityOverride: { reason: identity.reason } } : undefined
+    headerExtra: {
+      ...(identity.liveUnverified ? { liveIdentityOverride: { reason: identity.reason } } : {}),
+      ...(noLiveInstall ? { guardContextOverride: 'no-live-install' } : {})
+    }
   });
   io.stdout.write(`${JSON.stringify(result)}\n`);
   return result.status === 'stopped' ? 4 : 0;

@@ -135,26 +135,24 @@ describe('soak executors — port lease and release', () => {
 
 describe('soak executors — engine session cycle', () => {
   /**
-   * A fetch where the first DELETE (the leftover-session sweep) answers
-   * `preKill`, and every other request answers `rest(req)`.
-   * @param {number} preKill - Status for the sweep
+   * A fetch for a cycle: the status route answers `status`, and every other
+   * request answers `rest(req)`.
+   * @param {{status: number, body?: object}} status - Answer to GET …/status
    * @param {(req: object) => object} [rest] - Answer for everything else
    * @returns {{fetch: Function, calls: object[]}} Fake
    */
-  function cycleFetch(preKill, rest = () => ({ status: 200, body: {} })) {
-    let swept = false;
-    return fakeFetch((req) => {
-      if (req.method === 'DELETE' && !swept) { swept = true; return { status: preKill, body: {} }; }
-      return rest(req);
-    });
+  function cycleFetch(status, rest = () => ({ status: 200, body: {} })) {
+    return fakeFetch((req) => (req.method === 'GET' && req.path.endsWith('/status') ? status : rest(req)));
   }
+  const IDLE = { status: 200, body: { active: false, project: 'soak-a' } };
+  const OURS = { status: 200, body: { active: true, engine: 'soak-stub' } };
 
-  it('sweeps a leftover session, launches with the stub engine, injects each command, then kills the session', async () => {
-    const f = cycleFetch(404);
+  it('checks status, launches with the stub engine, injects each command, then kills the session', async () => {
+    const f = cycleFetch(IDLE);
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak a', commands: 2 });
     assert.deepEqual(r, { ok: true, code: 'OK', status: null, step: null, steps: 4 });
     assert.deepEqual(f.calls.map((c) => `${c.method} ${c.path}`), [
-      'DELETE /api/sessions/soak%20a',
+      'GET /api/sessions/soak%20a/status',
       'POST /api/sessions/soak%20a',
       'POST /api/sessions/soak%20a/command',
       'POST /api/sessions/soak%20a/command',
@@ -164,29 +162,52 @@ describe('soak executors — engine session cycle', () => {
     assert.equal(f.calls[1].body.primePrompt, false);
   });
 
-  it('reports a leftover session it cleaned up, as a cycle torn by a crash leaves', async () => {
-    const r = await ex.EXECUTORS['engine.session.cycle'](ctx(cycleFetch(200).fetch), { project: 'soak-a', commands: 1 });
-    assert.equal(r.ok, true);
-    assert.equal(r.preKilled, true);
-  });
-
-  it('reports an unexpected sweep answer and still attempts the cycle', async () => {
-    const f = cycleFetch(500);
+  it('kills a leftover soak-stub session first, as a cycle torn by a crash leaves, and reports it', async () => {
+    const f = cycleFetch(OURS);
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
     assert.equal(r.ok, true);
-    assert.deepEqual([r.preKillStatus, r.preKillCode], [500, 'HTTP_STATUS']);
-    assert.equal(f.calls.length, 4);
+    assert.equal(r.preKilled, true);
+    assert.deepEqual(f.calls.map((c) => c.method), ['GET', 'DELETE', 'POST', 'POST', 'DELETE']);
+  });
+
+  it('never touches a session on any other engine, and launches nothing', async () => {
+    for (const engine of ['claude', 'codex', undefined]) {
+      const f = cycleFetch({ status: 200, body: { active: true, engine } });
+      const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
+      assert.deepEqual([r.ok, r.code, r.step, r.foreignEngine], [false, 'FOREIGN_SESSION', 'status', engine === undefined ? null : engine], String(engine));
+      assert.deepEqual(f.calls.map((c) => c.method), ['GET'], 'only the status read');
+    }
+  });
+
+  it('kills nothing and launches nothing when the status cannot be read', async () => {
+    const f = cycleFetch({ status: 503, body: {} });
+    const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
+    assert.deepEqual([r.ok, r.code, r.status, r.step], [false, 'HTTP_STATUS', 503, 'status']);
+    assert.equal(f.calls.length, 1);
+  });
+
+  it('stops before launching when the leftover kill fails, and treats a 404 there as already gone', async () => {
+    const failed = cycleFetch(OURS, (req) => (req.method === 'DELETE' ? { status: 500, body: {} } : { status: 200, body: {} }));
+    const r = await ex.EXECUTORS['engine.session.cycle'](ctx(failed.fetch), { project: 'soak-a', commands: 1 });
+    assert.deepEqual([r.ok, r.step, r.status], [false, 'pre-kill', 500]);
+    assert.deepEqual(failed.calls.map((c) => c.method), ['GET', 'DELETE']);
+
+    let deletes = 0;
+    const gone = cycleFetch(OURS, (req) => (req.method === 'DELETE' && deletes++ === 0 ? { status: 404, body: {} } : { status: 200, body: {} }));
+    const r2 = await ex.EXECUTORS['engine.session.cycle'](ctx(gone.fetch), { project: 'soak-a', commands: 1 });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.preKilled, undefined);
   });
 
   it('stops without a kill when the launch fails', async () => {
-    const f = cycleFetch(404, () => ({ status: 404, body: {} }));
+    const f = cycleFetch(IDLE, () => ({ status: 404, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 3 });
     assert.equal(r.step, 0);
-    assert.deepEqual(f.calls.map((c) => c.method), ['DELETE', 'POST']);
+    assert.deepEqual(f.calls.map((c) => c.method), ['GET', 'POST']);
   });
 
   it('still kills the session when a command fails, and reports the failing command', async () => {
-    const f = cycleFetch(404, (req) => (req.path.endsWith('/command') && req.body.command === 'soak ping 2' ? { status: 500, body: {} } : { status: 200, body: {} }));
+    const f = cycleFetch(IDLE, (req) => (req.path.endsWith('/command') && req.body.command === 'soak ping 2' ? { status: 500, body: {} } : { status: 200, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 3 });
     assert.deepEqual(r, { ok: false, code: 'HTTP_STATUS', status: 500, step: 2, steps: 5, cleanupFailed: false });
     assert.equal(f.calls[f.calls.length - 1].method, 'DELETE');
@@ -194,14 +215,14 @@ describe('soak executors — engine session cycle', () => {
   });
 
   it('records a failed kill after a failed command as cleanupFailed', async () => {
-    const f = cycleFetch(404, (req) => (req.method === 'POST' && !req.path.endsWith('/command') ? { status: 200, body: {} } : { status: 500, body: {} }));
+    const f = cycleFetch(IDLE, (req) => (req.method === 'POST' && !req.path.endsWith('/command') ? { status: 200, body: {} } : { status: 500, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
     assert.equal(r.step, 1);
     assert.equal(r.cleanupFailed, true);
   });
 
   it('reports a failed kill after a clean cycle at the kill step', async () => {
-    const f = cycleFetch(404, (req) => (req.method === 'DELETE' ? { status: 500, body: {} } : { status: 200, body: {} }));
+    const f = cycleFetch(IDLE, (req) => (req.method === 'DELETE' ? { status: 500, body: {} } : { status: 200, body: {} }));
     const r = await ex.EXECUTORS['engine.session.cycle'](ctx(f.fetch), { project: 'soak-a', commands: 1 });
     assert.deepEqual({ ok: r.ok, step: r.step, steps: r.steps }, { ok: false, step: 2, steps: 3 });
   });

@@ -38,16 +38,17 @@ All notable changes to TangleClaw are documented in this file.
 
 - **A reproducible load-and-fault schedule for the release-candidate soak** (#2020, part of #1949). `node scripts/soak.js plan` builds the schedule, which the soak's evidence names by its digest.
   - **Reproducible.** The same seed and flags give the same schedule and the same sha256 digest.
-  - **Two phases.** A `certifying` schedule can never contain an owned-ttyd restart, since that fails a certification outright. `validate` rejects one even after a hand edit that recomputed the digest. It also holds every schedule to fixed limits: synthetic `soak-` project names, lease ports of 5000 and above, a cap on commands, and floors on the gaps. A hand-edited schedule therefore cannot aim the load at a real project or at TangleClaw's own ports. A `destructive` schedule may contain it.
+  - **Two phases.** A `certifying` schedule can never contain an owned-ttyd restart, since that fails a certification outright. `validate` rejects one even after a hand edit that recomputed the digest. It also holds every schedule to fixed limits: synthetic `soak-` project names, lease ports of 5000 and above, a cap on commands, floors on the gaps, and a cap on the number of events. A hand-edited schedule therefore cannot aim the load at a real project or at TangleClaw's own ports. A `destructive` schedule may contain it.
   - **Recovery windows.** Faults are spaced by at least a quiet window, so the system can recover between them.
   - **`run` executes the API and engine load against the server named by `--api`, and only that server.**
     - It refuses the pane's own TangleClaw in three ways:
       - by spelling: any alias of this machine on the live port, including IPv4-mapped IPv6, a trailing dot and `*.localhost`;
-      - by resolution: a name that resolves to this machine;
+      - by resolution: a name that resolves to this machine, or one that does not resolve at all;
       - by identity: the same running server, according to `/api/server-info`.
-    - If the live install's identity cannot be read, it refuses unless `--allow-unverified-live` is given, and the log records that override.
-    - One driver holds a log at a time.
-    - After downtime it paces overdue events: faults stay a quiet window apart, and there is never a burst.
+    - If the live install's identity cannot be read, it refuses unless `--allow-unverified-live` is given. With no `TANGLECLAW_API` at all, it refuses unless `--no-live-install` is given, which is the soak guest's case. The log records either override.
+    - The log is never rewritten. A torn final line is sealed by appending, and one driver holds a log at a time.
+    - After downtime, stale load is skipped and recorded rather than replayed in a burst. Faults are deferred, never skipped, and stay a quiet window apart.
+    - An engine cycle cleans up only the harness's own leftover `soak-stub` sessions. It never touches a session on another engine.
     - It reads the token from `TANGLECLAW_SERVICE_TOKEN` only.
     - It logs every outcome to an fsynced, owner-only ndjson file.
     - Interrupted, it resumes without running any event twice. An event missed while it was down runs late, and the lateness is recorded.
