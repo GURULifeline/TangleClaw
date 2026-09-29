@@ -36,6 +36,38 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
 ## 2026-09-28 — Every rule is named "Rule #<id>" from its DB id (#2029)
+## 2026-09-27 — Release-candidate certification: state machine, evidence store, runner and PTY counter (#1949 C01)
+
+<!-- prawduct: type=feature | scope=rc-cert-v1 -->
+
+Train 30, C01 (Chunks 01–04). The PM dispatched it over Medusa; the Architect ruled A1–A6 (GitHub errors extend while a failed required check on the candidate hard-fails; `extended` is reversible; a late-adopted runtime SHA is unproven and refuses admission; a server restart extends but any owned-ttyd generation change fails; only an operator passes a run; base `<tangleclawHome>/release-certification/v1/`). The PM authorized Chunk 04 to land in the same commit as the Chunk 03 review fixes (Option A). Plan: `.tangleclaw/plans/1949-c01-rc-certification-state-machine.md` (local, not tracked).
+
+**Problem.** The v5.30.0 release needs a 72-hour soak of one exact candidate SHA, judged mechanically: which time counts, what extends the run, what fails it, and whether the terminals were really used. The judgement was previously a manual runbook check that grepped logs.
+
+**The change.**
+- **Chunk 01: pure state machine** (`lib/release-certification/{codes,state-machine}.js`): closed codes; `admit`/`reduce`/`accept`/`cancel`/`summarize`.
+  - An interval earns time only between two healthy samples from the same runner and the same server process, at most 150 s apart, with wall and monotonic time agreeing. Earned time is capped at the 259,200 s target.
+  - Review begins only on a qualifying interval. `passed` requires `accept --actor`.
+- **Chunk 02: evidence store** (`store.js`, `private-fs.js`, `lockfile.js`): 0700/0600 under any umask, and nothing written through a symlink.
+  - `state.json` is the commit point; samples are appended and fsynced, with torn tails cut. A snapshot is written per transition.
+  - A cross-process lock is reclaimed only when it is provably dead. Recoveries are reported, never silent.
+  - The manifest digest catches an out-of-band edit. It is not protection against the owning user; C02 must publish it to make it binding.
+- **Chunk 03: runner, probes, CLI** (`runner.js`, `probes.js`, `scripts/rc-cert.js`): an external process samples the worktree, `server-info`, the system-health ttyd reading, `pty-activity` and the required GitHub checks (queried per name).
+  - Failures are recorded as closed `diagnostics` codes. A single runner is allowed per candidate, and a stop signal takes effect immediately.
+  - The system-health ttyd `reading` gains `wedged`, `orphanGate` and `pool` as values.
+- **Chunk 04: PTY counter** (`lib/pty-activity.js`, `GET /api/system/pty-activity`): an attach counts on ttyd's `101` for a `/terminal` upgrade; a detach counts on close. The instance id is per process.
+
+**Cross-PR Matrix fixes (Pilot-B2, relayed by the PM).**
+1. The server is now tied to the worktree: `server-info` reports `checkoutId` (sha256 of its checkout's real path), recorded as `worktreeId` at admission. A mismatch is `SERVER_NOT_IN_WORKTREE`, and `isStale` or a disk SHA other than the candidate is `RUNTIME_CHECKOUT_DRIFT`; both are hard fails.
+2. Locks carry a stable machine id, so a macOS host-name change no longer wedges a crashed run's lock.
+3. `start` retries admission while only unknowns block it (an idle server's cold health cache). Off macOS the health row says `applicable: false` and admission refuses at once with `TTYD_NOT_APPLICABLE`.
+4. An empty required-checks list is refused, in the manifest and in the CLI.
+
+**Reviews.** Chunk 01: R-1 blocking (a restart between samples earned time), fixed. Chunk 02: R-1 blocking (lock safety paths untested), fixed, plus the tamper-claim wording corrected. Chunk 03: 2 blocking (endpoint missing, `run` untested), fixed in the Chunk 04 commit. Every verify-resolutions pass came back clean.
+
+**Tests.** `test/release-certification-{state-machine,store,runner}.test.js`, `test/pty-activity.test.js`, and `test/system-health.test.js` extended. Full suite in the pilot checkout: 14,097 pass, 1 skip, 1 fail. The failure is `system-health.test.js:114`, a pre-existing load flake reproduced on base c5c05a70 at the same rate (1/5 passes at load average ~30), so the evidence is recorded as degraded. Not mutation-swept; not yet exercised against a live server (the scratch-server E2E smoke is pending).
+
+## 2026-09-27 — Rule approval compare-and-set: approval ratifies only the text the operator saw (#1053)
 
 <!-- prawduct: type=feature | scope=2029-rule-id-display -->
 
