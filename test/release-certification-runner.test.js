@@ -683,6 +683,10 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     assert.equal(moved.checks, undefined, 'the second commit carries no binding');
     assert.equal(moved.observations.github.state, 'unavailable');
     assert.equal(moved.diagnostics.github, 'host-verdict-seq-moved');
+    assert.equal(moved.isolation, undefined, 'its isolation attestations were bound to the same number, so they go too');
+    assert.deepEqual(moved.observations.isolation, { state: 'unavailable' });
+    assert.equal(moved.diagnostics.isolation, 'host-verdict-seq-moved');
+    assert.ok(samples[1].isolation, 'the first commit keeps its own');
   });
 
   it('never reads GitHub in host-attested mode, and forwards the sample binding to the host', async () => {

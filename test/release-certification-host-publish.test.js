@@ -367,3 +367,50 @@ describe('host relay: the record is created once and proves itself (A51, A54)', 
     assert.ok(res.reasons.includes('FINALIZATION') && res.reasons.includes('RUN_BINDING'), 'a record replayed onto another run');
   });
 });
+
+describe('host relay: a record whose digest was recomputed still has to be true (B7 review R-2, R-5)', () => {
+  it('re-derives the verdict, the boot and the sample set, whatever the record claims', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const reDigested = (over) => { const x = { ...r, ...over }; x.recordDigest = hostPublish.recordDigest(x); return x; };
+    const v = (rec) => hostPublish.verifyRecord(rec, { hostBase, remoteUrl: pub });
+    assert.ok((await v(reDigested({ certified: true }))).reasons.includes('VERDICT'), 'a running run re-digested as certified');
+    assert.ok((await v(reDigested({ state: 'passed' }))).reasons.includes('VERDICT'));
+    assert.ok((await v(reDigested({ canonicalThresholds: !r.canonicalThresholds }))).reasons.includes('VERDICT'));
+    assert.ok((await v(reDigested({ bootId: 'boot-other' }))).reasons.includes('FINALIZATION'));
+    assert.ok((await v(reDigested({ sampleSetDigest: 'f'.repeat(64) }))).reasons.includes('FINALIZATION'));
+  });
+
+  it('fails malformed input instead of throwing', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const v = (rec) => hostPublish.verifyRecord(rec, { hostBase, remoteUrl: pub });
+    assert.deepEqual(await v(null), { ok: false, reasons: ['RECORD_DIGEST'] });
+    assert.deepEqual(await v({ ...r, runId: '../x' }), { ok: false, reasons: ['RECORD_DIGEST'] });
+    const fin = hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID);
+    fs.chmodSync(fin, 0o600);
+    fs.writeFileSync(fin, '{truncated');
+    assert.ok((await v(r)).reasons.includes('FINALIZATION'));
+  });
+
+  it('refuses, and does not throw on, a record under its name that is not a record', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const file = hostPublish.recordPath(hostBase, SHA, fx.RUN_ID, r.oid);
+    fs.chmodSync(file, 0o600);
+    fs.writeFileSync(file, '{partial');
+    await assert.rejects(() => hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub }), (e) => e.code === REFUSAL.RECORD_CONFLICT);
+  });
+});
+
+describe('private-fs: create once, atomically', () => {
+  const privateFs = require('../lib/release-certification/private-fs');
+  it('creates a whole file once, refuses a second, and leaves no temporary file behind', () => {
+    const f = path.join(tmp, 'rec.json');
+    assert.equal(privateFs.createOnceAtomic(f, 'first'), true);
+    assert.equal(privateFs.createOnceAtomic(f, 'second'), false);
+    assert.equal(fs.readFileSync(f, 'utf8'), 'first');
+    assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('rec.json')), ['rec.json']);
+  });
+});

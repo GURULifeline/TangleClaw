@@ -180,8 +180,11 @@ to be able to trust it. That creates two problems:
    and its tree, the sha256 of the admission, the scorecard and the host's finalization file, the
    run id, the manifest digest, the checks source, the boot identity and the digest of the
    committed sample set, with a digest over all of them. `verifyRecord` re-derives each of those
-   from the public remote and the host's finalization; C04 promotion must use it and never trust
-   a record's own fields (A51).
+   from the public remote and the host's finalization, the verdict included (`state`,
+   `canonicalThresholds` and `certified`, from the published scorecard and the finalization), since
+   a record's own digest can be recomputed by anyone; C04 promotion must use it and never trust a
+   record's own fields (A51). The record is written under a temporary name and hard-linked into
+   place, so a crash never leaves a partial record.
 
 13. **A guest's network isolation is attested at admission, at every sample and at
    finalization** (#2020, Architect rulings A43 and A44). The workload a soak runs as must be

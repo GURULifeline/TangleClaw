@@ -77,6 +77,11 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
   - Finalization joins each earning sample's isolation binding and records `bootId` and `sampleSetDigest`.
   - The relay's record is create-once (`record-<runId>-<oid>.json`) and binds the commit, its tree, the admission, scorecard and finalization digests, the boot identity and the sample-set digest. `verifyRecord` re-derives all of them.
   - A test caught a real gap here: a root workload read as malformed (unattested) instead of as a breach, because the validator rejected uid 0. Fixed.
+  - **B7 review (`rev-20260929T161920Z-0ebe1c42`, 0 blocking).**
+    - R-2/R-5: `verifyRecord` trusted the record's verdict fields, so a failed run re-digested as `certified: true` verified. It now re-derives `state`, `canonicalThresholds` and `certified` from the published scorecard and the finalization, and `bootId` and `sampleSetDigest` from the finalization, and fails malformed input instead of throwing.
+    - R-3: records are created through `private-fs#createOnceAtomic` (a temporary file hard-linked into place), so a crash cannot leave a partial record.
+    - R-6: the docs name the files the host actually writes.
+    - R-4: the runner test now asserts the isolation evidence is dropped with a moved verdict.
   - **Process incident:** a full suite ran at `44e768f1` without the PM's quiet-window lease (A40), because the inbox was not read between chunks. It is quarantined as non-evidence. A learning now requires reading the inbox before any gated action.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
