@@ -125,3 +125,18 @@ to be able to trust it. That creates two problems:
   definition. A change to a published shape happens in `scorecard.js`, and all three follow.
 - Times are published as epoch milliseconds in UTC. Human formatting, including the registry
   cards' America/Los_Angeles display, is the reader's job.
+- **`metrics` is created by the publisher, as an orphan branch** (Architect disposition on PR
+  #1975). The publisher's first publish starts from an empty tree, so the branch shares no
+  history with `main`. A branch created in GitHub's UI inherits `main`'s source files, which the
+  path allowlist forbids; once the ruleset prohibits force-push, that violation is permanent. The
+  owner therefore creates the ruleset after the first publish, never the branch itself.
+- **The branch holds regular files only.** A symlink, submodule or executable on `metrics` is
+  refused by the publisher before it is checked out (`METRICS_TREE_UNSAFE`) and flagged by the
+  verifier (`NOT_REGULAR_FILE`), because a clone that checked one out could be pointed at a file
+  outside itself.
+- **C03 must not publish `scorecard/v1.json` until the path allowlist and the verifier admit it.**
+  Point 7 describes the combined file, but today `PUBLISHED_PATH` does not include it, so a
+  producer that wrote it would fail every publish (`WOULD_VIOLATE`) and every branch check.
+- **C04 judges from the admissions and scorecards, never from `index.json`.** The index is a
+  projection the publisher rewrites on every publish; the write-once admission and the
+  per-candidate scorecard and transition log are the authority, and promotion re-verifies them.
