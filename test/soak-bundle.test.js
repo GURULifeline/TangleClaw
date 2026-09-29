@@ -76,13 +76,14 @@ describe('soak bundle — a finished run', () => {
 
     const s = manifest.summary;
     assert.deepEqual([s.schedule.valid, s.schedule.digest, s.schedule.phase], [true, run.schedule.digest, 'certifying']);
-    assert.deepEqual([s.log.readable, s.log.scheduleMatches, s.log.completed, s.log.certification.automaticPassAllowed], [true, true, true, true]);
+    assert.deepEqual([s.log.readable, s.log.scheduleMatches, s.log.ended, s.log.endRecordSeen, s.log.certification.automaticPassAllowed], [true, true, true, true, true]);
     const ran = Object.values(s.log.byKind).reduce((a, k) => a + k.ran, 0);
     const failed = Object.values(s.log.byKind).reduce((a, k) => a + k.failed, 0);
     assert.equal(ran, run.schedule.events.length);
     assert.equal(failed, Math.floor(run.schedule.events.length / 3));
     assert.deepEqual(s.samples.db, { ok: 1, corrupt: 1, unavailable: 0, firstCorrupt: { seq: 1, at: 2, check: 'quick_check' } });
     assert.deepEqual([s.samples.rssKb, s.samples.openFdsMax, s.samples.freeBytesMin, s.samples.healthNot200], [{ min: 100, max: 300 }, 25, 200, 1]);
+    assert.deepEqual([s.samples.count, s.samples.failed, s.samples.firstAt, s.samples.lastAt, s.samples.largestGapMs], [2, 0, 1, 2, 1]);
     assert.equal(s.dbSnapshot, null);
   });
 
@@ -132,6 +133,33 @@ describe('soak bundle — a run that is not evidence', () => {
     const r = bundle.buildBundle({ out: path.join(dir, 'e'), schedule: run.schedulePath, log: run.logPath, samples });
     assert.match(r.summary.samples.unreadable, /line 2/);
     assert.ok(fs.existsSync(path.join(dir, 'e', 'samples.ndjson')));
+  });
+});
+
+describe('soak bundle — sample coverage', () => {
+  it('reports failed samples, the largest gap, and unknown process readings apart from a dead server', async () => {
+    const run = await finishedRun();
+    const samples = path.join(dir, 'samples.ndjson');
+    const ok = (seq, at, alive) => ({ type: 'sample', seq, at, db: { check: 'quick_check', state: 'ok', bytes: 1 }, process: { pid: 1, alive, rssKb: alive ? 10 : null, openFds: null }, disk: { freeBytes: 9, totalBytes: 10 }, health: { status: 200 } });
+    integrity.appendSample(samples, { type: 'header', schema: integrity.SAMPLES_SCHEMA, home: '/h' });
+    integrity.appendSample(samples, ok(0, 1000, true));
+    integrity.appendSample(samples, { type: 'sample-failed', seq: 1, at: 2000, error: 'EIO' });
+    integrity.appendSample(samples, ok(2, 9000, null));
+    integrity.appendSample(samples, ok(3, 10000, false));
+    const r = bundle.buildBundle({ out: path.join(dir, 'e'), schedule: run.schedulePath, log: run.logPath, samples });
+    const s = r.summary.samples;
+    assert.deepEqual([s.count, s.failed, s.firstAt, s.lastAt, s.largestGapMs], [3, 1, 1000, 10000, 7000]);
+    assert.deepEqual([s.processDown, s.processUnknown], [1, 1]);
+  });
+
+  it('copies no sidecar that is a symlink, and names it instead', async () => {
+    const run = await finishedRun();
+    const target = path.join(dir, 'elsewhere');
+    fs.writeFileSync(target, 'x');
+    fs.symlinkSync(target, driver.segmentPath(run.logPath));
+    const r = bundle.buildBundle({ out: path.join(dir, 'e'), schedule: run.schedulePath, log: run.logPath });
+    assert.deepEqual(r.summary.log.sidecarsNotCopied, [path.basename(driver.segmentPath(run.logPath))]);
+    assert.equal(fs.existsSync(path.join(dir, 'e', 'soak-log.ndjson.segment')), false);
   });
 });
 

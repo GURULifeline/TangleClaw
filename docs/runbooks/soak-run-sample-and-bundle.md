@@ -63,8 +63,10 @@ The guest printed `guest ready: …` and you are starting a dry run, a destructi
    directory; never delete an earlier bundle.
 
 8. Read the bundle's summary:
-   `node -p "const s = require('/Volumes/My Shared Files/soak/evidence-$SOAK_SHA/manifest.json').summary; JSON.stringify({log: [s.log.readable, s.log.completed, s.log.scheduleMatches], corrupt: s.samples.db.corrupt, snapshot: s.dbSnapshot.state})"`
-   → Expected: `{"log":[true,true,true],"corrupt":0,"snapshot":"ok"}`.
+   `node -p "const s = require('/Volumes/My Shared Files/soak/evidence-$SOAK_SHA/manifest.json').summary; JSON.stringify({log: [s.log.readable, s.log.ended, s.log.scheduleMatches], samples: [s.samples.failed, s.samples.largestGapMs <= 1200000, Math.round((s.samples.lastAt - s.samples.firstAt) / 3600000)], corrupt: s.samples.db.corrupt, snapshot: s.dbSnapshot.state})"`
+   → Expected: `"log":[true,true,true]`, then `"samples":[0,true,<hours>]` where `<hours>` is at least the
+   schedule's duration (72 for a certifying run), then `"corrupt":0` and `"snapshot":"ok"`. The middle
+   check proves the sampler ran the whole time, never more than two intervals apart.
    → Anything else: the run does not pass as it stands. Keep the bundle, and report the summary on
    #2020. The acceptance gates' default is fail and reset.
 

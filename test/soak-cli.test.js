@@ -622,7 +622,7 @@ describe('soak CLI — sample and bundle', () => {
     assert.equal(res.manifest, path.join(out, 'manifest.json'));
     const manifest = JSON.parse(fs.readFileSync(res.manifest, 'utf8'));
     assert.ok(manifest.files.some((f) => f.path === path.join('db', 'tangleclaw.db')));
-    assert.equal(manifest.summary.log.completed, true);
+    assert.equal(manifest.summary.log.ended, true);
   });
 
   it('bundles without --home anywhere, but snapshots a database only inside the guest', async () => {

@@ -107,10 +107,24 @@ describe('soak integrity — the server process', () => {
     assert.deepEqual(await integrity.processStats(home, procRunner({ rss: 9000, fds: 5 })), { pid: 42, alive: true, rssKb: 9000, openFds: 5 });
   });
 
-  it('reports no process without a pidfile, or when ps finds none', async () => {
-    assert.deepEqual(await integrity.processStats(home, procRunner()), { pid: null, alive: false, rssKb: null, openFds: null });
+  it('reports a gone process as down, and an unreadable one as unknown with its reason', async () => {
+    assert.deepEqual(await integrity.processStats(home, procRunner()), { pid: null, alive: false, rssKb: null, openFds: null, reason: 'no-pidfile' });
     fs.writeFileSync(path.join(home, 'tangleclaw.pid'), JSON.stringify({ pid: 42, writtenAt: Date.now() }));
-    assert.equal((await integrity.processStats(home, procRunner({ psFails: true }))).alive, false);
+    const gone = await integrity.processStats(home, procRunner({ psFails: true }));
+    assert.deepEqual([gone.alive, gone.reason], [false, 'not-running']);
+    const hung = await integrity.processStats(home, async (file) => (file === 'ps' ? { code: null, stdout: '', stderr: '', error: 'timeout' } : { code: 0, stdout: '', stderr: '', error: null }));
+    assert.deepEqual([hung.alive, hung.reason], [null, 'ps-failed:timeout']);
+    const noLsof = await integrity.processStats(home, async (file) => (file === 'ps' ? { code: 0, stdout: '100\n', stderr: '', error: null } : { code: 1, stdout: '', stderr: '', error: '1' }));
+    assert.deepEqual([noLsof.alive, noLsof.rssKb, noLsof.openFds, noLsof.reason], [true, 100, null, 'lsof-failed:1']);
+  });
+
+  it('reads the pidfile exactly as the server writes it', () => {
+    // lib/pidfile.js is the server's writer; the soak reads it independently,
+    // so this pins the two to the same name and format.
+    const pidfile = require('../lib/pidfile');
+    pidfile.write(home);
+    assert.equal(integrity.readServerPid(home), pidfile.readPid(home));
+    assert.equal(integrity.readServerPid(home), process.pid);
   });
 });
 
@@ -176,6 +190,16 @@ describe('soak integrity — the sampler', () => {
     let asked = 0;
     const r = await integrity.runSampler(opts({ count: undefined, shouldStop: () => ++asked > 3 }));
     assert.ok(r.taken >= 1 && r.taken <= 2, JSON.stringify(r));
+  });
+
+  it('records a sample that throws, and keeps sampling', async () => {
+    let n = 0;
+    const flaky = { ...fs, statfsSync: (...a) => { if (n++ === 0) { const e = new Error('io'); e.code = 'EIO'; throw e; } return fs.statfsSync(...a); } };
+    const r = await integrity.runSampler(opts({ count: 2, fs: flaky }));
+    assert.deepEqual(r, { taken: 2, lastSeq: 1 });
+    const read = integrity.readSamples(opts().file);
+    assert.deepEqual(read.samples.map((x) => [x.seq, x.type]), [[0, 'sample-failed'], [1, 'sample']]);
+    assert.equal(read.samples[0].error, 'EIO');
   });
 
   it('records a health failure and a missing process, and carries on', async () => {

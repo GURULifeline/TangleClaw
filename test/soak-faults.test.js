@@ -388,6 +388,13 @@ describe('soak faults — disk pressure', () => {
     assert.ok(!faults.BALLAST_RE.test('ballast-../x.bin'));
   });
 
+  it('records a filesystem that fails while preparing the ballast, instead of throwing', async () => {
+    const broken = { ...withFree(5 * MIB), statfsSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; } };
+    const f = fakeFetch(() => ({ status: 200, body: { startedAt: 'A' } }));
+    const r = await F['fault.disk.pressure'](ctx(f.fetch, { home, fs: broken, limits }));
+    assert.deepEqual([r.code, r.step, r.error], [O.BALLAST_FAILED, 'ballast-prepare', 'EIO']);
+  });
+
   it('refuses a ballast directory that is a symlink', async () => {
     const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'soak-elsewhere-'));
     try {

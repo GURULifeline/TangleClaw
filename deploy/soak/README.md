@@ -384,6 +384,9 @@ node scripts/soak.js sample --home ~/.tangleclaw --api http://127.0.0.1:3102 --o
   small database that takes milliseconds.
 - **The file is `0600`, and one sampler holds it at a time** (`<out>.lock`; `SAMPLER_LOCKED`). A lock
   whose process is gone is taken over.
+- **A sample that fails is recorded (`sample-failed`, with its error), and sampling carries on.** A
+  server whose memory cannot be read (a `ps` that failed or timed out) is recorded as `alive: null`
+  with a `reason`, never as down.
 - **Running it again continues the file:** sequence numbers carry on. A file for another home is
   refused (`SAMPLES_MISMATCH`), and so is one ending in a torn line (`SAMPLES_TORN`).
 - **It runs only in the guest**, admitted like the faults (`LOCAL_CONTROL_REFUSED` otherwise).
@@ -408,8 +411,10 @@ node scripts/soak.js bundle --out <new dir> --schedule s.json --log s.ndjson [--
   the manifest's own sha256. Its `summary` holds:
   - the schedule's validity and digest;
   - the driver's own reading of the log: its disposition, or its refusal;
-  - whether the log belongs to that schedule and completed, with outcomes and failure codes by kind;
-  - the samples' worst readings;
+  - whether the log belongs to that schedule, with outcomes and failure codes by kind. `ended` is the
+    driver's verdict on whether the run finished; `endRecordSeen` is only the summary's own parse,
+    kept for a log the driver refuses;
+  - the samples' coverage (first and last time, largest gap, failed samples) and their worst readings;
   - the snapshot's verdict.
 - **It judges nothing, and never refuses because the run went badly.** A log the driver will not read as
   evidence is still bundled, with the refusal recorded, because that is the run to investigate.
