@@ -11,10 +11,10 @@ const lockfile = require('../lib/release-certification/lockfile');
 const store = require('../lib/release-certification/store');
 const sm = require('../lib/release-certification/state-machine');
 const { STATES, REFUSAL, CertificationError } = require('../lib/release-certification/codes');
+const fx = require('./_release-certification-fixtures');
 
-const SHA = 'a'.repeat(40);
-const GEN = '4242@Sun Sep 27 09:00:00 2026';
-const MIN = 60 * 1000;
+const { SHA, GEN, MIN } = fx;
+
 
 let tmp;
 
@@ -60,30 +60,22 @@ function withUmask(mask, fn) {
   try { fn(); } finally { process.umask(old); }
 }
 
-/** @returns {object} A manifest for the test candidate. */
+/**
+ * A manifest.
+ * @returns {object} Manifest
+ */
 function manifest() {
-  return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
-    worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, host: 'h'
-  });
+  return fx.manifest({ createdAt: 1000, worktreePath: '/tmp/rc-wt' });
 }
 
 /**
- * A sample.
- * @param {number} t - Wall offset ms
- * @param {object} [over] - Observation overrides per probe
+ * A healthy sample; `over` replaces whole probe observations.
+ * @param {number} t - Offset in ms
+ * @param {object} [over] - Probe observations to replace
  * @returns {object} Sample
  */
 function sample(t, over = {}) {
-  const observations = {
-    worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { checkoutId: 'c'.repeat(64), currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
-    ttyd: { managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 1 },
-    github: { state: 'ok', checks: { test: 'success' } },
-    pty: { instance: 's1', attaches: 0, detaches: 0, lastAt: null },
-    ...over
-  };
-  return { wallAt: 1_000_000 + t, monoAt: t, runnerInstance: 'r1', observations };
+  return fx.sample(t, { ...fx.observations(), ...over });
 }
 
 /**

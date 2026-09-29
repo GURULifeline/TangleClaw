@@ -6,15 +6,13 @@ const assert = require('node:assert/strict');
 const sm = require('../lib/release-certification/state-machine');
 const sc = require('../lib/release-certification/scorecard');
 const { STATES } = require('../lib/release-certification/codes');
+const fx = require('./_release-certification-fixtures');
 
-const SHA = 'a'.repeat(40);
-const WTID = 'c'.repeat(64);
+const { SHA, WTID, GEN, MIN, T0 } = fx;
+
 const DIGEST = 'f'.repeat(64);
-const GEN = '4242@Sun Sep 27 09:00:00 2026';
 const WORKTREE = '/Users/secret-operator/private/rc-worktree';
 const HOST = 'secret-host.tail123678.ts.net';
-const MIN = 60 * 1000;
-const T0 = 1_000_000;
 
 /**
  * A manifest carrying recognisable private values.
@@ -22,37 +20,26 @@ const T0 = 1_000_000;
  * @returns {object} Manifest
  */
 function manifest(thresholds) {
-  return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: T0,
-    worktreePath: WORKTREE, worktreeId: WTID, ttydGeneration: GEN, host: HOST, thresholds
-  });
+  return fx.manifest({ worktreePath: WORKTREE, host: HOST, thresholds });
 }
 
 /**
- * Healthy observations with overrides.
+ * Healthy observations.
  * @param {object} [over] - Per-probe overrides
  * @returns {object} Observations
  */
 function obs(over = {}) {
-  const base = {
-    worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { checkoutId: WTID, currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
-    ttyd: { applicable: true, managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 4 },
-    github: { state: 'ok', checks: { test: 'success' } },
-    pty: { instance: 's1', attaches: 0, detaches: 0, lastAt: null }
-  };
-  for (const [k, v] of Object.entries(over)) base[k] = v === null ? null : { ...base[k], ...v };
-  return base;
+  return fx.observations(over, { ttyd: { poolUsed: 4 } });
 }
 
 /**
- * A sample.
+ * A sample carrying a diagnostic, which must never be published.
  * @param {number} t - Offset ms
  * @param {object} [o] - Observations
  * @returns {object} Sample
  */
 function sample(t, o = obs()) {
-  return { wallAt: T0 + t, monoAt: t, runnerInstance: 'r1', observations: o, diagnostics: { server: 'http-401' } };
+  return fx.sample(t, o, { diagnostics: { server: 'http-401' } });
 }
 
 /**

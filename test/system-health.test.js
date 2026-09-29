@@ -46,6 +46,7 @@ function healthyLeak(overrides) {
     pool: { exhausted: false, used: 40, cap: 511, ratio: 0.078 },
     orphans: 1,
     transient: 0,
+    orphanGate: false,
     orphanThreshold: 20,
     ptyThresholdRatio: 0.85,
     wedgeAgeMs: 30 * 1000,
@@ -220,7 +221,7 @@ describe('lib/system-health (#345)', () => {
         generation: '4242@Fri Sep 25 11:28:54 2026',
         sampledAt: '2026-09-25T18:40:00.000Z',
         wedged: 1,
-        orphanGate: null,
+        orphanGate: false,
         pool: { used: 40, cap: 511 },
         binary: null,
         managed: null

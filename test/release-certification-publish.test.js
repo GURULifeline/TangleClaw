@@ -15,13 +15,11 @@ const store = require('../lib/release-certification/store');
 const sm = require('../lib/release-certification/state-machine');
 const sc = require('../lib/release-certification/scorecard');
 const { REFUSAL, STATES, CertificationError } = require('../lib/release-certification/codes');
+const fx = require('./_release-certification-fixtures');
 
-const SHA = 'a'.repeat(40);
-const WTID = 'c'.repeat(64);
-const GEN = '4242@Sun Sep 27 09:00:00 2026';
+const { SHA, WTID, GEN, MIN, T0 } = fx;
+
 const ID = { name: 'Test Operator', email: 'op@example.invalid' };
-const MIN = 60 * 1000;
-const T0 = 1_000_000;
 
 let tmp;
 let remote;
@@ -202,10 +200,7 @@ describe('publisher: git mechanics against a real remote', () => {
  * @returns {object} Manifest
  */
 function manifest() {
-  return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: T0,
-    worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h'
-  });
+  return fx.manifest();
 }
 
 /**
@@ -214,15 +209,7 @@ function manifest() {
  * @returns {object} Observations
  */
 function obs(over = {}) {
-  const b = {
-    worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { checkoutId: WTID, currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
-    ttyd: { applicable: true, managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 1 },
-    github: { state: 'ok', checks: { test: 'success' } },
-    pty: { instance: 's1', attaches: 0, detaches: 0, lastAt: null }
-  };
-  for (const [k, v] of Object.entries(over)) b[k] = v === null ? null : { ...b[k], ...v };
-  return b;
+  return fx.observations(over);
 }
 
 /**

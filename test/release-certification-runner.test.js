@@ -12,12 +12,10 @@ const runnerLib = require('../lib/release-certification/runner');
 const store = require('../lib/release-certification/store');
 const cli = require('../scripts/rc-cert');
 const { STATES, REFUSAL, CertificationError } = require('../lib/release-certification/codes');
+const fx = require('./_release-certification-fixtures');
 
-const SHA = 'a'.repeat(40);
-const GEN = '4242@Sun Sep 27 09:00:00 2026';
-const WTID = 'c'.repeat(64);
-const MIN = 60 * 1000;
-const T0 = 1_000_000;
+const { SHA, GEN, WTID, MIN, T0 } = fx;
+
 
 let tmp;
 
@@ -35,15 +33,7 @@ afterEach(() => {
  * @returns {object} Observations
  */
 function healthy(over = {}) {
-  const base = {
-    worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { checkoutId: WTID, currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500 },
-    ttyd: { applicable: true, managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 2 },
-    github: { state: 'ok', checks: { test: 'success' } },
-    pty: { instance: 's1', attaches: 0, detaches: 0, lastAt: null }
-  };
-  for (const [k, v] of Object.entries(over)) base[k] = v === null ? null : { ...base[k], ...v };
-  return base;
+  return fx.observations(over, { ttyd: { poolUsed: 2 } });
 }
 
 /**

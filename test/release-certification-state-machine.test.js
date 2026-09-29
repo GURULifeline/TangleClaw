@@ -5,11 +5,10 @@ const assert = require('node:assert/strict');
 
 const sm = require('../lib/release-certification/state-machine');
 const { STATES, EXTEND, HARD_FAIL, TRANSITION, REFUSAL, CertificationError } = require('../lib/release-certification/codes');
+const fx = require('./_release-certification-fixtures');
 
-const SHA = 'a'.repeat(40);
-const GEN = '4242@Sun Sep 27 09:00:00 2026';
-const WTID = 'c'.repeat(64);
-const MIN = 60 * 1000;
+const { SHA, GEN, WTID, MIN } = fx;
+
 const HOUR = 60 * MIN;
 
 /**
@@ -18,43 +17,30 @@ const HOUR = 60 * MIN;
  * @returns {object} Manifest
  */
 function manifest(thresholds) {
-  return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
-    worktreePath: '/tmp/rc-wt', worktreeId: WTID, ttydGeneration: GEN, host: 'test-host', thresholds
-  });
+  return fx.manifest({ createdAt: 1000, worktreePath: '/tmp/rc-wt', host: 'test-host', thresholds });
 }
 
 /** Thresholds small enough to reach the target in a few samples. */
 const FAST = { targetQualifiedMs: 3 * MIN, maxIntervalMs: 2 * MIN, ptyMinAttaches: 2, ptyMinDetaches: 2, ptyMinSpanMs: 2 * MIN };
 
 /**
- * Observations that are healthy in every respect, with overrides per probe.
- * @param {object} [over] - Per-probe overrides; a probe set to null is unreachable
+ * Healthy observations with per-probe overrides.
+ * @param {object} [over] - Overrides; null makes a probe unreachable
  * @returns {object} Observations
  */
 function obs(over = {}) {
-  const base = {
-    worktree: { headSha: SHA, detached: true, dirty: false },
-    server: { checkoutId: WTID, currentDiskSha: SHA, isStale: false, startupSha: SHA, shaBaselineSource: 'startup', runningVersion: '5.30.0', startedAt: 500_000 },
-    ttyd: { managed: true, generation: GEN, leakState: 'clear', wedgedCount: 0, orphanGate: false, poolUsed: 3 },
-    github: { state: 'ok', checks: { test: 'success' } },
-    pty: { instance: 'srv-1', attaches: 0, detaches: 0, lastAt: null }
-  };
-  for (const [probe, value] of Object.entries(over)) {
-    base[probe] = value === null ? null : { ...base[probe], ...value };
-  }
-  return base;
+  return fx.observations(over, { server: { startedAt: 500_000 }, ttyd: { poolUsed: 3 }, pty: { instance: 'srv-1' } });
 }
 
 /**
- * A sample. Wall and monotonic time advance together unless told otherwise.
- * @param {number} t - Wall ms offset from the start
+ * A sample taken `t` ms after the manifest's reference time.
+ * @param {number} t - Offset in ms
  * @param {object} [o] - Observations
- * @param {object} [opts] - `{mono, runner}` overrides
+ * @param {{mono?: number, runner?: string}} [opts] - Monotonic reading and runner identity
  * @returns {object} Sample
  */
 function sample(t, o = obs(), opts = {}) {
-  return { wallAt: 1_000_000 + t, monoAt: opts.mono ?? t, runnerInstance: opts.runner ?? 'runner-1', observations: o };
+  return fx.sample(t, o, { monoAt: opts.mono ?? t, runnerInstance: opts.runner ?? 'runner-1' });
 }
 
 /**
