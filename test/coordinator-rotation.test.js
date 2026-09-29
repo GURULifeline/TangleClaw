@@ -1183,8 +1183,19 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal((await rotation.claimRelaunch({ caller: { kind: 'project' }, body: { rotationId: rot.rotationId } }, relaunchDeps())).status, 403);
       const before = launches;
       const early = await rotation.claimRelaunch({ caller: operator, body: { rotationId: rot.rotationId } }, relaunchDeps());
-      assert.equal(early.body.code, 'ROTATION_SESSION_STILL_ACTIVE');
+      assert.equal(early.body.code, 'ROTATION_PRIOR_SESSION_NOT_ENDED', 'the old session is still active: not proven ended');
       assert.equal(launches, before, 'no launch was attempted');
+      // Missing evidence is not an ending either (Architect ruling): stays fenced, nothing launched.
+      const realGet = store.sessions.get;
+      store.sessions.get = (id) => (id === session.id ? null : realGet.call(store.sessions, id));
+      try {
+        const missing = await rotation.claimRelaunch({ caller: operator, body: { rotationId: rot.rotationId } }, relaunchDeps());
+        assert.equal(missing.body.code, 'ROTATION_PRIOR_SESSION_NOT_ENDED');
+      } finally {
+        store.sessions.get = realGet;
+      }
+      assert.equal(launches, before);
+      assert.equal(store.coordinatorRotations.get(rot.rotationId).state, 'fenced');
       const clearRot = await rotation.claimRelaunch({ caller: operator, body: { rotationId: 'rot_none' } }, relaunchDeps());
       assert.equal(clearRot.status, 404);
     });

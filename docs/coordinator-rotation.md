@@ -66,7 +66,10 @@ authority. The database allows one open rotation per project, enforced by a part
   The rotation types nothing into the pane.
   - **While it is `fenced`.** The fence persists across the session's end. The ending session may
     still wrap itself, from its own thread and launch. That is the only action allowed.
-  - **Claim.** Once the old session has ended, the operator makes the **relaunch claim**:
+  - **Claim.** Once the old session's own record shows it ended (`wrapped`, `killed` or
+    `crashed`), the operator makes the **relaunch claim**. A missing or unreadable record is not proof,
+    so the claim is refused with `ROTATION_PRIOR_SESSION_NOT_ENDED` and the rotation stays fenced. The
+    call is:
     `POST /api/tc/rotation/relaunch {rotationId}`. The server launches the successor session and, in
     one compare-and-set, binds the rotation to exactly that new session, launch and control channel.
   - **Rebind.** The replacement is the thread the successor's own channel records. It is never
