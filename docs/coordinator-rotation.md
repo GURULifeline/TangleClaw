@@ -272,8 +272,11 @@ checks are:
 
 - the digest matches the recorded checkpoint;
 - none of the prepare-time inbox messages are still unhandled (mail that arrived later stays queued
-  and does not block). A Medusa listener is required only when the prepare recorded messages; a
-  coordinator that runs without the switchboard is not held for one;
+  and does not block). A Medusa listener is required when the project has the switchboard enabled
+  (`medusaEnabled`; an unreadable config counts as enabled) or when the prepare recorded messages.
+  Prepare also refuses a switchboard coordinator whose listener is down
+  (`409 ROTATION_LISTENER_DOWN`). Only a coordinator that runs without the switchboard, with nothing
+  recorded, is not held for a listener;
 - `control.stateGeneration` is the lane's current control generation, or `null` when there is no
   assignment;
 - for a relaunch, the successor's own launch sequence has been attested READY. Until then the

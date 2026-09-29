@@ -24,7 +24,9 @@
  *   node scripts/rotation-live-check.js post
  *     In the replacement context, from the re-entry turn: CODEX_THREAD_ID is
  *     a DIFFERENT thread from before, equals the rotation's bound replacement
- *     and the channel's recorded thread, and the rotation is reconciling.
+ *     and the channel's recorded thread, and the rotation is reconciling — or
+ *     already active, since the re-entry turn itself tells the coordinator to
+ *     resume, and it may have done so before this phase runs.
  *
  * Each phase prints PASS or FAIL lines and exits non-zero on any FAIL. The
  * resume itself is the coordinator's own `tc rotation resume`, as in real use.
@@ -161,13 +163,13 @@ async function post() {
   check(!!preThread, 'the pre phase recorded the old thread', file);
   check(!!thread && thread !== preThread, 'this context runs in a different thread from before the clear', { before: preThread, now: thread });
   const r = await api('GET', '/api/tc/rotation');
-  const rot = r.body && r.body.rotation;
-  check(!!rot && rot.state === 'reconciling', 'the rotation is reconciling', rot && rot.state);
+  const rot = r.body && (r.body.rotation || r.body.latest);
+  check(!!rot && (rot.state === 'reconciling' || rot.state === 'active'), 'the rotation is reconciling, or already resumed by this context', rot && rot.state);
   check(!!rot && rot.replacementThreadId === thread, 'the rotation bound exactly this thread', rot && rot.replacementThreadId);
   check(!!r.body && !!r.body.binding && r.body.binding.matches, 'the control channel now records this thread', r.body && r.body.binding);
   check(!!rot && rot.priorThreadId === preThread, 'the rotation\'s prior thread is the old one', rot && rot.priorThreadId);
   const stale = await api('POST', '/api/tc/workload', { schema: 'tc.workload/1', state: 'working', clearance: 'do-not-clear', summary: 'live check' });
-  check(stale.status === 201, 'the bound replacement may publish workload while reconciling (201)', stale.status);
+  check(stale.status === 201, 'the bound replacement may publish workload (201)', stale.status);
 }
 
 /**

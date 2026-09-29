@@ -95,6 +95,8 @@ describe('coordinator context rotation (#2032)', () => {
   let clockMs = Date.now();
   /** Whether the session has a Medusa listener. */
   let listening = true;
+  /** Whether the project has the Medusa switchboard enabled. */
+  let medusaOn = true;
   /** What the checkout fingerprint seam observes. */
   let checkout;
   /** A clean checkout on main at HEAD. */
@@ -132,6 +134,7 @@ describe('coordinator context rotation (#2032)', () => {
     typed = [];
     checkout = { ok: true, fingerprint: cleanCheckout() };
     listening = true;
+    medusaOn = true;
     clockMs = Date.now();
     githubState = {};
     launchId = `launch-architect-${++launchN}`;
@@ -218,6 +221,7 @@ describe('coordinator context rotation (#2032)', () => {
     adapterDeps: OURS,
     messages: () => inbox.slice(),
     listening: () => listening,
+    medusaEnabled: () => medusaOn,
     github: async (facts) => githubSeam(facts),
     fingerprint: () => (checkout.ok ? { ok: true, fingerprint: JSON.parse(JSON.stringify(checkout.fingerprint)) } : checkout),
     inject: (_name, command, opts) => {
@@ -769,11 +773,42 @@ describe('coordinator context rotation (#2032)', () => {
     });
 
     it('a coordinator without the switchboard, and nothing recorded to drain, is not held for a listener (LIVE)', async () => {
+      medusaOn = false;
       const rot = await toReconciling();
       workloadReceipt();
       listening = false;
       const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
       assert.equal((await rotation.resume({ access: access(), threadId: NEXT, body }, deps())).status, 200);
+    });
+
+    it('a switchboard coordinator whose listener died is refused at resume even with nothing recorded (RM03 W1)', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      listening = false;
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      const r = await rotation.resume({ access: access(), threadId: NEXT, body }, deps());
+      assert.equal(r.body.code, 'ROTATION_EVIDENCE_MISSING');
+      assert.match(r.body.error, /no Medusa listener/);
+    });
+
+    it('a switchboard coordinator cannot prepare with its listener down; one without the switchboard can', async () => {
+      await serve();
+      channel();
+      listening = false;
+      assert.equal((await prepare()).body.code, 'ROTATION_LISTENER_DOWN');
+      assert.equal(rotation.openRotation(project.id), null);
+      medusaOn = false;
+      assert.equal((await prepare()).status, 201);
+    });
+
+    it('an unreadable project config counts as switchboard-enabled', () => {
+      const realLoad = store.projectConfig.load;
+      store.projectConfig.load = (_p, opts) => { if (opts && opts.onError) opts.onError(new Error('corrupt')); return null; };
+      try {
+        assert.equal(rotation._seams.medusaEnabled('/x'), true);
+      } finally {
+        store.projectConfig.load = realLoad;
+      }
     });
 
     it('a session with no Medusa listener cannot show a drained inbox, so it cannot resume', async () => {

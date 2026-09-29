@@ -4870,7 +4870,8 @@ route('POST', '/api/tc/rotation/prepare', async (req, res, _params, body) => {
 
 // GET /api/tc/rotation — the caller's open rotation, checkpoint included (what
 // the replacement context reconciles against), or `rotation: null` when none
-// is open, with the project's current generation.
+// is open; `latest` is the most recent one in any state, and `generation` the
+// project's current generation.
 route('GET', '/api/tc/rotation', (req, res) => {
   const access = _rotationAccess(req, res);
   if (!access) return;
@@ -4880,6 +4881,9 @@ route('GET', '/api/tc/rotation', (req, res) => {
   const forwardedThread = _engineThread(req);
   return jsonResponse(res, 200, {
     rotation: coordinatorRotation.view(open, { checkpoint: true }),
+    // The most recent rotation whatever its state, so a caller that has just
+    // resumed (or lost a response) can still see where it stands.
+    latest: coordinatorRotation.view(store.coordinatorRotations.latestForProject(access.projectId)),
     generation: store.coordinatorRotations.currentGeneration(access.projectId),
     // Read-only binding evidence for the caller's own launch: the thread tc
     // forwarded beside the one its control channel records. The live-Codex

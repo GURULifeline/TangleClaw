@@ -78,6 +78,9 @@ describe('scripts/rotation-live-check.js (#2032)', () => {
     assert.equal(same.code, 1, 'the same thread as before is not a rotation');
     const unbound = await run('post', { TMPDIR: tmp, CODEX_THREAD_ID: 'new' }, { ...good, rotation: { ...good.rotation, replacementThreadId: 'third' } });
     assert.equal(unbound.code, 1);
+    const alreadyResumed = { rotation: null, latest: { ...good.rotation, state: 'active' }, binding: { matches: true } };
+    const resumed = await run('post', { TMPDIR: tmp, CODEX_THREAD_ID: 'new' }, alreadyResumed);
+    assert.equal(resumed.code, 0, `a context that already resumed passes: ${resumed.stdout}`);
     for (const status of [400, 403, 500]) {
       const refused = await run('post', { TMPDIR: tmp, CODEX_THREAD_ID: 'new' }, good, status);
       assert.equal(refused.code, 1, `a ${status} to the workload write is not a pass`);
