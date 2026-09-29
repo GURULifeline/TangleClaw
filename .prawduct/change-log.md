@@ -136,6 +136,213 @@ Also fixed:
 
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
+## 2026-09-29 — Never certify a soak log whose lock ownership could not be verified (#2025 remediation, #2020 Chunk 2A)
+
+<!-- prawduct: type=bugfix | scope=2020-soak-schedule -->
+
+C2. Implements the Architect ruling on PR #2025 (comment 5880348030): RA2 option (i), RA3, RA4 and O1. RB1 retained. Lease RULE #121 (generation 3); PM dispatch `78adf766`. Started from `272ff56481306a4d73edb3cc93d3770972ac0e24`.
+
+- **Why.** An independent review reproduced a laundering path (V1). A lock that could not be read mid-run was treated as lost. If the lock-lost sidecar could not be written either, the run failed `LOCK_LOST_UNRECORDED`, and once the lock read back naming the dead owner, the next run reclaimed it as an ordinary crash and resumed the log to `ended=true` with no trace. The same held for a lock unreadable at release after `end` was written.
+- **What.**
+  - `acquireLogLock` classifies an ownership failure as `removed`, `replaced` or `unverified` (any read error but `ENOENT`). `release()` never removes a lock it cannot read and reports `unverified`.
+  - `runSchedule` handles `unverified` without a sidecar, a lock removal or a segment close, and refuses `OWNERSHIP_UNVERIFIED`, or attaches `ownershipUnverified` to the run's own error.
+  - Every active-marker exact-owner reclaim records `recoveredFrom.state: "ownership-unverified"`, the already-complete path included, which now appends its `resume` and `lock-reclaimed` records.
+  - An active marker whose owner is provably dead on this host, and whose lock is gone, names someone else, is unparseable or is unreadable at recovery, is condemned. The refusal is written to the bound `<log>.lock-lost` sidecar (`LOG_SEGMENT_UNRECONCILED`, `details.condemned`), so a lock restored later resumes nothing. An owner that may be alive, or is on another host, is refused without condemning, since it may be a run between its release and its segment close. `acquireLogLock` now refuses an unreadable or unparseable lock with `details.lockUnreadable`, instead of throwing a raw `EACCES`.
+  - `readLog` returns `ownership` and a `certification` disposition: no automatic pass, a `fail-reset` default, and the exact evidence (path, bytes, sha256) an Operator acceptance must bind. `acceptanceMatches` gives a judge that check. A run with any unverified segment reports `*-ownership-unverified`, and the CLI exits 5.
+  - O1: `SEGMENT_CLOSE_FAILED` says to start a new log or reset it by hand. `closeSegment` separates a failed unlink (`marker-remains`) from an unlink whose directory fsync failed (`unknown`).
+- **Tests changed by the ruling, not weakened.** An ordinary crash now expects `ownership-unverified` and `*-ownership-unverified` statuses. A lock unreadable at release expects `ownershipUnverified`, not `lockLost`, plus no sidecar and an open segment. A crash between release and marker-clear now reads `LOG_LOCK_LOST`, a permanent refusal, instead of `LOG_SEGMENT_OPEN`. The complete-run result gains `ownershipUnverified: false`.
+- **Tests added (RA4).** Both V1 variants (mid-run with an unwritable directory, and at release), each confirmed to fail against `272ff564`. Also: exact owner and binding (another host's lock, another dead pid, a marker on another host, rewritten log prefix); removed, replaced, unparseable and unreadable-at-recovery locks condemned, with a restored exact-owner lock still refused; a possibly-live owner never condemned; the read/run flags and certification disposition; `acceptanceMatches`; no clean completed status; CLI exit 5; and both O1 cleanup outcomes.
+- **Critic round 1 (`rev-20260929T023053Z-d216c2dc`).**
+  - Blocking, fixed: the old marker was replaced before the `resume` record was durable, so a failure in between (wrong `--schedule`, `LOG_UNREADABLE`, a failed write) released the lock and closed the new marker, and a correct rerun ended `completed`. Now a failure before the recovery is recorded releases and closes nothing, and reports `recoveryPending`, leaving a crash's state for the next exact-owner reclaim. Tests cover the wrong schedule, a damaged log (still refused after a repair, since that rewrites bytes the new marker bound), and an unwritable log. All three fail against `e5d52736`.
+  - Warnings, fixed: suite evidence re-recorded at the new head. The certification judge is named as not built in the README, CHANGELOG and FEATURES, and the README no longer claims a judge enforces the disposition.
+  - Notes: resume wording corrected (a logged event never runs again, but the one in flight at a crash does). A finished run's release-to-unlink crash window and `refuseLiveAddress` against a remote live install were accepted as outside this ruling's scope and reported to the PM.
+- **RM05's reproduction steps** (relayed by the PM, read-only from its VRF packet). Its variant A (lock chmod 000 and directory chmod 500) is the V1 mid-run test. Its variant B (only the directory chmod 000, the lock file untouched) is added as its own test. It fails against `272ff564` and passes now.
+- **TC-RM05 exact-head review of `d32bd752`: NOT GREEN, conditional** (relayed by the PM; the Architect required a bounded final patch). Functional requirements verified.
+  - N1, documented: "refused for good" holds only once the refusal is recorded. When the log's whole directory is unreadable at recovery, or the sidecar write fails, nothing durable remains, so a later exact-owner reclaim resumes the log, still marked ownership-unverified. Stated in the README, CHANGELOG, FEATURES and `_condemnSegment`'s JSDoc.
+  - N2, fixed: with the directory unreadable, `checkLockLost` said the log "has a lock-lost sidecar that cannot be read", though none existed. It now tells the two apart by `stat`ing the entry, which needs only the directory. It names the unreadable directory (`details.directoryUnreadable`) and says whether a sidecar exists is unknown. The code stays `LOG_LOCK_LOST_INVALID`. Tested for both a directory-only failure and an unreadable sidecar file.
+- **Known limit, unchanged (RB1).** Ownership is still checked, then written, with no atomic lock. A lock that became unreadable and then read back cannot be told from one that never changed, which is why every exact-owner resume is marked.
+
+## 2026-09-28 — A reproducible load-and-fault schedule for the release-candidate soak (#2020 Chunk 2A)
+
+<!-- prawduct: type=feature | scope=2020-soak-schedule -->
+
+#2020 Chunk 2, dispatched by the PM over Medusa after the Architect's rulings on the overlap checkpoint (Q1–Q4). This is TC-RM02's slice of #1949 Deliverable 2. C01/C02 (#1962, #1975) and Habitat were not touched.
+
+**The change.**
+- `lib/soak/schedule.js` is pure. It hashes a string seed into a mulberry32 PRNG, draws the load and fault streams separately, and applies a quiet window between faults. The schedule's `digest` is a sha256 of its canonical JSON.
+- `validateSchedule` enforces every rule on any schedule, whoever produced it. That includes the Architect's Q3 ruling: no `fault.ttyd.restart` in a `certifying` schedule, because an owned-ttyd generation change hard-fails C01.
+- `lib/soak/executors.js` implements the `api` and `engine` classes over HTTP. `engine.session.cycle` always kills a session it launched, even after a failed command, so one failure cannot leak a session into the rest of the soak.
+- `lib/soak/driver.js` refuses on `INVALID_SCHEDULE`, `NO_EXECUTOR`, `LIVE_INSTALL_TARGET` and `LOG_MISMATCH`. It appends fsynced ndjson, keeps each event's wall-clock slot and records lateness, and resumes from the log. At this commit it truncated a torn final line; the F7 remediation below replaced that with append-only sealing.
+- `scripts/soak.js` is the `plan` / `validate` / `run` CLI.
+- `deploy/soak/stub-engine/` holds the Q4 stand-in engine, which has no network access.
+
+**Descoped, explicitly:** the `browser` and `fault` executors. They act on processes inside the guest, so they can be neither verified nor safely run until Chunk 1's guest exists. `run` refuses them (`NO_EXECUTOR`) rather than skipping them. They need a follow-on dispatch.
+
+**Architect ruling (2026-09-28, via the PM) on the items below:**
+- Nothing is dropped from #2020. This branch is **Chunk 2A**, the core.
+- Plans and switchboard load, and the wrap and switchboard engine journeys, are a mandatory **Chunk 2B**.
+- The exact-owned synthetic `soak-*` repos with local bare origins are mandatory **Chunk 1** guest provisioning.
+- Both are required before the first guest dry run, and each is dispatched separately.
+
+**Also descoped, and not declared until the cumulative Critic `rev-20260928T185141Z-f04421bb` caught it (BLOCKING).** These are Chunk 2 items from the plan that were neither built nor listed. Nobody had ruled on them; they are pending the PM's ruling, now requested. They are recorded in the plan (§4), the README status block and the CHANGELOG:
+- API load against **plans and the switchboard**. Built: health, server-info, projects, ports.
+- Stub-engine sessions exercising **wrap and the switchboard**. Built: launch, commands, kill.
+- **Synthetic repos with a local bare origin**. The README makes existing `soak-*` projects a prerequisite of the target instead; provisioning fits with the Chunk 1 guest.
+
+**Verification.**
+- New suites: `test/soak-{schedule,driver,executors,cli,stub-engine}.test.js`.
+- Baseline suite on `origin/main` 69fc2253: green, with the one ledgered skip.
+- Real-process smoke against a throwaway local HTTP server:
+  - server hit counts matched the planned counts;
+  - a rerun was a no-op;
+  - the live `TANGLECLAW_API` was refused before any request.
+- **Not verified:** the executors against a real TangleClaw server with the stub engine installed. That needs the guest, and the first dry run is where it happens.
+
+**Critic review `rev-20260928T175410Z-bba5dd13` (cumulative, `222a8ee1`): 0 blocking, 3 warnings.**
+- *Guard bypass: fixed.* `refuseLiveTarget` compared origins only, so `127.0.0.1`, `[::1]`, the hostname or MagicDNS name, or the other scheme on the live port got through. It now refuses any local alias of the live port.
+  - A new `refuseSameInstall` also refuses a target whose `/api/server-info` reports the same `startedAt`/`startupSha`. That catches a proxy route that no address check can see.
+  - Verified read-only against the live install: every alias was refused.
+  - The live install's Caddy route on :8443 answers `401` because it is login-gated and this install has no service token. There the identity check reports `IDENTITY_UNCHECKED` and does not refuse. That is harmless: the same `401` would answer every load request, so nothing could be written.
+- *Event params: fixed.* `validateSchedule` never checked event params. It now rejects anything `_taskParams` could not have produced (`EVENT_PARAMS`), and tamper tests cover each case.
+- *No suite evidence: resolved.* The suite ran on the fix commit and its result was recorded.
+- **The Critic's notes, not rated as findings:**
+  - A resumed run fires overdue events back to back, which would bunch faults. That is for the fault-executor follow-on to decide, and it is recorded in the handoff notes.
+  - The target's projects and delete-password prerequisites are now stated in the README.
+
+**Independent review by TC-RM03 at `b852888b`: NOT GREEN, 4 blocking and 4 low.**
+- The PM and the Architect dispatched all eight findings, with architectural requirements, as one bounded batch.
+- The intermediate commit `c491995c` was written before those requirements arrived, and was never handed over for review.
+- The commit after it aligns every finding to them:
+- *F1: fixed.* `LIMITS` holds the params to fixed bounds, so validation no longer trusts params a hand edit also controls: synthetic `soak-` names, lease ports of 5000 and above, a cap on commands, and floors on the gaps. New tests tamper with params, events and digest together.
+- *F2: fixed.*
+  - `canonicalHost` unwraps IPv4-mapped forms, strips trailing dots and treats `*.localhost` as loopback.
+  - `refuseLiveResolved` refuses a name that resolves to this machine, and fails closed on one that does not resolve (`TARGET_UNRESOLVED`).
+  - Verified read-only against the live install: all of TC-RM03's spellings were refused. `localtest.me` was refused on resolution to `::1`.
+- *F3: fixed.* An unreadable live identity refuses (`LIVE_IDENTITY_UNREADABLE`) unless `--allow-unverified-live` is given. The log header records that override, it is tested, and it is never passed on the operator's behalf.
+- *F4: fixed.*
+  - Stale load, more than `STALE_LOAD_MS` late, is skipped and recorded as `SKIPPED_STALE`.
+  - Faults are deferred, never skipped. They keep `faultQuietMs` from the previous executed fault, including one read back from the log after a restart, and all of them drain before the end record.
+  - Other overdue load is spaced by `CATCH_UP_GAP_MS`.
+  - The restart test was confirmed to fail with the log read-back removed.
+- *F5: fixed.* The engine cycle reads session status first:
+  - it kills only a leftover `soak-stub` session;
+  - it never touches another engine's session (`FOREIGN_SESSION`);
+  - it kills nothing when the status is unreadable.
+  - The server's `404`/`200` answers were checked against `server.js` and `sessions.killSession`.
+- *F6: fixed as the Architect required.* With no `TANGLECLAW_API`, `run` refuses (`GUARD_CONTEXT_ABSENT`) unless `--no-live-install` is given.
+  - That is the guest's case, and the override is recorded in the header.
+  - Passing it while `TANGLECLAW_API` is set is a usage error.
+  - My earlier objection, that a fallback would refuse the guest's own localhost, is answered by the override being explicit rather than a fallback.
+- *F7: fixed.*
+  - `readLog` is read-only.
+  - `sealTornTail` closes a torn tail by appending a newline and a seal record, so no byte of evidence is rewritten.
+  - A malformed line is accepted only when a seal directly follows it.
+  - `acquireLogLock` gives one driver per log, reclaims only a dead holder on this host, and logs the reclaim. An empty or unreadable lock fails safe.
+  - A header without a real `startEpochMs` is refused.
+- *F8: fixed.* There are floors on the gaps, and an absolute cap of 300,000 events, enforced while generating and in validation.
+- **Cumulative Critic `rev-20260928T182655Z-286f32cd` at `df6b7346`: 0 blocking, 3 warnings, 5 notes.** Fixed in the next commit:
+  - *W1:* a deleted `faultQuietMs` validated, because it was filled with its default, but the driver read it raw, which switched spacing off. Params must now be written out in full canonical form, and the driver reads through the normalizer.
+  - *W2:* when `TANGLECLAW_API` names this machine by a Tailscale or LAN name that is not its hostname, `127.0.0.1` on the live port passed both address checks. The live name is now resolved too, and an unresolvable live name counts as local.
+  - *W3:* Ctrl-C waited out a whole deferred-fault window. Waits are now polled every second, and the first signal prints a `stopping` line.
+  - *Notes:* an executor's result can no longer overwrite `type`, `index`, `kind` or `startedAt`. An unparseable `TANGLECLAW_API` is refused with `GUARD_CONTEXT_ABSENT` rather than a stack trace. Two doc contradictions were corrected.
+  - *Note accepted:* a narrow race in stale-lock reclaim, where two drivers start at the same moment on a dead holder's lock. Closing it needs an atomic compare-and-swap that the filesystem does not offer portably. It needs a crash plus two simultaneous operator starts on one log, and a later `readLog` of a doubly-written log would show it.
+  - The W2 and W3 regression tests were confirmed to fail with their fixes reverted.
+- **TC-RM03 re-review at `2d9deff9`: F1–F8 all verified fixed. NOT GREEN on one blocker, R1.** The final dispatch (PM, matching the Architect) made R1, L1, L2 and L3 blocking and accepted L4:
+  - *R1: fixed.* Every resumed segment appends and fsyncs a `resume` record before any resumed work. It carries the segment's `guard` results (live API, target, checked address, identity outcome), its overrides and `resumedFrom`. A fresh log's header carries the same `guard` results.
+    - Override keys cannot overwrite the fixed fields.
+    - CLI resume tests cover both flags and a no-override segment. With the record removed, all five new tests fail.
+    - Real-process reproduction of TC-RM03's probe: a guarded segment stopped by SIGINT, then resumed with `--no-live-install`. The `resume` record carries the override.
+  - *L1: fixed.* A certifying schedule's `faultQuietMs` must be at least 60,000 ms. A hand edit to 0 with a recomputed digest is `PARAMS`. A destructive schedule may still use 0.
+  - *L2: fixed.* The stale-lock reclaim now has a single winner.
+    - A reclaimer must win `mkdir` of `<log>.lock.reclaim`.
+    - It re-reads the lock under that mutex and replaces it only if it is still the same dead holder.
+    - It replaces it by writing a temp file and doing an atomic `rename`. The first version removed then created, and the concurrency test caught a process on its ordinary first attempt taking the lock in that gap (about 1 run in 25). The rename closes it.
+    - The concurrency test holds eight processes just after their stale check (a test-only hook), so they all reach the reclaim together. It fails 5 of 5 against the old remove-then-create reclaim and passes 12 of 12 against the fix.
+    - `release` never removes a lock it does not hold.
+  - *L3: fixed.* With `TANGLECLAW_API` set, `--api` must be an IP literal (`TARGET_NOT_IP_LITERAL`), so the target is never resolved and there is no check-to-connect window to rebind. A test with a rebinding resolver asserts the target is never looked up. The live name is still resolved, to decide whether the live install is local.
+    - Verified read-only against the live install: `localtest.me` and the MagicDNS name are refused unresolved, `127.0.0.1` and `[::ffff:127.0.0.1]` on the live port are refused, and a guest IP is allowed.
+  - *L4: accepted and documented.* A deferred fault can make queued load stale, and that load is skipped and logged.
+  - *Cumulative Critic `rev-20260928T185141Z-f04421bb` at `3a9f8005`:*
+    - **1 blocking:** the silent descope above, now declared everywhere it applies.
+    - *W2 fixed:* a torn line that was a complete, valid record, missing only its newline, parsed as a record, so its seal was refused as stray and the log could never resume again. `readLog` now identifies a fragment by the seal that follows it, before parsing. There is a regression test, which fails on the old reader.
+    - *W3 fixed:* `appendRecord` and `sealTornTail` ignored partial `writeSync` results, so a nearly full disk could leave an unrepairable partial record mid-log. Both now use `writeAll`, which loops, or throws `ESHORTWRITE` when a write makes no progress. Tested.
+    - *Notes:* the driver header and the CHANGELOG resume wording are corrected. Splitting `driver.js` into guard, log and loop modules is accepted and left for when the fault executors land.
+  - *Verify-resolutions `rev-20260928T185604Z-c489e612` at `a42b1d1a`:* R-1 and R-3 were resolved. R-2 was half-resolved: a crash that tore the SEAL's own write still left the log unresumable, because the fragment became a complete, unsealed line and the half-written seal became the torn tail. Fixed:
+    - A seal now binds a byte RANGE, from the start of the damage up to its own separator. It is found by its start offset, however many lines the range spans.
+    - Unsealed damage is accepted only as the very end of the log, where it is the pending region the next run seals.
+    - A regression test cuts `sealTornTail`'s write at every byte and requires each resulting log to resume and complete. It fails on the `a42b1d1a` reader.
+    - The observations on CHANGELOG wording (fixed) and on the plan being gitignored (accepted, since the tracked records carry the descope) are disposed of.
+  - *Verify-resolutions `rev-20260928T190033Z-92086e9a` at `f109c34e`:* R-2 was still open for one cut. The fragment was a complete, valid record, and the crash cut only the seal's trailing newline. That resumed once, then a later read refused the log, because a second seal landed on top of the first.
+    - **Fixed at the root.** A torn tail that is itself a complete seal matching the damage right before it is accepted as a seal, and the run appends just its newline (`finishSeal`, via `appendRaw`). No seal ever lands on another seal.
+    - The dead `restIsDamage` clause is dropped.
+    - **Tests now enumerate the threat, not the reported case.** Both fragment kinds, a record cut mid-way and a complete record missing only its newline, are resumed with the seal cut at every byte. A two-level test cuts a second seal too. Each case must read back identically twice.
+    - The complete-record test fails on the `f109c34e` reader.
+  - *Verify-resolutions `rev-20260928T190622Z-463e228b` at `11a055e7`:* R-2 is resolved. Its three observations are folded into the final commit:
+    - the seal-cut tests require `completed` and check that each event is on record exactly once, at every cut;
+    - `readLog`'s JSDoc names `finishSeal`.
+  - **TC-RM03 final verification of `911a5f73`: R1, L1, L2, L3 and L5 verified. NOT GREEN on R2.** Dispatched by the PM with the Architect's specifics:
+    - *R2: fixed.* Every soak fetch followed redirects, so an IP-literal target could answer 307 and have the load replayed, method and body included, onto the live install after every guard passed. TC-RM03 reproduced it with local decoys.
+      - Both fetch call sites now pass `redirect: 'manual'`. A 3xx from the load is `REDIRECT_REFUSED`, with its `location`. A 3xx from an identity probe counts as unreadable, so the live side fails closed.
+      - Tests use real local HTTP servers, one per code (301, 302, 303, 307, 308), plus a target whose identity endpoint itself redirects. Each asserts the live stand-in receives nothing but its own identity probe.
+      - A structural test pins every fetch call site to `redirect: 'manual'`.
+      - With the option removed, all six real-server tests fail and the live stand-in receives the load.
+    - *O2: fixed.* `release` reports a lock that vanished or changed hands instead of throwing. A clean run then ends with `LOCK_LOST`, carrying the result. A run that already failed throws its own error, with `lockLost` attached, never masked.
+    - *Verify-resolutions `rev-20260928T192614Z-f110475b` at `fcef14de`:* clean. Its observation was a real (if unlikely) breach of the "never masked" requirement: a lock-file read error other than ENOENT at release, such as EIO or EPERM, still threw and replaced the run's own error. `release` now never throws. Any read or remove failure becomes a lost lock with its reason, and tests cover both the release and the primary-error path.
+    - **TC-RM03 final verification of `9309bae4`: R2 and O2 verified. O2b was ruled BLOCKING by the Architect:** the `end` record was durable before release found the lock lost, so the log read as a clean run and a rerun said `already-complete`. The fix follows the Architect's sidecar design, dispatched by the PM:
+      - the lock exposes `owned()`, and the run re-checks it before every log append (so the check just before `end` is exact) and before every executor event. A lock that cannot be read counts as lost;
+      - on loss, nothing more is appended to the log (no event, no `end`, no loss record) and the run never resumes;
+      - `writeLockLostSidecar` creates a fail-only `<log>.lock-lost` sidecar atomically (temp file, fsync, a hard link that never overwrites, then a directory fsync). It binds the absolute log path, the log's size and sha256 at the loss, the expected holder and the observed holder. If it cannot be written, the run reports `LOCK_LOST_UNRECORDED`;
+      - `checkLockLost` runs first in `readLog` and before `runSchedule` takes the lock. A binding sidecar is `LOG_LOCK_LOST`; a tampered, mismatched, malformed or unreadable one is `LOG_LOCK_LOST_INVALID`. Both refuse;
+      - a lock still owned but not removable is `LOCK_RELEASE_FAILED`, distinct from loss, with no sidecar and the log intact;
+      - primary-error precedence is kept, with the recorded loss attached as `lockLost`.
+      - Tests cover: loss during an event (that event and `end` are unwritten); loss exactly before `end`; rerun refused, taking no lock; five kinds of sidecar tamper; a log cut back after the loss; `LOCK_LOST_UNRECORDED` via an unwritable directory; primary precedence; and `LOCK_RELEASE_FAILED`.
+      - Mutation checks: removing the pre-append check fails both loss tests, and removing the reader check fails the rerun and tamper tests. The loss-during-event test first keyed its trigger on the event kind, which event 0 shared, and passed vacuously. Its trigger is now the second executor call.
+    - **TC-RM03 final verification of `79697d96`: GREEN.** The Architect then promoted residual **RA to a final blocker** and accepted RB. The PM dispatched RA and closed PR #2025 until it is done.
+      - *RA:* a lock lost AND a sidecar that could not be written let a later run, once the directory was writable again, resume and complete. The log then read clean. My earlier argument, that a marker cannot tell that from a crash, was wrong. The lock state tells them apart: a crash leaves the marker and the old lock naming the same dead owner, while an unrecorded loss leaves the marker with the lock absent, replaced or unreadable.
+      - **The fix:**
+        - `openSegment` durably writes `<log>.segment` before any work, bound to the log path, the owner, and the log's size and sha256 at the start.
+        - `closeSegment` removes it only after every append is fsynced and exact-owner release succeeds.
+        - **Graceful stop, as ruled by the Architect (refining my first interpretation, which just cleared the marker):**
+          - under exact ownership, a `stop` record is appended and fsynced;
+          - `stopSegment` atomically transitions the marker to `stopped-clean`, bound to the whole log as it stands;
+          - then the lock is released and the marker is cleaned up.
+          - A leftover valid `stopped-clean` marker resumes even with no lock, recorded as `recoveredFrom.state: 'stopped-clean'`.
+          - A loss before the stop commits writes neither the stop record nor the transition, since both are behind the ownership check.
+        - Before work, `runSchedule` reconciles a leftover marker. It resumes only when the stale lock `acquireLogLock` reclaimed names exactly the marker's owner, a same-host process that is dead. It records `recoveredFrom` in the new segment's header or resume record, under the new lock. Otherwise it refuses with `LOG_SEGMENT_UNRECONCILED` and releases the lock it took.
+        - `readLog` refuses an open segment (`LOG_SEGMENT_OPEN`) unless the caller owns it. A tampered or mismatched marker is `LOG_SEGMENT_INVALID`.
+      - **Tests:**
+        - the double fault stays condemned: no sidecar, the marker persists, the rerun is refused and runs nothing, and the log never reads complete;
+        - an ordinary dead-owner crash resumes, with `recoveredFrom` recorded;
+        - a crash between `end` and release reconciles to `already-complete`;
+        - a crash between release and marker-clear is refused, and so is a different old owner;
+        - five kinds of marker tamper are refused;
+        - readers are refused mid-run;
+        - a graceful stop closes the segment;
+        - the stop protocol: stopped-clean at release, then cleanup, then resume; a crash after release but before cleanup resumes with no lock; a judge refuses a leftover stopped-clean marker; four stopped-clean tampers are refused, including a byte appended after the stop; a loss before the stop commit writes neither the stop record nor the transition.
+      - **Mutation checks:** each of these fails the tests that pin it: removing the owner match, the reader refusal, the keep-open-on-loss rule, the stopped-clean transition, the whole-log binding, or the ownership check on the stop append.
+      - *Verify-resolutions `rev-20260928T201939Z-90bb23d6` at `55181dcb`:* clean. Two observations were fixed because they touch the stated primary-error rule:
+        - `closeSegment` failing no longer replaces the run's error. A failed run carries `segmentCloseFailed`, and a clean run fails with `SEGMENT_CLOSE_FAILED`. The marker stays, so the log stays refused.
+        - A reconcile refusal now carries how the lock release went (`lockRelease`).
+        - All three cases are tested.
+      - *RB* (the check-then-write window) is accepted and documented as a known limit.
+      - The carried root-skip is added to both chmod-based tests.
+    - *O1: accepted and documented* as a known limit. The log is unsigned, so seals detect damage, not forgery.
+    - *O3: confirmed.* Separate crashes, each exactly sealed, are accepted, and two seals on one region are refused.
+  - *L5: fixed.* TC-RM03's addendum found that a seal was accepted after any malformed line and never checked against it. The Architect made it required.
+    - `readLog` now reads bytes. A seal must bind the fragment immediately before it by byte offset, length and sha256.
+    - Refused: a mismatched or unbound seal, a fragment altered after sealing, a stray seal, a second malformed line under one seal, and an empty line.
+    - Eight adversarial tests cover these. Five of them fail with the binding check removed; the other three are caught by separate checks.
+    - *Interpretation, stated to the PM and the Architect:* separate crashes, each sealed to its own fragment, still resume (tested with two). Refusing any log with two torn writes would make a 72-hour soak unrecoverable after its second crash.
+- **Real-process smoke, run guest-style with no `TANGLECLAW_API`:**
+  - without the flag, `run` refused with `GUARD_CONTEXT_ABSENT`;
+  - with `--no-live-install` it completed, and the header recorded the override;
+  - each engine cycle read status first;
+  - the lock was released.
+
+**Bugs the tests caught while building:**
+- The stub answered lines that `readline` had buffered after `/exit`.
+- A fake hung request let the event loop exit, because `AbortSignal.timeout`'s timer is unref'd.
+
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
 
 <!-- prawduct: type=bugfix | scope=2013-session-rules-authz -->
