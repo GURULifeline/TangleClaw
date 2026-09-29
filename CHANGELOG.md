@@ -56,6 +56,41 @@ All notable changes to TangleClaw are documented in this file.
     - Interrupted, it resumes without running any logged event twice. Only an event in flight at a crash runs again. Ctrl-C takes effect within a second, even during a long wait.
   - **The engine load uses a network-free stub engine** (`deploy/soak/stub-engine/`), because the soak guest has no egress and no vendor credentials. Real-vendor engine behaviour is outside this soak.
   - **Not built yet:** the browser and fault executors, the isolated guest, the evidence bundle, and the certification judge. Until the judge exists, only `run`'s exit 5 acts on an ownership-unverified disposition. Until the executors exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently. This is Chunk 2A, the core. Chunk 2B (API load against plans and the switchboard, and engine sessions that exercise wrap and the switchboard) and the Chunk 1 generation of the synthetic `soak-*` repos are both required before the first guest dry run. Until then, the repos must already exist on the target.
+- **The soak guest's definition, and the synthetic `soak-*` repos it runs against** (#2020 Chunk 1, part of #1949). This builds the Chunk 1 part that the Chunk 2A entry above lists as not built yet.
+  - **`node scripts/soak.js repos --root <dir> --origins <dir>` creates the synthetic projects** (`soak-a`, `soak-b`, `soak-c` by default, held to the schedule's own naming rules). Each is a git repo with a bare origin on the local filesystem, never a network remote.
+    - **Each repo's first commit has the same SHA on every machine and every run.** It is built from a fixed tree, author, date and message, and the operator's git config, environment and hooks are kept out. The SHA is computed independently of git and checked, so the evidence can name exactly which repos a soak ran against. The output carries a digest of the set.
+    - **It touches only repos it made.** Each repo and its origin carry a `soak.owner` marker. A file, an empty directory, a repo with another marker or remote, or one missing its seed commit is refused (`NOT_OWNED`, exit 3) and left alone. Every path is checked before anything is written, so a refusal creates nothing.
+    - **Running it again changes nothing** and reports each repo `present`, with `pristine` showing whether it has moved past its seed. Each repo is built in a staging directory and renamed into place, so a crash cannot leave a half-made repo behind. A work repo lost after its origin survived is rebuilt from that origin.
+    - The seed includes the project's `.tangleclaw/project.json` naming the `soak-stub` engine, and a `CHANGELOG.md`, so attaching the project to TangleClaw adds nothing to its work tree.
+  - **`deploy/soak/guest/` holds the guest as files.**
+    - `guest.conf`: the pinned VM settings. Holds no secrets.
+    - `pf/soak-deny.conf`: a default-deny network profile.
+      - Loopback is open.
+      - SSH in from the host is allowed, and so is DHCP (port 68 to 67) with the configured DHCP server, which must match the guest's lease. It is never assumed to be the host.
+      - Both are allowed on the guest interface only. Nothing else goes in or out.
+    - `host-provision.sh`: prints the tart commands.
+      - Creating a VM is an operator-only host action, so it runs them only with both `--execute` and `SOAK_OPERATOR_APPROVED=1`.
+      - It refuses to reuse an existing VM.
+      - It first checks that its own checkout can be trusted: `host-provision.sh`, `guest.conf` and every directory above them.
+      - It shares one dedicated directory, `/Users/Shared/tc-soak-share` by default. The share must be owned by the operator, closed to group and others, and empty when a guest is created. It refuses `/`, `$HOME`, anything containing `$HOME`, or anything inside it, comparing real paths so `..` or a symlink can't slip one through.
+    - `guest-setup.sh`: run inside the guest.
+      - **Checkout trust comes first.** In every mode, before its config is read, it checks every file the admin sources, loads, installs or runs, and every directory above them up to `/`:
+        - each must be a plain file or directory, with no symlink or ambiguous path;
+        - each must be owned by root or the admin, and not writable by group or others, with no exception;
+        - once the workload user is known, a check run as that user must fail to write any of them.
+        - So the checkout lives in a dedicated root- or admin-owned hierarchy such as `/opt/tangleclaw-soak`.
+      - It creates a dedicated workload user with no admin rights and no sudo, and refuses an existing account that has either or whose identity conflicts. `--bootstrap-user` does only that, so a fresh guest can start TangleClaw as that user before the rest of setup.
+      - It attests the guest from two planes. Each prints one JSON line (`tc.soak-guest-attest/v1`) built by a real JSON encoder, carrying the boot identity and the sha256 of the script, the pf profile and `guest.conf`:
+        - `--verify-admin` repeats the trust check and the workload account's identity checks, with sudo judged strictly by exit status after two positive controls (the admin's sudo works; the same policy query says yes for the admin). It then checks:
+          - pf is enabled with exactly the profile's rules, compared with pfctl's own parse, reporting both digests;
+          - the guest interface and the SSH management path;
+          - the TangleClaw process, bound to the workload user by kernel evidence: one listening pid, its uid, and a canonical node executable;
+          - the DHCP lease, normalized to epochs. It fails when the lease is missing, inconsistent or expired, when renewal does not come strictly before rebinding and rebinding before expiry, or when less lease remains than the next sample interval plus a margin.
+        - `--verify-workload` runs as the workload user and proves that sudo and pfctl are refused to it, that loopback works, and that nothing outside answers over IPv4, IPv6 or DNS over UDP. The probes target well-formed public addresses, judged by node's IP parser and a block list, and are recorded.
+      - Every input is validated before pfctl sees it, and every probe has a timeout; a hang is a failure.
+      - Then it installs the stub engine, creates the repos as the workload user, and attaches them through the guest's own TangleClaw, which must run as the workload user.
+      - It refuses to run outside a macOS VM or in a live TangleClaw pane.
+  - **Not in this chunk:** installing and starting the pinned release candidate inside the guest (the operator runbook, a later chunk). Also the runner's side of attestation: running both verifiers at admission, at every sample and at finalization, and restarting the clock after a reboot. Also the dry run, and everything else the Chunk 2A entry lists.
 
 - **A finished session can retire itself headlessly with `tc finalize`** (#2027). `tc finalize --reason "<why>"` (`POST /api/sessions/:project/finalize`) ends a session with no wrap drawer, no wrap pipeline and no git.
   - **What it does:**

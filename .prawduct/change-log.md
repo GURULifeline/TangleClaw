@@ -35,6 +35,120 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-29 — Soak guest definition and synthetic `soak-*` repos (#2020 Chunk 1)
+
+<!-- prawduct: type=feature | scope=2020-chunk1-soak-guest-repos -->
+
+#2020 Chunk 1. The PM dispatched it over Medusa under Rule #124 (RM-LEASE TC-RM07 generation 3). Chunk 1 was reassigned from TC-RM02 on #2020 on 2026-09-29. Plan: `.tangleclaw/plans/2020-chunk1-soak-guest-repos.md` (local, not tracked).
+
+**Why.** The soak's `run` needs the synthetic projects to exist on the target, and the Architect ruling made generating them mandatory before the dry run. There was also no guest definition and no default-deny network profile.
+
+**The change.**
+- `lib/soak/repos.js` and `soak.js repos` create each `soak-*` repo with a local bare origin.
+  - Deterministic seed commit: the SHA is also computed without git and checked.
+  - Exact ownership: a `soak.owner` marker in both repos' config, plus the committed marker file.
+  - Every path is inspected before anything is written.
+  - Each repo is built in staging and renamed into place, origin first.
+  - Running it again is a no-op.
+- `deploy/soak/guest/`:
+  - `guest.conf`;
+  - `pf/soak-deny.conf`;
+  - `host-provision.sh`: dry run unless `--execute` and `SOAK_OPERATOR_APPROVED=1`;
+  - `guest-setup.sh`: in the guest only; loads pf and proves the loaded ruleset, working loopback, and no egress over IPv4, IPv6 or UDP DNS (Architect A38 refinement), installs the stub, creates the repos and attaches them.
+
+**Decisions** (recorded in the plan):
+- pf allows inbound SSH from the host, because the requirement is default-deny, not zero ingress.
+- Installing and starting the pinned RC in the guest is left to the runbook chunk.
+- Attach uses the dashboard client header while the guest's gate is down, and refuses when it is up.
+
+**Tests.** `test/soak-repos.test.js`, all in temp directories:
+- seed determinism across roots, and against the independent computation;
+- idempotency, checked against a snapshot of path, size and mtime;
+- each case that is not owned;
+- rebuilding from the origin;
+- immunity to `GIT_*` in the caller's environment;
+- the CLI's exit codes.
+
+`test/soak-guest.test.js` uses fake tart, sudo and sysctl, so no host action can run:
+- the dry run by default, and the approval gate;
+- refusing an existing VM, and refusing to share `$HOME` or `/`;
+- the exact pf rules, and no secrets in the config;
+- guest-setup refusing in a live pane, outside macOS, or on a machine that is not a VM.
+
+The existing soak tests are unchanged.
+
+**Review.** The cumulative Critic at `52beea1b` found 0 blocking, 4 warnings and 3 notes. All of them are fixed in the follow-up commit:
+- The share guard now compares real paths and refuses any directory containing `$HOME`.
+- The in-guest pf boundary is recorded as a decision, with its known limits. `--verify-network` lets the runner re-prove the boundary without reloading pf.
+- New wrapper-driven tests cover `SEED_MISMATCH`, `GIT_FAILED` staging cleanup, and a path appearing before the rename. Mutation checks confirm the empty-directory pre-check is needed.
+- `place()` checks the destination before the rename.
+- `SOAK_PROJECTS` is trimmed.
+- The DHCP expiry risk is documented, for the dry run to observe.
+
+**Architect A38-final and A44 (security contract), in the third commit.**
+- `guest-setup.sh` creates a dedicated non-admin workload user with no sudo.
+- The pf SSH rule is bound to the guest interface. The DHCP allowance (68 to 67) reaches only the DHCP server attested from the lease or config, never assumed to be the host.
+- All inputs are validated before `pfctl -D`, and every probe has a watchdog.
+- Two JSON verifiers, `--verify-admin` and `--verify-workload`, carry the boot identity and separate `scriptSha256` and `profileSha256`. The admin verifier compares the loaded ruleset with pfctl's own parse and fingerprints it. The workload verifier proves sudo and pfctl are refused and that there is no egress, and never inspects pf.
+- They replace `--verify-network`. The runner's joining of the two is left to its own chunk.
+- No tests ran during RM01's quiet window. In the PM's scoped slot, the two soak test files passed 87/87 on this commit's tree. Full-suite evidence came later, at `99a72892` (below).
+
+**The Critic at `8e139bf6`** found 0 blocking and 3 warnings. W1 (no suite evidence) closed with the full-suite run at `99a72892`. The fourth commit fixes the other two:
+- W2: the guest TangleClaw must run as the workload user. `--bootstrap-user` makes that order workable on a fresh guest, and setup and the admin verifier refuse a TangleClaw listening as any other uid (`lsof`).
+- W3: the egress probe addresses must be public literals, and are recorded in the workload attestation.
+
+The focused run in PM scoped slot 2 found two real bugs, both fixed before `6d122ba0`:
+- the admin attestation emitted during setup carried mode "setup" instead of "admin";
+- under `pipefail`, `lsof` exiting non-zero when nothing listened ended the script with exit 1, instead of a refusal.
+
+The rerun passed 107/107. Three mutation checks (dropping the TangleClaw-owner check, the DHCP config-equals-lease check, or the workload sudo refusal) each turned the tests red.
+
+The same commit carries the Architect's further A44 acceptance conditions:
+- Each attestation line is built by a real JSON encoder (`JSON.stringify` via node), with a fixed fallback line if node is missing.
+- A duplicate or malformed `ipconfig` lease field is refused.
+- The admin evidence records the lease, renewal and rebinding durations, the lease start (null where `ipconfig getsummary` does not report it) and when it was observed.
+- The DHCP server must be configured and must match the lease's single server identifier. A lease-only identity stays refused until the dry run proves it is the host-controlled service.
+
+**A48 (Architect), in the sixth commit.**
+- The fallback line is fixed per mode, with `code: ENCODER_MISSING` and no interpolation. Encoded refusals carry `code: REFUSED`.
+- The DHCP timing is normalized to epochs: start, expiry, renew, rebind, observed and remaining. It fails closed when the start is missing, duplicated, unparseable or out of range, when the lease has expired, when T1 < T2 < lease is violated, or when less than `SOAK_ATTEST_WINDOW` remains.
+- The TangleClaw is bound as exactly one listening pid, whose uid comes from both lsof and ps and whose executable comes from lsof's txt entry, which must be node.
+- `--bootstrap-user` refuses an existing account with a system uid or a foreign home.
+- This also covers the Critic's O-3 lease tests (duplicate renewal field, malformed rebinding value, LeaseStartTime reported twice).
+
+**A50 and A52 (Architect), also in `7e59dba8`.**
+- The timing is strictly 0 < T1 < T2 < lease, with all three required; equality fails.
+- The window is `SOAK_SAMPLE_INTERVAL` + `SOAK_SAFETY_MARGIN`, both bounded and recorded.
+- The executable is exactly one node text entry from lsof, canonicalized (realpath), and must equal ps's canonicalized comm. Multiple node entries fail closed.
+- The workload identity checks (uid, home and its owner, no admin or wheel, no sudo) now also run in every admin attestation, not only at setup.
+- A52: sudo rights are judged by the exit status of `sudo -n -l -U <user> <cmd>` for a shell, pfctl and a no-op, never by sudo's wording.
+
+**The cumulative Critic at `7e59dba8`** found 0 blocking, 2 warnings and 1 note. W1 (full-suite evidence) was left for the PM's window. The seventh commit, `99a72892`, fixes W2 and the note:
+- W2: `public_ipv6` accepted malformed literals such as `2606::4700::1`, which `nc` fails to parse, so a denial would have been "proven" without testing pf. Probe literals are now judged by node's `net.isIP` and a `net.BlockList` of reserved ranges. That also refuses the IPv4 documentation and benchmark ranges (the earlier O-2).
+- The note: a split sentence in the README's attestation section.
+
+In PM scoped slot 4, the first run exposed a real bug in the new validator: node's `BlockList` matches an IPv4 address against the IPv4-mapped IPv6 subnet, so a shared list refused every IPv4 probe. The fix uses one list per family. `::2` then showed that `::/128` was too narrow, so the whole reserved `::/8` block is refused. The final run passed 137/137, and a mutation check dropping IPv6 probe validation turned 8 tests red.
+
+**Evidence at `99a72892`.** The full declared suite ran in the PM's exclusive window (16:08Z): 0 fail, 1 ledgered skip (totals in the recorded evidence, `prawduct-hook test-status`). That closes W1, which the earlier paragraphs record as still pending. PR #2044 was opened at this head.
+
+**The Rule #124 independent review blocked it (Architect A71).** The follow-up commit fixes:
+- B1 (blocking): in every mode, before guest.conf is read, every admin-executed input and every ancestor up to / must be a plain file or directory, with no symlink or ambiguous path. Each must be owned by root or the admin, with no group or other write, and with no exception (Architect A73 vetoed a sticky-directory one). The checkout therefore lives under a dedicated root- or admin-owned hierarchy such as `/opt/tangleclaw-soak`. The workload must also be unable to write any of them, proven after a positive control. This runs in setup, `--bootstrap-user` and every `--verify-admin`, and guest.conf's sha256 joins both planes' attestations. host-provision.sh checks its own checkout the same way.
+- A1: setup runs the admin verifier as its own process, so its `ok:false` line is printed.
+- A3: host-provision refuses a share inside `$HOME`, and one not owned by the operator or open to group and others. With `--execute` it refuses a share that isn't empty. The default share moves to `/Users/Shared/tc-soak-share`.
+- A4: two positive controls come first: the admin's `sudo -n true`, and `sudo -l` saying yes for the admin. After them, only a workload exit status of 1 counts as denial; a hang or any other status is unknown and refused.
+- A6: the CHANGELOG entry is re-audited against the code.
+- The uid floor is 501 on both planes.
+- These corrections, disclosed at A68: the evidence wording above, and the A50 attribution, now listed under `7e59dba8` with A48.
+- A2 (a positive control for egress in the dry run) and A5 (the UDP 68→67 channel and the DHCP limitation) are documented in the README.
+
+**Evidence for the follow-up (PM A62 receipts, one per invocation).**
+- The base run of the two soak files at 17:03Z passed 165/165 on the unmutated tree.
+- Seven mutation checks each turned red, each under its own receipt (17:11Z to 17:38Z): M11 group/other-write, M12 owner, M13 workload write proof, M14 write proof in `--verify-admin`, M15 treating exit 2 as a denial, M16 a share inside `$HOME`, M17 a non-empty share.
+- Earlier runs under the 16:45Z receipt are non-certifying, and a chained mutation run there was quarantined (Architect ruling).
+- The full-range Critic at `50337eea` found one blocking issue: the README still suggested `/Users/Shared` for the checkout, which B1 refuses. It also found a real defect: the executable check compared against `ps -o comm`, which on macOS is the process's own `argv[0]` and would have refused a TangleClaw started as plain `node`. The follow-on commit fixes both. The executable now comes from lsof's kernel text entries alone, and the README records that the admin's own node and PATH are trusted as given.
+- The fresh Rule #124 review at `d44e78d0` confirmed B1 resolved, but found B2: GitHub CI (Linux, uid 1001) failed one host-provision test whose fixture hard-coded uid 501, so the owner check fired before the group-write check it meant to exercise. The remediation commit derives the fixture's uid from the runner, and adds the Architect's README line that no workload-writable directory may appear on the admin's PATH (node, shasum, stat, lsof).
+- Those runs did find a real bug: `trust_path` declared a local named `mode`, and bash's dynamic scoping let `refuse` read it, so trust refusals printed no JSON line. The local is now `bits`.
+
 ## 2026-09-28 — Every rule is named "Rule #<id>" from its DB id (#2029)
 
 <!-- prawduct: type=feature | scope=2029-rule-id-display -->
