@@ -643,7 +643,7 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     assert.ok(h.requests.every((b) => b.manifestDigest === state.manifestDigest));
     const { manifest } = store.readRun(h.base, SHA);
     assert.deepEqual([manifest.runId, manifest.checksSource, manifest.private.checksExchange], [fx.RUN_ID, 'host-attested', h.exchange]);
-    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { state: 'awaiting-review' }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
+    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { state: 'awaiting-review', sampleCount: samples.length }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
     assert.deepEqual(out, { ok: true, reasons: [] }, 'the host can vouch for every earning sample this run took');
   });
 

@@ -35,6 +35,36 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-29 — #2020 Chunk 2B: soak load for plans, switchboard and wrap; C01/C02 integrated; host-attested checks (Q1)
+
+<!-- prawduct: type=feature | scope=2020-chunk-2b -->
+
+Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q1/Q2 in scope) and A32 (plan accepted: v2 schedule, host-minted runId, offline limits are gates, not waivers). Branch `feat/2020-chunk-2b` from `origin/main` `20c975a9`. Plan: `.prawduct/artifacts/build-plan.md`.
+
+- **B1: integration.** C01 `3393077e` (#1962) and C02 `0ec417f5` (#1975) are merged by merge commit at their reviewed heads (`9c4bc597`, `266f4c01`). The only conflict was `CHANGELOG.md`. Their files are byte-identical to the reviewed heads, and so is the workflow.
+- **B5: soak load** (delegated to an isolated worktree agent, merged at `6509b7fc`). There are four new kinds and schedule schema v2. The driver now passes `eventIndex`, so a switchboard send carries its idempotency key.
+- **B2: #1975 gates and the B1 review.**
+  - One library-owned publish-failure path (R-8, R-15, which includes #1975's R-4).
+  - Transitions are counted, not flagged (R-2).
+  - The `metrics` clone refuses entries that are not regular files, and the verifier flags them with `NOT_REGULAR_FILE` (R-7, a real write-outside-the-clone hole).
+  - The actor override is gone (R-9).
+  - The test fixtures are shared (R-10, R-5).
+  - The change-log order is repaired (R-16; its `.gitattributes` root cause is outside the lease and was reported).
+  - ADR 0021 carries the orphan `metrics` branch and the C03/C04 constraints.
+  - The E2E publication smoke passed at code `02ba685e`, candidate `20c975a9`, against a local bare `metrics` repo and a stub server under test on a PortHub port. A real scratch TangleClaw was not used, because its ttyd watcher would share the machine-global launchd ttyd job with the live install.
+- **B3: host-attested required checks (Q1).** `host-mint`, `host-checks` and `host-finalize` work over an exchange directory. Every verdict is bound to the SHA, the runId, the sample number and the manifest digest, and is ledgered on the host first. Admission is two-phase. R-3: the ttyd baseline moved into run state, so a crash-retry after a reboot keeps the candidate. Design: ADR 0021 points 10 and 11.
+- **B3 review (`rev-20260929T150326Z-ce635baf`, 1 blocking).** Fixed in one commit:
+  - R-6: the admission record publishes `checksSource` and `runId`; scorecards publish `checksSource`; finalization is kept per run; the host relay is named as its reader.
+  - R-2: freshness is judged on the guest's clock alone.
+  - R-3 and R-10: a bad request file is quarantined once and never stops the responder; `--watch` survives a failed pass.
+  - R-11: the guest clears its request and verdict after each sample.
+  - R-4 and R-13: finalization requires every committed sample, each taken within one interval of its own request.
+  - R-9: the seq-moved diagnostic joins the closed set.
+  - **Tests replaced, not weakened:** the two `STALE` rows in `test/release-certification-host-checks.test.js` encoded a cross-clock freshness rule the review showed was wrong (a guest clock ahead of the host's made every verdict stale). They are replaced by tests that a far-behind or far-ahead host clock still validates and is answered once. Freshness is now pinned by the guest-clock checks in finalization.
+- **Plan deviations recorded (R-5).**
+  - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
+  - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).
+
 ## 2026-09-28 — Every rule is named "Rule #<id>" from its DB id (#2029)
 
 <!-- prawduct: type=feature | scope=2029-rule-id-display -->

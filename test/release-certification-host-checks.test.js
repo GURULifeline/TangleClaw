@@ -159,7 +159,7 @@ describe('host checks: the guest accepts only a verdict bound to its own sample'
   const expected = { candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0 };
 
   it('accepts a verdict whose every binding matches', () => {
-    const r = hc.judgeVerdict(JSON.stringify(verdict()), expected, T0 + 20, 150_000);
+    const r = hc.judgeVerdict(JSON.stringify(verdict()), expected);
     assert.deepEqual(r.observation, GREEN);
   });
 
@@ -172,15 +172,30 @@ describe('host checks: the guest accepts only a verdict bound to its own sample'
     ['another manifest digest', JSON.stringify(verdict({}, { manifestDigest: 'f'.repeat(64) })), 'MISMATCH'],
     ['another sample', JSON.stringify(verdict({}, { sampleSeq: 2 })), 'MISMATCH'],
     ['another request time', JSON.stringify(verdict({}, { requestedAt: T0 - 1 })), 'MISMATCH'],
-    ['an observation edited after the host signed off on it', JSON.stringify(verdict({ observation: { state: 'ok', checks: { test: 'success', lint: 'success' } } }, { observation: { state: 'ok', checks: { test: 'failure' } } })), 'MISMATCH'],
-    ['an observation made before the request', JSON.stringify(verdict({}, { observedAt: T0 - 1 })), 'STALE'],
-    ['an observation too old to vouch for the sample', JSON.stringify(verdict({}, { observedAt: T0 + 10 })), 'STALE']
+    ['an observation edited after the host signed off on it', JSON.stringify(verdict({ observation: { state: 'ok', checks: { test: 'success', lint: 'success' } } }, { observation: { state: 'ok', checks: { test: 'failure' } } })), 'MISMATCH']
   ]) {
     it(`reads ${name} as GitHub unavailable (${diag})`, () => {
-      const now = name.includes('too old') ? T0 + 10 + 150_001 : T0 + 20;
-      assert.deepEqual(hc.judgeVerdict(text, expected, now, 150_000), { diagnostic: hc.DIAGNOSTIC[diag] });
+      assert.deepEqual(hc.judgeVerdict(text, expected), { diagnostic: hc.DIAGNOSTIC[diag] });
     });
   }
+
+  it('accepts a bound verdict whatever the host clock reads, since freshness is the guest\'s own', () => {
+    for (const observedAt of [1, T0 + 3_600_000]) {
+      assert.deepEqual(hc.judgeVerdict(JSON.stringify(verdict({}, { observedAt })), expected).observation, GREEN);
+    }
+  });
+
+  it('answers once even when the host clock is far behind the guest\'s, and the guest accepts it', async () => {
+    mint();
+    const o = observer();
+    const guestClock = clock(T0 + 3_600_000);
+    const r = await hc.attest(guest(), { seq: 1, manifestDigest: DIGEST }, {
+      now: guestClock.now,
+      sleep: async (ms) => { await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: o.observe, now: () => T0 }); guestClock.advance(ms); }
+    });
+    assert.deepEqual(r.observation, GREEN);
+    assert.equal(o.calls.length, 1, 'GitHub was read once, not once per pass');
+  });
 
   it('waits only as long as allowed for a verdict, then reports it missing', async () => {
     const c = clock();
@@ -234,19 +249,21 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     for (let seq = 1; seq <= n; seq++) {
       const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST }, { observe: opts.observe });
       const qualifies = seq > 1 && (opts.qualifies ? opts.qualifies(seq) : true);
-      out.push({ seq, ...(r.binding ? { checks: r.binding } : {}), interval: seq === 1 ? null : { qualifies } });
+      // Taken just after it asked, as the runner does: the guest's clock is
+      // the only one either time comes from.
+      out.push({ seq, wallAt: T0 + 1000, ...(r.binding ? { checks: r.binding } : {}), interval: seq === 1 ? null : { qualifies } });
     }
     return out;
   }
   const finalize = (s, over = {}) => hc.finalize({
-    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review' }, samples: s, observe: observer().observe, now: () => T0, ...over
+    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: s.length }, samples: s, observe: observer().observe, now: () => T0, ...over
   });
 
   it('passes a run whose admission and every earning sample the host vouched for, and records it', async () => {
     mint();
     const out = await finalize(await samples(4));
     assert.deepEqual(out, { ok: true, reasons: [] });
-    const rec = hc.readFinalization(hostBase, SHA);
+    const rec = hc.readFinalization(hostBase, SHA, fx.RUN_ID);
     assert.deepEqual([rec.ok, rec.runId, rec.manifestDigest], [true, fx.RUN_ID, DIGEST]);
   });
 
@@ -275,7 +292,7 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     const s = await samples(2);
     assert.ok((await finalize(s)).reasons.some((r) => r.code === 'RUN_NOT_MINTED'));
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test', 'lint'] }, { random: () => fx.RUN_ID });
-    const out = await finalize(s, { state: { state: 'running' } });
+    const out = await finalize(s, { state: { state: 'running', sampleCount: s.length } });
     assert.deepEqual(out.reasons.map((r) => r.code).filter((c) => ['CHECKS_LIST_DRIFT', 'NOT_REVIEWABLE'].includes(c)), ['CHECKS_LIST_DRIFT', 'NOT_REVIEWABLE']);
   });
 
@@ -284,12 +301,96 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     const s = await samples(2);
     assert.deepEqual((await finalize(s, { observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe })).reasons, [{ code: 'FINAL_CHECKS_NOT_GREEN' }]);
     assert.deepEqual((await finalize(s, { observe: observer({ state: 'unavailable', checks: null }).observe })).reasons, [{ code: 'FINAL_CHECKS_UNAVAILABLE' }]);
-    assert.equal(hc.readFinalization(hostBase, SHA).ok, false, 'the failed outcome is what is recorded');
+    assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, false, 'the failed outcome is what is recorded');
   });
 
   it('refuses to finalize a run that did not use host-attested checks', async () => {
     mint();
-    const out = await hc.finalize({ hostBase, manifest: fx.manifest(), manifestDigest: DIGEST, state: { state: 'awaiting-review' }, samples: [], observe: observer().observe });
+    const out = await hc.finalize({ hostBase, manifest: fx.manifest(), manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: 0 }, samples: [], observe: observer().observe });
     assert.ok(out.reasons.some((r) => r.code === 'NOT_HOST_ATTESTED'));
+  });
+});
+
+describe('host checks: robustness and bookkeeping (B3 review)', () => {
+  const request = (seq, over = {}) => JSON.stringify({ schema: hc.REQUEST_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: seq, requestedAt: T0, ...over });
+
+  it('moves a request it will never answer aside once, and still answers the rest', async () => {
+    mint();
+    const req = path.join(exchange, 'requests');
+    fs.mkdirSync(req, { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'elsewhere.json'), request(1));
+    fs.symlinkSync(path.join(tmp, 'elsewhere.json'), path.join(req, '1.json'));
+    fs.mkdirSync(path.join(req, '2.json'));
+    fs.writeFileSync(path.join(req, '3.json'), '{broken');
+    fs.writeFileSync(path.join(req, '4.json'), request(4, { runId: 'f'.repeat(32) }));
+    fs.writeFileSync(path.join(req, '5.json'), request(5));
+    const o = observer();
+    const first = await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: o.observe, now: () => T0 });
+    assert.deepEqual(first.answered, [5], 'a bad file never stopped the good one');
+    assert.deepEqual(first.skipped.map((x) => x.reason).sort(), ['invalid-request', 'not-a-regular-file', 'not-a-regular-file', 'run-not-minted']);
+    assert.deepEqual(fs.readdirSync(req), ['5.json'], 'the rejected requests left the exchange');
+    assert.equal(fs.readdirSync(hc.hostPaths(hostBase, SHA).rejected).length, 4);
+    const second = await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: o.observe, now: () => T0 });
+    assert.deepEqual([second.answered, second.skipped], [[], []], 'nothing is re-read or re-reported');
+  });
+
+  it('leaves nothing in the exchange once a sample has its answer, or has given up', async () => {
+    mint();
+    await attestAnswered(guest(), { seq: 1, manifestDigest: DIGEST });
+    await attestAnswered(guest(), { seq: 2, manifestDigest: DIGEST }, { host: false });
+    assert.deepEqual(fs.readdirSync(path.join(exchange, 'requests')), []);
+    assert.deepEqual(fs.readdirSync(path.join(exchange, 'verdicts')), []);
+  });
+
+  it('keeps a finalization per run, so a later run never overwrites an earlier one', async () => {
+    const A = 'a1'.repeat(16);
+    const B = 'b2'.repeat(16);
+    hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => A });
+    hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => B });
+    const base = { hostBase, manifestDigest: DIGEST, samples: [], state: { state: 'awaiting-review', sampleCount: 0 }, now: () => T0 };
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x' }), observe: observer().observe });
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
+    assert.equal(hc.readFinalization(hostBase, SHA, A).ok, true);
+    assert.equal(hc.readFinalization(hostBase, SHA, B).ok, false);
+    assert.equal(hc.readFinalization(hostBase, SHA, 'c'.repeat(32)), null);
+  });
+
+  it('fails a run whose evidence is missing a committed sample, or whose verdict came from another request window', async () => {
+    mint();
+    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x' });
+    const out = [];
+    for (let seq = 1; seq <= 3; seq++) {
+      const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST });
+      out.push({ seq, wallAt: T0 + 1000, checks: r.binding, interval: seq === 1 ? null : { qualifies: true } });
+    }
+    const fin = (samples, sampleCount) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount }, samples, observe: observer().observe });
+    assert.deepEqual((await fin([out[0], out[2]], 3)).reasons, [{ code: 'SAMPLES_INCOMPLETE' }]);
+    const late = [out[0], out[1], { ...out[2], wallAt: T0 + 150_001 }];
+    assert.deepEqual((await fin(late, 3)).reasons, [{ code: 'VERDICT_NOT_FRESH', sampleSeq: 3 }]);
+    const early = [out[0], { ...out[1], wallAt: T0 - 1 }, out[2]];
+    assert.deepEqual((await fin(early, 3)).reasons, [{ code: 'VERDICT_NOT_FRESH', sampleSeq: 2 }]);
+  });
+});
+
+describe('rc-cert host-checks --watch survives a failed pass', () => {
+  it('reports the failure and keeps answering', async () => {
+    const cli = require('../scripts/rc-cert');
+    mint();
+    fs.mkdirSync(path.join(exchange, 'requests'), { recursive: true });
+    fs.writeFileSync(path.join(exchange, 'requests', '1.json'), JSON.stringify({ schema: hc.REQUEST_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0 }));
+    const controller = new AbortController();
+    let calls = 0;
+    let passes = 0;
+    let err = '';
+    const code = await cli.main(['host-checks', '--sha', SHA, '--exchange', exchange, '--host-base', hostBase, '--watch', '--interval', '1'], {
+      stdout: { write: () => {} }, stderr: { write: (x) => { err += x; } }, env: {}, configFile: path.join(tmp, 'none.json'), signal: controller.signal,
+      deps: {
+        observeGithub: async () => { if (++calls === 1) throw new Error('GitHub hiccup'); return { observation: GREEN, error: null }; },
+        sleep: async () => { if (++passes >= 3) controller.abort(); }
+      }
+    });
+    assert.equal(code, 0);
+    assert.match(err, /host-checks-failed/);
+    assert.ok(fs.existsSync(path.join(exchange, 'verdicts', '1.json')), 'the next pass answered');
   });
 });

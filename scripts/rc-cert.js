@@ -440,8 +440,12 @@ async function cmdHostChecks(c) {
   }
   const intervalMs = _int(c.flags.interval, '--interval') ?? 2000;
   while (!(c.signal && c.signal.aborted)) {
-    await once();
-    await new Promise((r) => setTimeout(r, intervalMs));
+    try {
+      await once();
+    } catch (err) { // prawduct:allow prawduct/broad-except -- a supervisor loop: one failed pass is reported and the next still runs, or every later sample would read host-verdict-missing for the rest of the soak
+      c.emit({ event: 'host-checks-failed', code: (err && err.code) || null, message: String((err && err.message) || '').slice(0, 300) });
+    }
+    await (c.deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms))))(intervalMs);
   }
   return 0;
 }

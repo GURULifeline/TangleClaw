@@ -74,8 +74,15 @@ describe('published documents (#1949 C02)', () => {
 
   it('admits with the manifest digest and the rules the run is judged by', () => {
     const a = sc.admissionRecord(manifest(), DIGEST);
-    assert.deepEqual(Object.keys(a).sort(), ['admittedAt', 'candidateSha', 'canonicalThresholds', 'manifestDigest', 'repository', 'requiredChecks', 'requiredChecksSource', 'schema', 'thresholds', 'version']);
+    assert.deepEqual(Object.keys(a).sort(), ['admittedAt', 'candidateSha', 'canonicalThresholds', 'checksSource', 'manifestDigest', 'repository', 'requiredChecks', 'requiredChecksSource', 'runId', 'schema', 'thresholds', 'version']);
     assert.equal(a.requiredChecksSource, 'branch-protection');
+    assert.deepEqual([a.checksSource, a.runId], ['gh', fx.RUN_ID], 'how the checks were judged, and for which host-minted run, is public');
+    for (const [field, value] of [['checksSource', undefined], ['checksSource', 'github'], ['runId', undefined], ['runId', 'short']]) {
+      const bad = { ...a, [field]: value };
+      if (value === undefined) delete bad[field];
+      assert.notDeepEqual(sc.validateAdmission(bad), [], `an admission with ${field} ${value} must not validate`);
+    }
+    assert.equal(sc.scorecard(run(manifest(), [sample(MIN)]).state, manifest(), T0 + MIN, 1).checksSource, 'gh');
     assert.equal(a.manifestDigest, DIGEST);
     assert.equal(a.canonicalThresholds, true);
     assert.equal(a.admittedAt, T0);

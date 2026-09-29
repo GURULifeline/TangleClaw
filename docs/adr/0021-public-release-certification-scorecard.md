@@ -132,7 +132,19 @@ to be able to trust it. That creates two problems:
    `rc-cert host-finalize` joins the run's exported samples against the ledger (the admission
    sample and every sample that earned time must carry a verdict the host really issued, green for
    every required check), reads the checks once more, and records the outcome; any gap, mismatch,
-   non-green verdict or drift fails it. In `gh` mode the runner reads GitHub itself, as before, and
+   non-green verdict or drift fails it, and the outcome is recorded for that run alone, so a later
+   run of the same candidate can never overwrite or stand in for it. Freshness is judged on the
+   guest's clock only: a verdict must echo the time its own request carried and arrive within the
+   guest's bounded wait, and at finalization each sample must have been taken within one sampling
+   interval of the request its verdict answers. The host's clock is recorded, never compared.
+
+   **Who reads the finalization.** The guest's `passed` is not a certification of record in this
+   mode, because nothing on the guest can prove a verdict came from the host. The host relay
+   (`rc-cert host-publish`) is the reader: it makes a host-attested pass certification of record
+   only on an `ok` finalization of that exact run and manifest digest. So a public reader can tell
+   what a pass owes, the admission record publishes `checksSource` and `runId`, and every scorecard
+   publishes `checksSource`. Promotion (C04) must require the host's record for any admission whose
+   `checksSource` is `host-attested`. In `gh` mode the runner reads GitHub itself, as before, and
    mints its own run id.
 
 11. **A crash between publishing the admission and committing the run never uses up the

@@ -36,6 +36,31 @@ All notable changes to TangleClaw are documented in this file.
   - **Storage.** The rotation and coordinator-role records are schema v51.
   - **Reference:** `docs/coordinator-rotation.md`.
 
+- **The soak's load reaches plans, the Medusa switchboard and wrap** (#2020 Chunk 2B, part of #1949). Four load kinds join the schedule:
+  - `api.plans.read`: lists a project's plans, requires the provisioned `soak-plan.md`, and fetches its page. A listing link that points off the soak target is refused, so the soak's token is never sent elsewhere.
+  - `api.medusa.reads`: the fleet-wide switchboard deliveries and escalations.
+  - `engine.session.medusa-cycle`: launches stub sessions on two soak projects, waits for both listeners, sends a message from one to the other, sees it delivered and marks it read, then kills both. Killing the recipient retires the exchange, so no open exchange accumulates over 72 hours.
+  - `engine.session.wrap-cycle`: launches a stub session and runs a real wrap with its AI-content steps skipped, then waits for the run to finish and end the session.
+  - Each cycle touches only the harness's own `soak-stub` sessions, waits within fixed bounds, and reports closed outcome codes (`NOT_LISTENING`, `NOT_DELIVERED`, `WRAP_STRANDED`, `WRAP_BLOCKED`, `WRAP_TIMEOUT` and others).
+  - The schedule format is now `tc.soak-schedule/v2`, because the new kinds change what a seed draws. A v1 schedule file is refused rather than read as v2; no soak ever ran on v1.
+  - **Prerequisites the guest must provide** (`deploy/soak/README.md`): a Medusa hub, and `medusaEnabled: true`, `wrapAutoPrEnabled: false` and `releaseMode: "off"` on every `soak-*` project.
+  - **Not exercised offline, and gates on a certifying run rather than waivers** (Architect ruling A32): real AI-content capture, the push-to-PR path, and bound switchboard replies or closes.
+
+- **A guest with no route to GitHub can still be certified: the host judges its required checks, sample by sample** (#2020, Architect rulings Q1, A31 and A32). A run started with `--checks-source host-attested` never calls `gh`.
+  - **The run id comes from the host.** `rc-cert host-mint` mints it and records the repository and checks it will judge. The guest's `start --run-id` pins it in the manifest, along with the exchange directory.
+  - **Every sample is vouched for, or earns nothing.** For the admission sample and every later sample, the guest asks and `rc-cert host-checks` answers. Each answer is bound to the SHA, the run id, the sample's number and the manifest digest, and the host records it in its own ledger first.
+  - **Anything short of a verified answer reads as GitHub unavailable**: a missing, late, unparsable or mismatched answer. A run the host never minted is never answered.
+  - **No time before a green admission.** Admission stages the manifest first, so no run and no time exist before a green answer for that exact manifest.
+  - **The host has the last word.** `rc-cert host-finalize` joins the run's exported samples against the ledger and reads the checks once more. It fails on any gap, mismatch, stale answer, non-green check or drift, and records the outcome for that run alone.
+  - **The published admission record now carries `checksSource` and `runId`**, and every scorecard carries `checksSource`, so anyone reading the `metrics` branch can tell which runs still owe the host's finalization.
+
+- **Release-candidate certification is hardened for the soak** (#2020 integration of #1962 and #1975).
+  - **A failed publish is always recorded and reported, never thrown.** This covers a publisher that could not even be built, and a status file that cannot be written.
+  - **No transition waits for the hourly heartbeat.** One seen while a publish is in flight is still published, including when a run is stopped.
+  - **The `metrics` clone refuses a branch holding a symlink, submodule or executable** before checking it out, and the verifier flags one (`NOT_REGULAR_FILE`). A planted symlink could otherwise have redirected a publish to a file outside the clone.
+  - **Only the pinned manifest decides whether operator ids are published.**
+  - **A crash between publishing the admission and committing the run no longer uses up the candidate after a reboot.** The run's ttyd baseline is taken when it is admitted.
+
 - **A reproducible load-and-fault schedule for the release-candidate soak** (#2020 Chunk 2A, part of #1949). `node scripts/soak.js plan` builds the schedule, which the soak's evidence names by its digest.
   - **Reproducible.** The same seed and flags give the same schedule and the same sha256 digest.
   - **Two phases.** A `certifying` schedule can never contain an owned-ttyd restart, since that fails a certification outright. `validate` rejects one even after a hand edit that recomputed the digest. It also holds every schedule to fixed limits: synthetic `soak-` project names, lease ports of 5000 and above, a cap on commands, floors on the gaps (at least a minute between faults when certifying), and a cap on the number of events. A hand-edited schedule therefore cannot aim the load at a real project or at TangleClaw's own ports. A `destructive` schedule may contain it.
@@ -55,7 +80,7 @@ All notable changes to TangleClaw are documented in this file.
     - It logs every outcome to an fsynced, owner-only ndjson file.
     - Interrupted, it resumes without running any logged event twice. Only an event in flight at a crash runs again. Ctrl-C takes effect within a second, even during a long wait.
   - **The engine load uses a network-free stub engine** (`deploy/soak/stub-engine/`), because the soak guest has no egress and no vendor credentials. Real-vendor engine behaviour is outside this soak.
-  - **Not built yet:** the browser and fault executors, the isolated guest, the evidence bundle, and the certification judge. Until the judge exists, only `run`'s exit 5 acts on an ownership-unverified disposition. Until the executors exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently. This is Chunk 2A, the core. Chunk 2B (API load against plans and the switchboard, and engine sessions that exercise wrap and the switchboard) and the Chunk 1 generation of the synthetic `soak-*` repos are both required before the first guest dry run. Until then, the repos must already exist on the target.
+  - **Not built yet:** the browser and fault executors, the isolated guest and the evidence bundle. Until the executors exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently. The Chunk 1 guest must also provision the synthetic `soak-*` repos before the first dry run; until then, they must already exist on the target. Chunk 2B's load is below.
 
 - **The server reports when a session has stopped being woken for its mail** (#1978). When a session's Medusa wake has been held as `engine-thread-unknown` for 10 minutes with mail waiting, the server logs one warning per episode. That code means the engine's channel exists but could not prove the session idle. `/api/server-info` also carries `medusaWakeStalls`: how many sessions are affected, plus the oldest one's project, how long it has waited and the engine's own reason. It is read-only evidence, and no dashboard UI shows it yet. The alert is read from the wake monitor's own verdict, so it clears by itself when the engine answers, the mail is read or the session ends. It never types into a pane, sends a message or starts anything. Before this, the only sign was an unread badge somebody had to notice.
 
