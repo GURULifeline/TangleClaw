@@ -112,6 +112,37 @@ describe('isolation attestations (#2020, A43, A44)', () => {
   });
 });
 
+describe('probes: a sample carries what the isolation producer returned (B10 review)', () => {
+  const probes = require('../lib/release-certification/probes');
+  const bridge = require('../lib/soak/attest-bridge');
+  const collect = (verifyNetwork) => probes.createProbes(
+    { apiBase: 'http://x', worktreePath: '/x', candidateSha: SHA, runId: B.runId, repo: 'o/r', requiredChecks: ['test'], maxReadingAgeMs: MIN, isolation: 'attested' },
+    { fetchJson: async () => ({ body: null, error: 'connect-failed' }), measure: async () => null, ghJson: async () => ({ body: null, error: 'gh-failed' }), verifyNetwork }
+  ).collect(T0, { seq: B.sampleSeq, manifestDigest: B.manifestDigest });
+
+  it('keeps a producer failure as the stable diagnostic plus its private detail, and binds no isolation', async () => {
+    const s = await collect(async () => ({ failure: { class: 'exit-3', detail: 'attest-bridge refused (SPLIT)' } }));
+    assert.deepEqual(s.observations.isolation, { state: 'unavailable' });
+    assert.equal(s.diagnostics.isolation, iso.DIAGNOSTIC.MISSING);
+    assert.equal(s.diagnostics.isolationDetail, 'exit-3: attest-bridge refused (SPLIT)');
+    assert.equal(s.isolation, undefined);
+  });
+
+  it('carries a bound breach envelope as a breached observation, binding its sample, boot and digest', async () => {
+    const env = { schema: iso.BREACH_SCHEMA, ...B, bootId: fx.BOOT_ID, facts: [{ plane: 'workload', fact: 'egress-permitted' }], observedAt: T0 };
+    const s = await collect(async () => ({ breach: env }));
+    assert.equal(s.observations.isolation.state, 'breached');
+    assert.equal(s.diagnostics.isolation, undefined);
+    assert.equal(s.diagnostics.isolationDetail, undefined);
+    assert.deepEqual(s.isolation, { sampleSeq: B.sampleSeq, bootId: fx.BOOT_ID, breachDigest: s.observations.isolation.breachDigest });
+    assert.match(s.isolation.breachDigest, /^[0-9a-f]{64}$/);
+  });
+
+  it('keeps the bridge\'s copies of the breach schema and facts equal to the judge\'s', () => {
+    assert.deepEqual([bridge.BREACH_SCHEMA, bridge.BREACH_FACTS], [iso.BREACH_SCHEMA, iso.BREACH_FACTS]);
+  });
+});
+
 describe('state machine: a guest run is judged on its isolation (A43, A44, A47)', () => {
   const m = fx.guestManifest();
   const healthy = (over = {}) => ({ ...fx.observations(), isolation: { ...fx.ISOLATED, ...over } });
