@@ -76,7 +76,26 @@ async function rejects(fn, code) {
   return caught;
 }
 
-const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], host: 'h' };
+const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h' };
+/**
+ * A publication that always succeeds, recording what it was asked.
+ * @param {object} [over] - Method overrides
+ * @returns {object} Fake publication
+ */
+function fakePub(over = {}) {
+  const calls = { admit: [], publish: 0 };
+  return {
+    calls,
+    publishedDigest: async () => null,
+    admit: async (manifest, digest, opts) => { calls.admit.push({ manifest, digest, opts }); return { verifiedAt: 1 }; },
+    publishCurrent: async () => { calls.publish += 1; return { published: true, seq: calls.publish }; },
+    due: () => true,
+    recordFailure: () => ({ nextAttemptAt: 99 }),
+    readStatus: () => ({}),
+    ...over
+  };
+}
+
 /** Admission options that never sleep. */
 const NOW = { wait: async () => {} };
 
@@ -207,7 +226,7 @@ describe('probe observations', () => {
 describe('runner', () => {
   it('admits a healthy candidate with the ttyd generation it observed as the baseline', async () => {
     const f = fakes([healthy()]);
-    const r = runnerLib.createRunner({ base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock });
+    const r = runnerLib.createRunner({ publication: fakePub(), base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock });
     const state = await r.start(SPEC);
     assert.equal(state.state, STATES.RUNNING);
     const { manifest } = store.readRun(path.join(tmp, 'v1'), SHA);
@@ -219,7 +238,7 @@ describe('runner', () => {
       const f = fakes([obs]);
       const base = path.join(tmp, 'v1');
       let waits = 0;
-      await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock })
+      await rejects(() => runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock })
         .start(SPEC, { wait: async () => { waits += 1; } }), REFUSAL.ADMISSION_REFUSED);
       assert.equal(waits, runnerLib.ADMISSION_ATTEMPTS - 1);
       assert.deepEqual(store.listRuns(base), []);
@@ -230,7 +249,7 @@ describe('runner', () => {
     const coldHealth = healthy({ ttyd: { generation: null, leakState: 'unknown', managed: null } });
     const f = fakes([coldHealth, coldHealth, healthy()]);
     const log = [];
-    const state = await runnerLib.createRunner({ base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) })
+    const state = await runnerLib.createRunner({ publication: fakePub(), base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) })
       .start(SPEC, { wait: async () => f.advance(10_000) });
     assert.equal(state.state, STATES.RUNNING);
     assert.equal(log.filter((e) => e.event === 'admission-retry').length, 2);
@@ -240,7 +259,7 @@ describe('runner', () => {
     for (const obs of [healthy({ ttyd: { applicable: false } }), healthy({ server: { checkoutId: 'd'.repeat(64) } })]) {
       const f = fakes([obs]);
       let waits = 0;
-      const err = await rejects(() => runnerLib.createRunner({ base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock })
+      const err = await rejects(() => runnerLib.createRunner({ publication: fakePub(), base: path.join(tmp, 'v1'), candidateSha: SHA, probes: f.probes, clock: f.clock })
         .start(SPEC, { wait: async () => { waits += 1; } }), REFUSAL.ADMISSION_REFUSED);
       assert.equal(waits, 0);
       assert.ok(['TTYD_NOT_APPLICABLE', 'SERVER_NOT_IN_WORKTREE'].includes(err.details.reasons[0].code));
@@ -258,12 +277,12 @@ describe('runner', () => {
     const base = path.join(tmp, 'v1');
     const log = [];
     const f = fakes([healthy()]);
-    const first = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r1', log: (e) => log.push(e) });
+    const first = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r1', log: (e) => log.push(e) });
     await first.start(SPEC);
     f.advance(MIN);
     await first.tick();
     f.advance(MIN);
-    const second = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r2', log: (e) => log.push(e) });
+    const second = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r2', log: (e) => log.push(e) });
     const state = await second.tick();
     assert.equal(state.state, STATES.EXTENDED);
     assert.deepEqual(Object.keys(state.extensions), ['MONITOR_GAP']);
@@ -273,9 +292,9 @@ describe('runner', () => {
   it('fails when the owned ttyd generation changed while the runner was down', async () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy(), healthy({ ttyd: { generation: '9@later' } })]);
-    await runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r1' }).start(SPEC);
+    await runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r1' }).start(SPEC);
     f.advance(10 * MIN);
-    const state = await runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r2' }).tick();
+    const state = await runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, runnerInstance: 'r2' }).tick();
     assert.equal(state.state, STATES.FAILED);
     assert.equal(state.failure.code, 'TTYD_GENERATION_CHANGED');
   });
@@ -283,7 +302,7 @@ describe('runner', () => {
   it('extends on a GitHub error and on an unproven runtime', async () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy(), healthy({ github: { state: 'unavailable' } }), healthy({ server: { shaBaselineSource: 'late' } })]);
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock });
     await r.start(SPEC);
     f.advance(MIN);
     await r.tick();
@@ -296,7 +315,7 @@ describe('runner', () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy(), healthy(), healthy({ worktree: { dirty: true } })]);
     const log = [];
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
     await r.start(SPEC);
     const waits = [];
     const state = await r.run({ intervalMs: MIN, wait: async (ms) => { waits.push(ms); f.advance(MIN); } });
@@ -309,14 +328,14 @@ describe('runner', () => {
   it('refuses a second runner for the same candidate', async () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy()]);
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock });
     await r.start(SPEC);
     const controller = new AbortController();
     let release;
     const gate = new Promise((res) => { release = res; });
     const running = r.run({ intervalMs: MIN, signal: controller.signal, wait: async () => { await gate; } });
     await new Promise((res) => setImmediate(res));
-    await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock }).run({ intervalMs: MIN }), REFUSAL.LOCK_HELD);
+    await rejects(() => runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock }).run({ intervalMs: MIN }), REFUSAL.LOCK_HELD);
     controller.abort();
     release();
     await running;
@@ -326,7 +345,7 @@ describe('runner', () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy()]);
     const log = [];
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
     await r.start(SPEC);
     const p = store.runPaths(base, SHA);
     const lockfile = require('../lib/release-certification/lockfile');
@@ -346,7 +365,7 @@ describe('runner', () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy()]);
     const log = [];
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock, log: (e) => log.push(e) });
     await r.start(SPEC);
     const p = store.runPaths(base, SHA);
     let n = 0;
@@ -361,7 +380,7 @@ describe('runner', () => {
   it('stops at once when signalled mid-interval, not after the interval', async () => {
     const base = path.join(tmp, 'v1');
     const f = fakes([healthy()]);
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: f.probes, clock: f.clock });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: f.probes, clock: f.clock });
     await r.start(SPEC);
     const controller = new AbortController();
     const began = Date.now();
@@ -381,7 +400,7 @@ describe('runner', () => {
       return { observations: healthy({ server: null }), diagnostics: { server: 'http-401' } };
     } };
     const f = fakes([]);
-    const r = runnerLib.createRunner({ base, candidateSha: SHA, probes: probeSet, clock: f.clock });
+    const r = runnerLib.createRunner({ publication: fakePub(), base, candidateSha: SHA, probes: probeSet, clock: f.clock });
     await r.start(SPEC);
     f.advance(MIN);
     await r.tick();
@@ -417,6 +436,9 @@ describe('rc-cert CLI', () => {
 
   it('prints usage and exits 2 for a bad command line', async () => {
     assert.equal((await run(['frobnicate'])).code, 2);
+    const token = await run(['status', '--sha', SHA, '--token', 'secret']);
+    assert.equal(token.code, 2, 'a token on the command line would be visible in ps');
+    assert.match(token.err, /TANGLECLAW_SERVICE_TOKEN/);
     assert.equal((await run(['status'])).code, 2);
     assert.equal((await run(['status', '--sha'])).code, 2);
   });
@@ -436,18 +458,21 @@ describe('rc-cert CLI', () => {
     const deps = {
       repository: async () => 'o/r',
       requiredChecks: async () => ['test'],
+      publication: fakePub(),
       probes: () => f.probes,
-      runner: (ctx) => runnerLib.createRunner({ ...ctx, clock: f.clock })
+      runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: f.clock })
     };
     const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1'], { deps });
     assert.equal(started.code, 0, started.err);
+    assert.equal(store.readRun(base, SHA).manifest.requiredChecksSource, 'branch-protection');
     assert.deepEqual(JSON.parse(started.out), { state: 'running', candidateSha: SHA });
     const status = await run(['status', '--sha', SHA, '--base', base, '--json']);
     assert.equal(JSON.parse(status.out).state, 'running');
     assert.equal(JSON.parse(status.out).canonicalThresholds, true);
     assert.match((await run(['status', '--sha', SHA, '--base', base])).out, /running/);
-    assert.equal((await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason'])).code, 3);
-    assert.deepEqual(JSON.parse((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason'])).out), { state: 'cancelled' });
+    assert.equal((await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).code, 3);
+    assert.deepEqual(JSON.parse((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).out), { state: 'cancelled', published: true });
+    assert.equal(deps.publication.calls.publish, 1, 'the decision is published at once');
     assert.deepEqual(JSON.parse((await run(['list', '--base', base])).out), [SHA]);
   });
 
@@ -462,15 +487,24 @@ describe('rc-cert CLI', () => {
     const deps = {
       repository: async () => 'pinned/repo',
       requiredChecks: async () => ['test'],
+      publication: fakePub(),
       probes: (ctx) => { probeCtxs.push(ctx); return f.probes; },
       runner: (ctx) => {
-        const real = runnerLib.createRunner({ ...ctx, clock: f.clock });
-        return { ...real, run: async (args) => { runArgs = args; return store.readRun(base, SHA).state; } };
+        const real = runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: f.clock });
+        return { ...real, run: async (args) => {
+          runArgs = args;
+          sawAbortBefore = args.signal.aborted;
+          controller.abort();
+          sawAbortAfter = args.signal.aborted;
+          return store.readRun(base, SHA).state;
+        } };
       }
     };
+    const controller = new AbortController();
+    let sawAbortBefore = null;
+    let sawAbortAfter = null;
     const thresholds = '{"maxIntervalMs":30000}';
     assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--thresholds', thresholds], { deps })).code, 0);
-    const controller = new AbortController();
     const ran = await run(['run', '--sha', SHA, '--base', base, '--api', 'http://x', '--interval', '20000'], {
       deps: { ...deps, repository: async () => { throw new Error('run must not look the repository up'); } },
       signal: controller.signal
@@ -482,9 +516,8 @@ describe('rc-cert CLI', () => {
     assert.equal(ctx.maxReadingAgeMs, 30000);
     assert.equal(ctx.worktreePath, wt);
     assert.equal(runArgs.intervalMs, 20000);
-    assert.equal(runArgs.signal.aborted, false);
-    controller.abort();
-    assert.equal(runArgs.signal.aborted, true);
+    assert.equal(sawAbortBefore, false);
+    assert.equal(sawAbortAfter, true, 'the caller\'s stop signal reaches the running loop');
   });
 
   it('treats a malformed --interval or --thresholds as a usage error', async () => {
@@ -500,6 +533,27 @@ describe('rc-cert CLI', () => {
       assert.equal(r.code, 2, t);
       assert.match(r.err, /--thresholds must be a JSON object/);
     }
+  });
+
+  it('publishes on demand, and says so when it could not', async () => {
+    const base = path.join(tmp, 'v1');
+    const wt = path.join(tmp, 'wt');
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
+    const f = fakes([healthy({ server: { checkoutId: runnerLib.worktreeId(wt) } })]);
+    const pub = fakePub();
+    const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], publication: pub, probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, clock: f.clock }) };
+    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--no-publish-actor', '--required-check', 'test'], { deps })).code, 0);
+    assert.equal(pub.calls.admit[0].manifest.publishActor, false, 'the actor setting is pinned in the manifest');
+    assert.equal(pub.calls.admit[0].manifest.requiredChecksSource, 'operator', 'hand-named checks are recorded as an operator override');
+    const ok = await run(['publish', '--sha', SHA, '--base', base], { deps });
+    assert.deepEqual([ok.code, JSON.parse(ok.out)], [0, { published: true }]);
+    const failing = fakePub({ publishCurrent: async (log) => { log({ event: 'publish-failed', code: 'PUBLISH_FAILED' }); return { published: false, code: 'PUBLISH_FAILED' }; } });
+    const bad = await run(['publish', '--sha', SHA, '--base', base], { deps: { ...deps, publication: failing } });
+    assert.deepEqual([bad.code, JSON.parse(bad.out)], [3, { published: false }]);
+    assert.match(bad.err, /publish-failed/);
+    const status = JSON.parse((await run(['status', '--sha', SHA, '--base', base, '--json'])).out);
+    assert.deepEqual(Object.keys(status.publication).sort(), ['admissionVerifiedAt', 'failures', 'lastError', 'lastMessage', 'lastPublishedAt', 'lastPublishedSeq', 'nextAttemptAt']);
   });
 
   it('refuses to start when main requires no checks', async () => {
@@ -519,7 +573,7 @@ describe('rc-cert CLI', () => {
     fs.mkdirSync(wt);
     fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
     const f = fakes([healthy({ server: { checkoutId: runnerLib.worktreeId(wt) } })]);
-    const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, clock: f.clock }) };
+    const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], publication: fakePub(), probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: f.clock }) };
     await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--thresholds', '{"targetQualifiedMs":600000}'], { deps });
     assert.equal(JSON.parse((await run(['status', '--sha', SHA, '--base', base, '--json'])).out).canonicalThresholds, false);
     assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://x', '--thresholds', '{bad'], { deps })).code, 2);
@@ -533,5 +587,10 @@ describe('rc-cert CLI', () => {
     fs.writeFileSync(cfg, JSON.stringify({ releaseCertification: { baseDir: 'relative' } }));
     assert.throws(() => cli.resolveBase({}, cfg), (e) => e.code === REFUSAL.STORE_UNSAFE);
     assert.equal(cli.resolveBase({}, path.join(tmp, 'none.json')), store.defaultBase());
+    fs.writeFileSync(cfg, '{not json');
+    assert.throws(() => cli.resolveBase({}, cfg), (e) => e.code === REFUSAL.STORE_UNSAFE);
+    const dirAsConfig = path.join(tmp, 'a-directory');
+    fs.mkdirSync(dirAsConfig);
+    assert.throws(() => cli.resolveBase({}, dirAsConfig), (e) => e.code === REFUSAL.STORE_UNSAFE, 'an unreadable config is a refusal, not a crash');
   });
 });

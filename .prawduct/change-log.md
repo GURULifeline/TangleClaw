@@ -36,6 +36,48 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
 ## 2026-09-28 — Every rule is named "Rule #<id>" from its DB id (#2029)
+## 2026-09-27 — Release-candidate certification: public scorecard, publisher and metrics-branch verifier (#1949 C02)
+
+<!-- prawduct: type=feature | scope=rc-cert-scorecard-v1 -->
+
+Train 30, C02 (Chunks 01–03), stacked on C01 (#1962). The PM dispatched each chunk over Medusa. The Architect ruled on publishing:
+- Q2: admission fails closed until it is published and read back.
+- Q3: publishing failures never extend the soak.
+- Q4: unattended publishing is allowed, to `metrics` only.
+- One combined `scorecard/v1.json`, with the certification section derived from the per-candidate files.
+
+The PM approved moving the GitHub check to `main` on a schedule. PR-review items N1, N2 and N4 from #1962 are folded in. Design: ADR 0021. Plan: `.tangleclaw/plans/1949-c02-public-scorecard.md` (local, not tracked).
+
+**Problem.** The certification evidence is private on the host, but the release decision must be checkable in public, and the manifest digest only binds once it sits where the host user cannot rewrite it.
+
+**The change.**
+- **Chunk 01 — documents** (`scorecard.js`, `formats.js`):
+  - An allowlist-built write-once admission record (with the manifest digest), scorecard, append-only transition log, index and certification summary.
+  - Validators check exact shapes at every nesting level.
+  - Shared formats and the checkout digest live in one module.
+- **Chunk 02 — publishing** (`publisher.js`, `publication.js`, `rc-cert publish`):
+  - A private clone of `metrics` per remote under one lock, allowlisted paths only, never force-pushed.
+  - Admission is published and read back before the run commits. The staged manifest is reused only when its admission is public.
+  - After admission, publishing runs in the background, at most once a minute except a final state. It never delays a sample; failures are recorded with backoff.
+  - Transitions go to a numbered log written before the state commits.
+  - The actor setting and publish remote are pinned in the manifest, and a withheld actor gets a neutral commit identity.
+- **Chunk 03 — verification** (`verify.js`, `scripts/scorecard-verify.js`, `.github/workflows/scorecard-verify.yml`):
+  - Every commit on `metrics` is checked against the rules, and one `TRANSITIONS` table is shared with the state machine, so a `passed` that skipped review or shows unmet targets cannot verify.
+  - The times must be internally consistent (`TIMELINE_INCONSISTENT`). This checks that the history agrees with itself, not that a soak happened.
+  - The publisher preflights the same rules before every push (`WOULD_VIOLATE`).
+  - The workflow runs from `main` every 30 min and re-verifies the whole history.
+  - Unreadable history is reported as such, never as absent.
+- **From #1962 review:**
+  - N1: only canonical thresholds can pass.
+  - N2: the token is read from the environment only.
+  - N4: `requiredChecksSource` is recorded.
+
+**Reviews.** Chunk 01: 1 blocking (evidence), then clean. Chunk 02: 1 blocking (a clone shared across candidates), then clean. Chunk 03: 5 blocking (forged pass, permanent time-backwards, untested rules, evidence), then clean. The cumulative review across the branch has no blocking findings open.
+
+**PR review (Architect gate at 79584b8a).** 1 blocking: the verifier trusted the scorecard's self-reported duration, so a history claiming 72 qualified hours a minute after admission verified clean. Fixed with the `TIMELINE_INCONSISTENT` rule; the probe is a regression test. The state machine was made to satisfy the rule under a stepped clock: earned time is capped by how far `updatedAt` moved, transition/acceptance/cancellation times are clamped to it, and an admission sample older than its manifest is refused. Two state-machine tests that passed an acceptance and a cancellation time predating the run now use real times, with the clamp tested separately. Claims narrowed from "a forgery cannot pass" to "the history is internally consistent" in ADR 0021 §9, `CHANGELOG.md`, `verify.js`, `codes.js` and the tests.
+
+**Tests.** `test/release-certification-{scorecard,publish,verify}.test.js`, and extended C01 suites. Git behaviour is tested against local bare repos made with `test/_temp-repo.js`, with nothing pushed anywhere real. The full suite is clean on da603537 (14,225 pass, 0 fail, 1 skip).
+
 ## 2026-09-27 — Release-candidate certification: state machine, evidence store, runner and PTY counter (#1949 C01)
 
 <!-- prawduct: type=feature | scope=rc-cert-v1 -->

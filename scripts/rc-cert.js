@@ -9,12 +9,14 @@
  *   rc-cert status --sha <40> [--json]
  *   rc-cert accept --sha <40> --actor <id>
  *   rc-cert cancel --sha <40> --actor <id>
+ *   rc-cert publish --sha <40>   (publish the run's standing to the metrics branch now)
  *   rc-cert list
  *
  * Common flags: `--base <abs>` (evidence base; else config.json
  * `releaseCertification.baseDir`, else `<tangleclawHome>/release-certification/v1`),
- * `--api <url>` (the server under test; else `TANGLECLAW_API`), `--token <t>`
- * (else `TANGLECLAW_SERVICE_TOKEN`), `--ca <file>` (for an https API).
+ * `--api <url>` (the server under test; else `TANGLECLAW_API`), `--ca <file>`
+ * (for an https API). A gated API's token is read from `TANGLECLAW_SERVICE_TOKEN`
+ * only, never a flag, so it cannot show up in `ps`.
  *
  * `--thresholds <json>` on start overrides the judging thresholds for a smoke
  * run. Such a run reports `canonicalThresholds: false` and never certifies a
@@ -33,22 +35,25 @@ const store = require('../lib/release-certification/store');
 const sm = require('../lib/release-certification/state-machine');
 const probesLib = require('../lib/release-certification/probes');
 const runnerLib = require('../lib/release-certification/runner');
+const publisherLib = require('../lib/release-certification/publisher');
+const publicationLib = require('../lib/release-certification/publication');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
 const USAGE = [
-  'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>]',
+  'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>] [--no-publish-actor]',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
   '       rc-cert accept --sha <40> --actor <id>',
   '       rc-cert cancel --sha <40> --actor <id>',
+  '       rc-cert publish --sha <40>',
   '       rc-cert list',
-  'common: [--base <abs>] [--api <url>] [--token <t>] [--ca <file>]'
+  'common: [--base <abs>] [--api <url>] [--ca <file>]; a gated API reads its token from TANGLECLAW_SERVICE_TOKEN'
 ].join('\n');
 const REPEATABLE = new Set(['required-check']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
 class UsageError extends Error {}
-const BOOLEAN = new Set(['json']);
+const BOOLEAN = new Set(['json', 'no-publish-actor']);
 
 /**
  * Parse `--flag value` arguments.
@@ -61,6 +66,7 @@ function parseFlags(argv) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new UsageError(`unexpected argument ${arg}`);
     const name = arg.slice(2);
+    if (name === 'token') throw new UsageError('--token is not accepted, because a flag is visible in `ps`; set TANGLECLAW_SERVICE_TOKEN');
     if (BOOLEAN.has(name)) {
       flags[name] = true;
       continue;
@@ -75,18 +81,28 @@ function parseFlags(argv) {
 
 /**
  * The evidence base: the flag, else the configured override, else the default.
- * A configured value that is not an absolute path is refused, not ignored.
+ * A missing config.json means no override; one that cannot be parsed, or a
+ * configured value that is not an absolute path, is refused, not ignored.
  * @param {object} flags - Parsed flags
  * @param {string} [configFile] - config.json path
  * @returns {string} Absolute base
  */
 function resolveBase(flags, configFile = path.join(tangleclawHome.baseDir(), 'config.json')) {
   if (flags.base) return _absolute(flags.base, '--base');
+  let text;
+  try {
+    text = fs.readFileSync(configFile, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return store.defaultBase();
+    throw new CertificationError(REFUSAL.STORE_UNSAFE, `config.json could not be read (${e.code || 'error'}), so releaseCertification.baseDir cannot be read`);
+  }
   let configured;
   try {
-    configured = JSON.parse(fs.readFileSync(configFile, 'utf8')).releaseCertification?.baseDir;
+    configured = JSON.parse(text).releaseCertification?.baseDir;
   } catch {
-    configured = undefined;
+    // An unreadable config must not silently send evidence to the default
+    // location while the operator believes it goes elsewhere.
+    throw new CertificationError(REFUSAL.STORE_UNSAFE, 'config.json is not valid JSON, so releaseCertification.baseDir cannot be read');
   }
   if (configured === undefined || configured === null) return store.defaultBase();
   return _absolute(configured, 'releaseCertification.baseDir');
@@ -155,7 +171,8 @@ function _probeCtx(flags, env, spec) {
   if (!apiBase) throw new UsageError('--api or TANGLECLAW_API is required');
   return {
     apiBase,
-    token: flags.token || env.TANGLECLAW_SERVICE_TOKEN || null,
+    // Environment only: a token on the command line is visible to every user in `ps`.
+    token: env.TANGLECLAW_SERVICE_TOKEN || null,
     ca: flags.ca ? fs.readFileSync(flags.ca) : null,
     worktreePath: spec.worktreePath,
     candidateSha: spec.sha,
@@ -166,91 +183,252 @@ function _probeCtx(flags, env, spec) {
 }
 
 /**
- * Run a command.
+ * The commit identity used when a run withholds the operator's id: the
+ * public branch's history must not name them either.
+ */
+const NEUTRAL_IDENTITY = Object.freeze({ name: 'TangleClaw release certification', email: 'release-certification@users.noreply.github.com' });
+
+/**
+ * The publication for a candidate. It publishes to the remote the run's
+ * manifest pinned (or, at start, the worktree's origin), as the operator's
+ * git identity unless the run withholds the operator's id.
+ * @param {object} c - Command context
+ * @param {string} sha - Candidate SHA
+ * @param {{worktreePath: string, remoteUrl: string|null, publishActor: boolean}} where - Worktree, pinned remote, actor setting
+ * @returns {Promise<object>} Publication
+ */
+async function _publication(c, sha, where) {
+  if (c.deps.publication) return c.deps.publication;
+  // Git facts are read only when needed: a pinned remote with the actor
+  // withheld needs none, so a runner without git config can still publish.
+  const needFacts = !where.remoteUrl || where.publishActor;
+  const facts = needFacts ? await (c.deps.repoFacts || publisherLib.repoFacts)(where.worktreePath) : null;
+  const publisher = publisherLib.createPublisher({
+    dir: path.join(c.base, '_metrics'),
+    remoteUrl: where.remoteUrl || facts.remoteUrl,
+    identity: where.publishActor ? facts.identity : NEUTRAL_IDENTITY,
+    onRecover: (fact) => c.emit({ event: 'recovered', ...fact })
+  });
+  return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
+}
+
+/**
+ * The publication for a committed run, built on first use. Building needs
+ * the operator's git identity and the worktree's origin, which a runner under
+ * launchd or cron may not have. A publish that cannot even build its
+ * publisher is recorded and backed off like any other publishing failure, and
+ * never stops sampling (ADR 0021 point 4).
+ * @param {object} c - Command context
+ * @param {string} sha - Candidate SHA
+ * @param {object} manifest - The run's manifest
+ * @returns {object} `{publishCurrent, due, recordFailure, readStatus}`
+ */
+function _runPublication(c, sha, manifest) {
+  let built = null;
+  const statusOnly = publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher: null });
+  return {
+    async publishCurrent(log = () => {}) {
+      try {
+        built = built || await _publication(c, sha, _pinned(manifest));
+      } catch (e) {
+        const status = publicationLib.recordFailureFor(c.base, sha, e);
+        log({ event: 'publish-failed', code: e.code || 'PUBLISH_FAILED', message: String(e.message || '').slice(0, 300), nextAttemptAt: status.nextAttemptAt });
+        return { published: false, code: e.code || 'PUBLISH_FAILED' };
+      }
+      return built.publishCurrent(log);
+    },
+    due: (hint) => statusOnly.due(hint),
+    recordFailure: (err) => publicationLib.recordFailureFor(c.base, sha, err),
+    readStatus: () => statusOnly.readStatus()
+  };
+}
+
+/**
+ * Where a committed run publishes, from its manifest.
+ * @param {object} manifest - The run's manifest
+ * @returns {{worktreePath: string, remoteUrl: string|null, publishActor: boolean}} Publishing settings
+ */
+function _pinned(manifest) {
+  return { worktreePath: manifest.private.worktreePath, remoteUrl: manifest.private.publishRemote || null, publishActor: manifest.publishActor !== false };
+}
+
+/**
+ * `publish`: publish a run's standing now (also how a failed publish is retried by hand).
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code: 0 published, 3 not
+ */
+async function cmdPublish(c) {
+  const sha = _need(c.flags, 'sha');
+  const { manifest } = store.readRun(c.base, sha);
+  const { published } = await _runPublication(c, sha, manifest).publishCurrent(c.emit);
+  c.out.write(`${JSON.stringify({ published })}\n`);
+  return published ? 0 : 3;
+}
+
+/**
+ * `list`: the candidates with runs.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdList(c) {
+  c.out.write(`${JSON.stringify(store.listRuns(c.base))}\n`);
+  return 0;
+}
+
+/**
+ * `status`: a run's structured health.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdStatus(c) {
+  const sha = _need(c.flags, 'sha');
+  const { manifest, state } = store.readRun(c.base, sha);
+  const p = publicationLib.readStatus(c.base, sha);
+  const publication = {
+    admissionVerifiedAt: p.admission ? p.admission.verifiedAt : null,
+    lastPublishedSeq: p.lastPublishedSeq, lastPublishedAt: p.lastPublishedAt,
+    failures: p.failures, lastError: p.lastError, lastMessage: p.lastMessage ?? null, nextAttemptAt: p.nextAttemptAt
+  };
+  const summary = { ...sm.summarize(state, manifest, Date.now()), publication };
+  c.out.write(c.flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
+  return 0;
+}
+
+/**
+ * `accept` / `cancel`: an operator decision, recorded with the actor.
+ * @param {object} c - Command context
+ * @param {function(object, string, number): object} op - `sm.accept` or `sm.cancel`
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdDecide(c, op) {
+  const sha = _need(c.flags, 'sha');
+  const actor = _need(c.flags, 'actor');
+  const state = store.updateRun(c.base, sha, (s, manifest) => op(s, actor, Date.now(), manifest), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
+  // The decision is committed; publishing it is best effort and a failure is
+  // recorded for retry (`rc-cert publish`), never undoing the decision.
+  const { manifest } = store.readRun(c.base, sha);
+  const { published } = await _runPublication(c, sha, manifest).publishCurrent(c.emit);
+  c.out.write(`${JSON.stringify({ state: state.state, published })}\n`);
+  return 0;
+}
+
+/**
+ * The required checks for `start`, with where they came from: the flags
+ * (`operator`), else main's branch protection. None at all is refused, since
+ * GitHub could then never fail the candidate.
+ * @param {object} c - Command context
+ * @param {string} repo - `owner/name`
+ * @returns {Promise<{checks: string[], source: string}>} Check names and their provenance
+ */
+async function _startChecks(c, repo) {
+  if (c.flags['required-check']) return { checks: c.flags['required-check'], source: 'operator' };
+  const checks = await (c.deps.requiredChecks || probesLib.requiredChecks)(repo);
+  if (!checks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
+  if (checks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
+  return { checks, source: 'branch-protection' };
+}
+
+/**
+ * `start`: admit a candidate.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdStart(c) {
+  const sha = _need(c.flags, 'sha');
+  const thresholds = c.flags.thresholds ? _jsonObject(c.flags.thresholds, '--thresholds') : undefined;
+  const worktreePath = _absolute(_need(c.flags, 'worktree'), '--worktree');
+  const repo = c.flags.repo || await (c.deps.repository || probesLib.repository)(worktreePath);
+  if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
+  const { checks: requiredChecks, source: requiredChecksSource } = await _startChecks(c, repo);
+  const version = runnerLib.worktreeVersion(worktreePath);
+  if (!version) throw new UsageError('the worktree has no readable version.json');
+  const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
+  const publishActor = !c.flags['no-publish-actor'];
+  const facts = c.deps.publication ? { remoteUrl: null } : await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
+  const publication = await _publication(c, sha, { worktreePath, remoteUrl: facts.remoteUrl, publishActor });
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
+  const state = await runner.start({
+    version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
+    publishActor, remoteUrl: facts.remoteUrl
+  });
+  c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
+  return 0;
+}
+
+/**
+ * `run`: sample until terminal or signalled. The repository, required checks
+ * and reading age come from the manifest, never from a fresh lookup.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdRun(c) {
+  const sha = _need(c.flags, 'sha');
+  const intervalMs = _int(c.flags.interval, '--interval');
+  if (intervalMs !== undefined) {
+    try {
+      runnerLib.resolveInterval(intervalMs);
+    } catch (e) {
+      throw new UsageError(e.message);
+    }
+  }
+  const { manifest } = store.readRun(c.base, sha);
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, {
+    sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
+    requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
+  }));
+  const publication = c.deps.publication || _runPublication(c, sha, manifest);
+  const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  if (c.signal) c.signal.addEventListener('abort', stop, { once: true });
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  try {
+    const state = await runner.run({ intervalMs, signal: controller.signal });
+    c.out.write(`${JSON.stringify({ state: state.state })}\n`);
+  } finally {
+    process.removeListener('SIGINT', stop);
+    process.removeListener('SIGTERM', stop);
+    if (c.signal) c.signal.removeEventListener('abort', stop);
+  }
+  return 0;
+}
+
+/** Each command's handler. */
+const COMMANDS = Object.freeze({
+  list: cmdList,
+  status: cmdStatus,
+  accept: (c) => cmdDecide(c, sm.accept),
+  cancel: (c) => cmdDecide(c, sm.cancel),
+  start: cmdStart,
+  run: cmdRun,
+  publish: cmdPublish
+});
+
+/**
+ * Run a command: parse, resolve the evidence base, dispatch, and turn a
+ * refusal into exit 3 and a usage error into exit 2.
  * @param {string[]} argv - Command and flags
  * @param {object} [io] - `{stdout, stderr, env, configFile, signal, deps: {probes, runner, repository, requiredChecks}}`
  * @returns {Promise<number>} Exit code
  */
 async function main(argv, io = {}) {
-  const out = io.stdout || process.stdout;
   const err = io.stderr || process.stderr;
-  const env = io.env || process.env;
-  const deps = io.deps || {};
-  const emit = (obj) => err.write(`${JSON.stringify(obj)}\n`);
   const [command, ...rest] = argv;
-  let flags;
   try {
-    flags = parseFlags(rest);
-    if (!['start', 'run', 'status', 'accept', 'cancel', 'list'].includes(command)) throw new UsageError(`unknown command ${command || ''}`.trim());
-  } catch (e) {
-    if (!(e instanceof UsageError)) throw e;
-    err.write(`${e.message}\n${USAGE}\n`);
-    return 2;
-  }
-  try {
-    const base = resolveBase(flags, io.configFile);
-    if (command === 'list') {
-      out.write(`${JSON.stringify(store.listRuns(base))}\n`);
-      return 0;
-    }
-    const sha = _need(flags, 'sha');
-    if (command === 'status') {
-      const { manifest, state } = store.readRun(base, sha);
-      const summary = sm.summarize(state, manifest, Date.now());
-      out.write(flags.json ? `${JSON.stringify(summary)}\n` : _human(summary));
-      return 0;
-    }
-    if (command === 'accept' || command === 'cancel') {
-      const actor = _need(flags, 'actor');
-      const op = command === 'accept' ? sm.accept : sm.cancel;
-      const state = store.updateRun(base, sha, (s) => op(s, actor, Date.now()), { onRecover: (f) => emit({ event: 'recovered', ...f }) });
-      out.write(`${JSON.stringify({ state: state.state })}\n`);
-      return 0;
-    }
-    if (command === 'start') {
-      const thresholds = flags.thresholds ? _jsonObject(flags.thresholds, '--thresholds') : undefined;
-      const worktreePath = _absolute(_need(flags, 'worktree'), '--worktree');
-      const repo = flags.repo || await (deps.repository || probesLib.repository)(worktreePath);
-      if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
-      const requiredChecks = flags['required-check'] || await (deps.requiredChecks || probesLib.requiredChecks)(repo);
-      if (!requiredChecks) throw new UsageError('could not read main\'s required checks; pass --required-check <name> for each');
-      if (requiredChecks.length === 0) throw new UsageError('main\'s branch protection requires no checks, so GitHub could never fail this candidate; pass --required-check <name>');
-      const version = runnerLib.worktreeVersion(worktreePath);
-      if (!version) throw new UsageError('the worktree has no readable version.json');
-      const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
-      const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
-      const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
-      const state = await runner.start({ version, repository: repo, worktreePath, requiredChecks, thresholds });
-      out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
-      return 0;
-    }
-    const intervalMs = _int(flags.interval, '--interval');
-    if (intervalMs !== undefined) {
-      try {
-        runnerLib.resolveInterval(intervalMs);
-      } catch (e) {
-        throw new UsageError(e.message);
-      }
-    }
-    const { manifest } = store.readRun(base, sha);
-    const worktreePath = manifest.private.worktreePath;
-    const probes = (deps.probes || probesLib.createProbes)(_probeCtx(flags, env, {
-      sha, worktreePath, repo: manifest.repository, requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
-    }));
-    const runner = (deps.runner || runnerLib.createRunner)({ base, candidateSha: sha, probes, log: emit });
-    const controller = new AbortController();
-    const stop = () => controller.abort();
-    if (io.signal) io.signal.addEventListener('abort', stop, { once: true });
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-    try {
-      const state = await runner.run({ intervalMs, signal: controller.signal });
-      out.write(`${JSON.stringify({ state: state.state })}\n`);
-    } finally {
-      process.removeListener('SIGINT', stop);
-      process.removeListener('SIGTERM', stop);
-    }
-    return 0;
+    const flags = parseFlags(rest);
+    const handler = Object.prototype.hasOwnProperty.call(COMMANDS, command) ? COMMANDS[command] : null;
+    if (!handler) throw new UsageError(`unknown command ${command || ''}`.trim());
+    return await handler({
+      flags,
+      base: resolveBase(flags, io.configFile),
+      out: io.stdout || process.stdout,
+      env: io.env || process.env,
+      deps: io.deps || {},
+      signal: io.signal,
+      emit: (obj) => err.write(`${JSON.stringify(obj)}\n`)
+    });
   } catch (e) {
     if (e instanceof CertificationError) {
       err.write(`${JSON.stringify({ error: e.code, message: e.message, details: e.details })}\n`);
@@ -280,6 +458,8 @@ function _human(s) {
   if (s.failure) lines.push(`failed ${s.failure.code} at sample ${s.failure.sampleSeq}`);
   if (s.acceptance) lines.push(`accepted by ${s.acceptance.actor}`);
   if (s.cancellation) lines.push(`cancelled by ${s.cancellation.actor}`);
+  const p = s.publication;
+  if (p) lines.push(p.lastError ? `publishing FAILING: ${p.lastError} (${p.failures} in a row), next attempt ${p.nextAttemptAt}` : `published #${p.lastPublishedSeq} at ${p.lastPublishedAt}`);
   return `${lines.join('\n')}\n`;
 }
 

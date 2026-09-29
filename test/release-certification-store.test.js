@@ -63,7 +63,7 @@ function withUmask(mask, fn) {
 /** @returns {object} A manifest for the test candidate. */
 function manifest() {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
     worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, host: 'h'
   });
 }
@@ -321,6 +321,43 @@ describe('store', () => {
     assert.deepEqual(store.listRuns(base), [SHA]);
   });
 
+  it('stages by what the metrics branch holds: fresh when unpublished, reused when its admission is public', () => {
+    const base = path.join(tmp, 'v1');
+    const facts = [];
+    const onRecover = (f) => facts.push(f.kind);
+    const later = sm.buildManifest({ ...manifest(), worktreePath: '/tmp/rc-wt', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, createdAt: 9999 });
+    const first = store.stageManifest(base, manifest(), null, { onRecover });
+    assert.equal(first.reused, false);
+    assert.equal(first.digest, store.manifestDigest(store.manifestText(manifest())));
+    const unpublished = store.stageManifest(base, later, null, { onRecover });
+    assert.equal(unpublished.reused, false);
+    assert.notEqual(unpublished.digest, first.digest, 'an admission nobody published leaves no settings behind');
+    const again = store.stageManifest(base, manifest(), unpublished.digest, { onRecover });
+    assert.equal(again.reused, true);
+    assert.equal(again.digest, unpublished.digest, 'a public admission pins the staged manifest');
+    refuses(() => store.stageManifest(base, manifest(), 'e'.repeat(64)), REFUSAL.ADMISSION_CONFLICT);
+    assert.deepEqual(facts, ['unpublished-staged-manifest-replaced', 'staged-manifest-reused']);
+    const s = sample(0);
+    const state = store.createRun(base, again.manifest, sm.admit(again.manifest, s), s, { onRecover });
+    assert.equal(state.manifestDigest, unpublished.digest);
+    assert.equal(facts.length, 2, 'committing the staged bytes is not a recovery');
+    refuses(() => store.stageManifest(base, manifest(), null), REFUSAL.RUN_EXISTS);
+  });
+
+  it('keeps a numbered transition log that the committed state counts', () => {
+    const { base } = created();
+    tick(base, sample(MIN, { server: null }));
+    tick(base, sample(2 * MIN));
+    tick(base, sample(3 * MIN));
+    const { state, paths: p } = store.readRun(base, SHA);
+    assert.equal(state.transitionCount, 3);
+    assert.deepEqual(store.readTransitions(base, SHA).map((e) => e.to), ['running', 'extended', 'running']);
+    privateFs.appendLine(p.transitions, JSON.stringify({ n: 4, event: { to: 'failed' } }));
+    fs.rmSync(p.snapshots, { recursive: true });
+    assert.deepEqual(store.readTransitions(base, SHA).map((e) => e.to), ['running', 'extended', 'running'], 'uncommitted lines are ignored and lost snapshots do not matter');
+    assert.equal(mode(p.transitions), 0o600);
+  });
+
   it('refuses a second run for the same candidate', () => {
     const { base, m } = created();
     const s = sample(0);
@@ -360,10 +397,10 @@ describe('store', () => {
     assert.deepEqual(store.readSnapshots(base, SHA).map((s) => s.event.to), ['running', 'extended']);
   });
 
-  it('records an operator acceptance and its snapshot', () => {
+  it('refuses to pass a smoke run, and records an operator decision and its snapshot', () => {
     const base = path.join(tmp, 'v1');
     const m = sm.buildManifest({
-      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
       thresholds: { targetQualifiedMs: MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 }
     });
     const s0 = sample(0);
@@ -371,9 +408,11 @@ describe('store', () => {
     tick(base, sample(MIN, { pty: { instance: 's1', attaches: 1, detaches: 1, lastAt: 1_000_000 + 30_000 } }));
     tick(base, sample(2 * MIN, { pty: { instance: 's1', attaches: 2, detaches: 2, lastAt: 1_000_000 + 2 * MIN } }));
     assert.equal(store.readRun(base, SHA).state.state, STATES.AWAITING_REVIEW);
-    const passed = store.updateRun(base, SHA, (state) => sm.accept(state, 'jason', 7));
-    assert.equal(passed.state, STATES.PASSED);
-    assert.equal(store.readSnapshots(base, SHA).at(-1).event.code, 'OPERATOR_ACCEPTED');
+    refuses(() => store.updateRun(base, SHA, (state, man) => sm.accept(state, 'jason', 7, man)), REFUSAL.NOT_CANONICAL);
+    assert.equal(store.readRun(base, SHA).state.state, STATES.AWAITING_REVIEW, 'a smoke run reaches review but never passes');
+    const cancelled = store.updateRun(base, SHA, (state) => sm.cancel(state, 'jason', 7));
+    assert.equal(cancelled.state, STATES.CANCELLED);
+    assert.equal(store.readSnapshots(base, SHA).at(-1).event.code, 'OPERATOR_CANCELLED');
   });
 
   it('refuses a manifest changed after the run began', () => {

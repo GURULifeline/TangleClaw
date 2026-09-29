@@ -19,7 +19,7 @@ const HOUR = 60 * MIN;
  */
 function manifest(thresholds) {
   return sm.buildManifest({
-    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1000,
+    candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000,
     worktreePath: '/tmp/rc-wt', worktreeId: WTID, ttydGeneration: GEN, host: 'test-host', thresholds
   });
 }
@@ -93,7 +93,8 @@ describe('buildManifest', () => {
     const m = manifest();
     assert.equal(m.candidateSha, SHA);
     assert.equal(m.schema, 'tc.release-certification/v1');
-    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', baseline: { ttydGeneration: GEN } });
+    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, baseline: { ttydGeneration: GEN } });
+    assert.equal(m.publishActor, true);
     assert.equal(m.thresholds.targetQualifiedMs, 259_200_000);
     assert.equal(m.thresholds.maxIntervalMs, 150_000);
   });
@@ -107,12 +108,14 @@ describe('buildManifest', () => {
     ['a zero threshold', { thresholds: { maxIntervalMs: 0 } }],
     ['a missing ttyd generation', { ttydGeneration: '' }],
     ['a malformed repository', { repository: 'not a repo' }],
+    ['an unknown required-checks source', { requiredChecksSource: 'guess' }],
+    ['a publishActor that is not a boolean', { publishActor: 'no' }],
     ['no required checks, which would pass GitHub vacuously', { requiredChecks: [] }],
     ['a worktree id that is not a sha256', { worktreeId: 'abc' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
-        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], createdAt: 1,
+        candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1,
         worktreePath: '/w', worktreeId: WTID, ttydGeneration: GEN, ...input
       }), REFUSAL.INVALID_MANIFEST);
     });
@@ -287,6 +290,44 @@ describe('interval accrual', () => {
     assert.equal(run(manifest(), [sample(MIN), sample(2 * MIN, restarted), sample(3 * MIN, restarted)]).state.state, STATES.RUNNING);
   });
 
+  it('never moves updatedAt backwards when the wall clock is stepped back', () => {
+    const { state } = run(manifest(), [sample(MIN), sample(-5 * MIN, obs(), { mono: 2 * MIN })]);
+    assert.equal(state.updatedAt, 1_000_000 + MIN);
+    assert.deepEqual(Object.keys(state.extensions), [EXTEND.CLOCK_SKEW]);
+  });
+
+  it('never earns more qualified time than updatedAt moved (PR #1975 review)', () => {
+    // Monotonic time ahead of the wall clock, within tolerance: earns the wall time.
+    assert.equal(run(manifest(), [sample(MIN - 5000, obs(), { mono: MIN })]).state.qualifiedMs, MIN - 5000);
+    // A clock stepped back re-covers wall time already counted; none of it is earned twice.
+    const { state, events } = run(manifest(), [
+      sample(1 * MIN, obs(), { mono: 1 * MIN }),
+      sample(2 * MIN, obs(), { mono: 2 * MIN }),
+      sample(3 * MIN, obs(), { mono: 3 * MIN }),
+      sample(1 * MIN, obs(), { mono: 4 * MIN }),
+      sample(2 * MIN, obs(), { mono: 5 * MIN }),
+      sample(3 * MIN, obs(), { mono: 6 * MIN }),
+      sample(4 * MIN, obs(), { mono: 7 * MIN })
+    ]);
+    assert.ok(state.qualifiedMs <= state.updatedAt - state.startedAt, `${state.qualifiedMs} > ${state.updatedAt - state.startedAt}`);
+    assert.equal(state.qualifiedMs, 4 * MIN);
+    assert.ok(events.every((e, i) => i === 0 || e.at >= events[i - 1].at), 'transition times never go back');
+    assert.ok(events.every((e) => e.at <= state.updatedAt));
+  });
+
+  it('refuses an admission sample that predates its manifest', () => {
+    refuses(() => sm.admit(manifest(), sample(-1_000_000)), REFUSAL.INVALID_SAMPLE);
+  });
+
+  it('asserts every transition it emits against the shared table', () => {
+    const codes = require('../lib/release-certification/codes');
+    assert.equal(codes.transitionAllowed('awaiting-review', 'passed', 'OPERATOR_ACCEPTED'), true);
+    assert.equal(codes.transitionAllowed('running', 'passed', 'OPERATOR_ACCEPTED'), false);
+    assert.equal(codes.reachable('running', 'passed'), true);
+    assert.equal(codes.reachable('awaiting-review', 'running'), false);
+    assert.equal(codes.reachable('passed', 'failed'), false);
+  });
+
   it('does not mutate the state it is given', () => {
     const admitted = sm.admit(manifest(), sample(0)).state;
     const before = structuredClone(admitted);
@@ -334,10 +375,20 @@ describe('target, PTY use and review', () => {
     const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
     assert.equal(state.state, STATES.AWAITING_REVIEW);
     assert.equal(events.at(-1).code, TRANSITION.TARGET_REACHED);
-    const passed = sm.accept(state, 'jason', 5);
+    const at = 1_000_000 + 4 * MIN;
+    refuses(() => sm.accept(state, 'jason', at, m), REFUSAL.NOT_CANONICAL);
+    const passed = sm.accept(state, 'jason', at, manifest());
     assert.equal(passed.state.state, STATES.PASSED);
-    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: 5 });
+    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at });
     assert.equal(passed.events[0].code, TRANSITION.OPERATOR_ACCEPTED);
+    assert.equal(passed.events[0].at, at);
+  });
+
+  it('never records an acceptance before the review it accepts, whatever the operator clock says', () => {
+    const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
+    const passed = sm.accept(state, 'jason', 5, manifest());
+    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at: state.updatedAt });
+    assert.ok(passed.events[0].at >= events.at(-1).at);
   });
 
   it('does not begin review on an interval that did not qualify', () => {
@@ -361,8 +412,8 @@ describe('target, PTY use and review', () => {
 
   it('refuses every operation on a passed run', () => {
     const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]).state;
-    const passed = sm.accept(reviewing, 'jason', 5).state;
-    refuses(() => sm.accept(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
+    const passed = sm.accept(reviewing, 'jason', 5, manifest()).state;
+    refuses(() => sm.accept(passed, 'jason', 6, manifest()), REFUSAL.ALREADY_TERMINAL);
     refuses(() => sm.cancel(passed, 'jason', 6), REFUSAL.ALREADY_TERMINAL);
     refuses(() => sm.reduce(passed, m, sample(4 * MIN)), REFUSAL.ALREADY_TERMINAL);
   });
@@ -374,7 +425,7 @@ describe('target, PTY use and review', () => {
     for (const [name, terminal] of [['cancelled', cancelled], ['failed', failed]]) {
       for (const [op, fn] of [
         ['reduce', () => sm.reduce(terminal, m, sample(2 * MIN))],
-        ['accept', () => sm.accept(terminal, 'jason', 6)],
+        ['accept', () => sm.accept(terminal, 'jason', 6, manifest())],
         ['cancel', () => sm.cancel(terminal, 'jason', 6)]
       ]) {
         const err = refuses(fn, REFUSAL.ALREADY_TERMINAL);
@@ -390,8 +441,8 @@ describe('target, PTY use and review', () => {
 
   it('refuses acceptance before review and from a malformed actor', () => {
     const { state } = run(m, [sample(MIN)]);
-    refuses(() => sm.accept(state, 'jason', 5), REFUSAL.NOT_AWAITING_REVIEW);
-    refuses(() => sm.accept(state, 'has space', 5), REFUSAL.INVALID_ACTOR);
+    refuses(() => sm.accept(state, 'jason', 5, manifest()), REFUSAL.NOT_AWAITING_REVIEW);
+    refuses(() => sm.accept(state, 'has space', 5, manifest()), REFUSAL.INVALID_ACTOR);
   });
 
   it('holds extended at the target until the PTY target is met, then goes to review', () => {
@@ -459,9 +510,11 @@ describe('cancel and summarize', () => {
   it('cancels a live run with the actor recorded', () => {
     const { state } = run(manifest(), [sample(MIN, obs({ server: null }))]);
     assert.equal(state.state, STATES.EXTENDED);
-    const out = sm.cancel(state, 'jason', 9);
+    const out = sm.cancel(state, 'jason', 1_000_000 + 2 * MIN);
     assert.equal(out.state.state, STATES.CANCELLED);
-    assert.deepEqual(out.state.cancellation, { actor: 'jason', at: 9 });
+    assert.deepEqual(out.state.cancellation, { actor: 'jason', at: 1_000_000 + 2 * MIN });
+    // A clock behind the last sample stamps the cancellation at the run's time.
+    assert.deepEqual(sm.cancel(state, 'jason', 9).state.cancellation, { actor: 'jason', at: state.updatedAt });
   });
 
   it('summarizes progress as structured health', () => {
