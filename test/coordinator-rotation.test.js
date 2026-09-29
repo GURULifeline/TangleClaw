@@ -91,6 +91,8 @@ describe('coordinator context rotation (#2032)', () => {
     }
     return { observations, unavailable };
   }
+  /** Whether the session has a Medusa listener. */
+  let listening = true;
   /** What the checkout fingerprint seam observes. */
   let checkout;
   /** A clean checkout on main at HEAD. */
@@ -127,6 +129,7 @@ describe('coordinator context rotation (#2032)', () => {
     inbox = [];
     typed = [];
     checkout = { ok: true, fingerprint: cleanCheckout() };
+    listening = true;
     githubState = {};
     launchId = `launch-architect-${++launchN}`;
     onClear = () => {
@@ -211,6 +214,7 @@ describe('coordinator context rotation (#2032)', () => {
   const deps = () => ({
     adapterDeps: OURS,
     messages: () => inbox.slice(),
+    listening: () => listening,
     github: async (facts) => githubSeam(facts),
     fingerprint: () => (checkout.ok ? { ok: true, fingerprint: JSON.parse(JSON.stringify(checkout.fingerprint)) } : checkout),
     inject: (_name, command, opts) => {
@@ -611,6 +615,37 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(rotation.gate({ projectId: project.id, access: access(), threadId: NEXT, action: 'medusa-send' }).status, 409);
     });
 
+    it('a session with no Medusa listener cannot show a drained inbox, so it cannot resume', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      listening = false;
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      const r = await rotation.resume({ access: access(), threadId: NEXT, body }, deps());
+      assert.equal(r.body.code, 'ROTATION_EVIDENCE_MISSING');
+      assert.match(r.body.error, /no Medusa listener/);
+    });
+
+    it('a driver that runs out of passes says so on the record, and the next command is advance', async () => {
+      await serve();
+      channel();
+      const id = (await prepare()).body.rotation.rotationId;
+      // A clear that has not taken yet, with the prior thread idle: no failure recorded, just unfinished.
+      onClear = () => {};
+      const r = await rotation.drive(id, { attempts: 1, deps: deps() });
+      assert.equal(r.state, 'rebinding');
+      assert.equal(r.failureCode, 'driver-stopped');
+      assert.equal(rotation.view(r).nextCommand, 'tc rotation advance');
+    });
+
+    it('prepare refuses an untracked file it cannot hash, rather than recording a constant', async () => {
+      await serve();
+      channel();
+      checkout.fingerprint.dirty = ['big.bin'];
+      checkout.fingerprint.untracked = { 'big.bin': 'unavailable:too-large' };
+      const r = await prepare({ checkpoint: checkpoint({ branch: { head: HEAD, ref: 'main', ownedDirt: ['big.bin'] } }) });
+      assert.equal(r.body.code, 'ROTATION_CHECKOUT_UNAVAILABLE');
+    });
+
     it('messages that arrived after prepare stay queued and do not block the resume', async () => {
       const rot = await toReconciling();
       inbox = [{ id: 'arrived-during-absence' }];
@@ -757,6 +792,26 @@ describe('coordinator context rotation (#2032)', () => {
       assert.match(stored.resumeNonceHash, /^[0-9a-f]{64}$/);
       assert.ok(!JSON.stringify(stored).includes(nonce()));
       assert.ok(!JSON.stringify(rotation.view(stored, { checkpoint: true })).includes(nonce()));
+    });
+
+    it('after an active rotation, an ordinary relaunch is refused with the way out, and the operator releases the epoch', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      assert.equal((await rotation.resume({ access: access(), threadId: NEXT, body }, deps())).status, 200);
+      store.getDb().prepare("UPDATE sessions SET status = 'wrapped' WHERE id = ?").run(session.id);
+      try {
+        const relaunched = { kind: 'project', projectId: project.id, sessionId: session.id + 1000, launchId: 'ordinary-relaunch' };
+        const refused = rotation.gate({ projectId: project.id, access: relaunched, threadId: 'fresh-thread', action: 'medusa-send' });
+        assert.equal(refused.body.code, 'COORDINATOR_EPOCH_MISMATCH');
+        assert.equal(refused.body.boundSessionEnded, true);
+        assert.match(refused.body.error, /tc rotation prepare/);
+        const released = rotation.abandon({ caller: { kind: 'operator' }, body: { rotationId: rot.rotationId, reason: 'relaunched without a rotation' } });
+        assert.equal(released.status, 200);
+        assert.equal(rotation.gate({ projectId: project.id, access: relaunched, threadId: 'fresh-thread', action: 'medusa-send' }), null);
+      } finally {
+        store.getDb().prepare("UPDATE sessions SET status = 'active' WHERE id = ?").run(session.id);
+      }
     });
 
     it('an abandoned latest rotation releases the binding: the project is judged as before', async () => {

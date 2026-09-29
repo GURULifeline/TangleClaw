@@ -50,7 +50,7 @@ fenced → rebinding → reconciling → active
 | `rebinding` | server | Finds the replacement, binds it to the channel under the new generation, and delivers the re-entry turn. |
 | `reconciling` | replacement context | Reads the checkpoint back, reconciles it against live state, handles the recorded inbox interval, and submits the receipt. |
 | `active` | — | The receipt was accepted and the fence is lifted. This generation is now the project's current coordinator generation. |
-| `abandoned` | operator | The rotation could not finish. The fence is lifted and the channel is left as it stands. |
+| `abandoned` | operator | The rotation could not finish, or the operator released an active rotation's epoch (for example after the coordinator was relaunched without a rotation). The fence and the binding are lifted; the channel is left as it stands. |
 
 A step that cannot proceed does not change the state. It records a typed `failure` on the rotation
 and the next pass retries it, so a retry always continues the same attempt. Nothing mints a second
@@ -267,7 +267,7 @@ Each phase prints `PASS` or `FAIL` lines and exits non-zero on any failure.
 
 ## Commands and routes
 
-Every route except abandon is bound to the caller's own verified launch. An unbound, forged or
+Prepare, show, advance and resume are bound to the caller's own verified launch; relaunch, abandon, `GET /api/rotations` and the coordinator-role routes are the operator's alone. An unbound, forged or
 foreign caller is refused with `403 ROTATION_BINDING_REQUIRED`.
 
 | Command | Route | Purpose |

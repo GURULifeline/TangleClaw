@@ -4792,8 +4792,9 @@ route('GET', '/api/tc/workload', (req, res) => {
 // own rotation with a structured checkpoint; the server fences its new
 // dispatch, types /clear, binds the one replacement thread it can prove and
 // delivers a re-entry turn; the replacement context resumes with a receipt the
-// server cross-checks before lifting the fence. Every route but abandon is
-// bound to the caller's own verified launch, like workload.
+// server cross-checks before lifting the fence. Prepare, show, advance and
+// resume are bound to the caller's own verified launch, like workload; the
+// relaunch claim, abandon and the operator reads are the operator's alone.
 
 /**
  * The caller's verified launch for a rotation route, or a refusal written to
@@ -4837,6 +4838,7 @@ function coordinatorGateRefused(req, res, projectId, action, extra = {}) {
     projectId, access: sharedDocsAccess.resolveAccess(req), threadId: _engineThread(req), action, ...extra
   });
   if (!refusal) return false;
+  log.info('Coordinator epoch gate refused a mutation', { projectId, action, code: refusal.body.code, rotationId: refusal.body.rotationId });
   jsonResponse(res, refusal.status, refusal.body);
   return true;
 }

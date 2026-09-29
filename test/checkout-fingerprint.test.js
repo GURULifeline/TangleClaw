@@ -113,6 +113,15 @@ describe('checkout fingerprint (#2032 A7a)', () => {
     assert.deepEqual(fp.fingerprint(path.join(dir, 'nope')), { ok: false, reason: 'checkout-missing' });
   });
 
+  it('a project in a subdirectory of its repository is fingerprinted from the repository root', () => {
+    fs.mkdirSync(path.join(dir, 'sub'));
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'x');
+    const r = fp.fingerprint(path.join(dir, 'sub'));
+    assert.ok(r.ok, r.reason);
+    assert.equal(r.fingerprint.path, dir);
+    assert.match(r.fingerprint.untracked['new.txt'], /^sha256:/, 'a repo-relative path is read from the root, not the subdirectory');
+  });
+
   it('parses renames, keeping both paths', () => {
     const rec = Buffer.from('2 R. N... 100644 100644 100644 aaa bbb R100 new name.txt\0old.txt\0? u.txt\0');
     assert.deepEqual(fp.parseStatus(rec), { dirty: ['new name.txt', 'old.txt', 'u.txt'], untracked: ['u.txt'] });
