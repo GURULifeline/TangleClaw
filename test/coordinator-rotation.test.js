@@ -741,12 +741,14 @@ describe('coordinator context rotation (#2032)', () => {
       await toReconciling();
       assert.equal(judge('workload-set'), null);
       assert.equal(judge('control-ack'), null);
+      assert.equal(judge('medusa-listener'), null, 'the replacement may keep its listener running');
       assert.equal(judge('medusa-send', {}, { inReplyTo: 'm-old' }), null);
       assert.equal(judge('medusa-ack', {}, { messageIds: ['m-old'] }), null);
       assert.equal(judge('exchange-close', {}, { exchangeId: 'mx_1' }), null, 'mx_1 is in the checkpoint\'s exchanges');
       for (const [action, extra] of [
         ['medusa-send', {}], ['medusa-send', { inReplyTo: 'm-new' }], ['medusa-ack', { messageIds: ['m-old', 'm-new'] }],
-        ['exchange-close', { exchangeId: 'mx_other' }], ['wrap', {}], ['session-rule-write', {}], ['control-mutate', {}]
+        ['exchange-close', { exchangeId: 'mx_other' }], ['wrap', {}], ['session-rule-write', {}], ['control-mutate', {}],
+        ['medusa-loop', {}]
       ]) {
         assert.equal(judge(action, {}, extra).body.code, 'COORDINATOR_FENCED', `${action} ${JSON.stringify(extra)} waits for the resume`);
       }

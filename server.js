@@ -907,6 +907,7 @@ function route(method, pattern, handler, options) {
   });
   routes.push({
     method: method.toUpperCase(),
+    pattern,
     regex: new RegExp(`^${regexStr}$`),
     paramNames,
     handler,
@@ -7385,6 +7386,9 @@ function registerMedusaRoutes(prefix, resolve) {
   route('POST', `${prefix}/toggle`, async (_req, res, params, body) => {
     const r = resolve(params);
     if (refused(res, r, 'toggle Medusa for')) return;
+    // #2032: a stale coordinator context must not switch its switchboard off
+    // or on; the bound replacement may, since resuming needs a listener.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-listener')) return;
     const { target } = r;
     const isOn = medusa.getStatus(target.sessionId).state !== 'off';
     const desired = (body && typeof body.enabled === 'boolean') ? body.enabled : !isOn;
@@ -7633,6 +7637,8 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'open a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    // #2032: opening a loop is new dispatch, gated like a send.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.openLoop({
         sessionId: r.target.sessionId,
@@ -7660,6 +7666,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'end a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.forceDoneLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -7678,6 +7685,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'continue a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.continueLoop({ sessionId: r.target.sessionId, loopId: params.loopId, message: body && body.message });
       jsonResponse(res, 200, result);
@@ -7696,6 +7704,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'close a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.closeoutLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -12210,4 +12219,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
+/**
+ * Every registered route's method and pattern, for tests that must cover a
+ * family of routes as registered rather than as a list someone remembered to
+ * update (#2032: the gated-route test enumerates the Medusa routes this way).
+ * @returns {Array<{method: string, pattern: string}>}
+ */
+function _routePatterns() {
+  return routes.map((r) => ({ method: r.method, pattern: r.pattern }));
+}
+
+module.exports = { _routePatterns, createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };

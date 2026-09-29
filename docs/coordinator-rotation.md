@@ -108,6 +108,8 @@ from the thread before it is ever sent again, so a crash after sending never pro
 Once a project has rotated, its coordinator-authority mutations are judged by the **epoch gate**
 (`lib/coordinator-rotation.js#gate`). The gated mutations are:
 - Medusa send (replies included), acknowledge (`/read`) and exchange close;
+- Medusa loops: opening one, and continuing, force-closing or closing one out;
+- the Medusa listener toggle;
 - `tc workload set`;
 - session-rule writes;
 - control create, hold, release, stop, close and ack;
@@ -118,7 +120,7 @@ Once a project has rotated, its coordinator-authority mutations are judged by th
 |---|---|
 | none, or `abandoned` | Everything, as before: the project is not judged. |
 | `fenced` or `rebinding` | Nothing: no replacement is bound yet. Refused with `409 COORDINATOR_FENCED`. |
-| `reconciling` | Only from the bound replacement: `tc workload set`, the control ack, and replies to, acks of, or closes of the messages and exchanges the checkpoint recorded. Anything else is `COORDINATOR_FENCED`. |
+| `reconciling` | Only from the bound replacement: `tc workload set`, the control ack, the listener toggle, and replies to, acks of, or closes of the messages and exchanges the checkpoint recorded. Anything else, loops included, is `COORDINATOR_FENCED`. |
 | `active` | Everything, but only from the bound replacement. |
 
 "The bound replacement" is one exact combination: the replacement thread, the session and the launch

@@ -17,7 +17,7 @@ All notable changes to TangleClaw are documented in this file.
     - The replacement's workload must say it is working or waiting on something external, and not safe to clear.
     - A receipt that fails these checks is refused, with each missing fact named.
     - A change to the coordinator's role or to its checkout's content is different: no receipt can accept it. The rotation stays held until the operator recovers it.
-  - **Bound to the new thread.** Once a coordinator has rotated, its mutations are accepted only from the thread, session and launch the rotation bound. That covers Medusa sends, acknowledgements and exchange closes, workload, session-rule writes, control commands, and wrap and handoff.
+  - **Bound to the new thread.** Once a coordinator has rotated, its mutations are accepted only from the thread, session and launch the rotation bound. That covers Medusa sends, acknowledgements, exchange closes, loops and the listener toggle, workload, session-rule writes, control commands, and wrap and handoff.
     - `tc` forwards the Codex thread id automatically, so there is nothing to carry by hand.
     - The old thread, another pane, or an unbound caller is refused.
     - While reconciling, only workload, the control ack, and answers within the checkpoint's own messages go through.
