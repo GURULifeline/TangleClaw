@@ -141,7 +141,7 @@ describe('soak bundle — sample coverage', () => {
     const run = await finishedRun();
     const samples = path.join(dir, 'samples.ndjson');
     const ok = (seq, at, alive) => ({ type: 'sample', seq, at, db: { check: 'quick_check', state: 'ok', bytes: 1 }, process: { pid: 1, alive, rssKb: alive ? 10 : null, openFds: null }, disk: { freeBytes: 9, totalBytes: 10 }, health: { status: 200 } });
-    integrity.appendSample(samples, { type: 'header', schema: integrity.SAMPLES_SCHEMA, home: '/h' });
+    integrity.appendSample(samples, { type: 'header', schema: integrity.SAMPLES_SCHEMA, home: '/h', intervalMs: 5000 });
     integrity.appendSample(samples, ok(0, 1000, true));
     integrity.appendSample(samples, { type: 'sample-failed', seq: 1, at: 2000, error: 'EIO' });
     integrity.appendSample(samples, ok(2, 9000, null));
@@ -150,6 +150,7 @@ describe('soak bundle — sample coverage', () => {
     const s = r.summary.samples;
     assert.deepEqual([s.count, s.failed, s.firstAt, s.lastAt, s.largestGapMs], [3, 1, 1000, 10000, 7000]);
     assert.deepEqual([s.processDown, s.processUnknown], [1, 1]);
+    assert.equal(s.intervalMs, 5000, 'the run\'s own interval, from the header');
   });
 
   it('copies no sidecar that is a symlink, and names it instead', async () => {

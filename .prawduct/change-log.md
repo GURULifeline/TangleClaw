@@ -58,7 +58,16 @@ Lease Rule #142 (RM-LEASE TC-RM08 generation 3). PM dispatch `fe7c8a9d`. Branch 
 
 **Test contract changed, not weakened.** `test/soak-cli.test.js` expected `NO_EXECUTOR` for a full schedule. Every kind now has an executor, and the new guard is what stops a full schedule outside the guest. The test now expects `LOCAL_CONTROL_REFUSED` with no request sent and no log written. A new test pins an executor for every catalogue kind.
 
-**Open.** The workload user has no GUI login session (it was created with a password nobody keeps). But the product restarts the server and ttyd through launchd `gui/<uid>`. The Architect was asked for a ruling (exchange `mx_2MqeMZK9ZwoqbQr5`), and install runbook step 8 is marked BLOCKED until then.
+**Ruling A1.** The workload user had no GUI login session (it was created with a password nobody keeps). But the product restarts the server and ttyd through launchd `gui/<uid>`. The Architect ruled option A (exchange `mx_2MqeMZK9ZwoqbQr5`):
+- a login secret generated inside the guest, never exposed;
+- guest-only auto-login;
+- `launchctl print` checks of the domain and both labels;
+- fail closed otherwise, and no `nohup` fallback;
+- auto-login disabled at teardown.
+
+Install runbook steps 8 and 10 carry this, and the run runbook's step 9 carries the teardown. **Still open:** which macOS commands set that password with no command-line argument is not provable from the host. Step 8 marks it for the dry run to prove, with the no-argv constraint written as a stop condition.
+
+**Review.** Cumulative `rev-20260929T232557Z-d0b342f2`: 0 blocking, 4 warnings, 6 notes. The code findings were fixed in `e8b1f356`, and verify-resolutions `rev-20260929T233248Z-a6f74105` confirmed them with 0 new findings. Its observation that the runbook's gap check assumed the default interval was fixed with the ruling edits: the bundle now reports the run's own `intervalMs`.
 
 **Verification.** Unit and integration tests use fakes for HTTP, WebDriver, launchctl, tmux and statfs, and a real SQLite database and real files. Nothing was run in a real guest: the runbooks mark those steps unverified until the first dry run.
 

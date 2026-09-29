@@ -19,9 +19,10 @@ records what happened.
 > rc-cert). Until it exists, nothing but `run`'s exit 5 acts on a log's ownership-unverified
 > disposition.
 >
-> The guest's launchd domain for the workload user is pending an Architect ruling (see the install
-> runbook, step 8). Until then, `fault.server.restart` and `fault.ttyd.restart` have no launchd job to
-> act on in a guest.
+> The server and ttyd run as launchd agents in the workload user's GUI session. Per Architect ruling A1,
+> that user gets a login secret generated inside the guest and never exposed, and the guest logs it in
+> automatically (install runbook, step 8). Without that session, `fault.server.restart` and
+> `fault.ttyd.restart` have no launchd job to act on.
 
 ## Build a schedule
 

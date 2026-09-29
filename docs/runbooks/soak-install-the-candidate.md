@@ -16,10 +16,12 @@ a certification starts from a pristine guest.
 
 - **Everything the guest needs comes from the network before step 11.** Step 11 loads the default-deny
   profile, and after that the guest cannot reach GitHub or Homebrew.
-- **Unverified until the first dry run:** steps 4, 9 and 10 have not yet been run in a real guest.
+- **Unverified until the first dry run:** steps 4, 8, 9 and 10 have not yet been run in a real guest.
   Record what each one printed with the run's evidence.
-- **Step 8 is blocked.** It waits on an Architect ruling (#2020): the workload user needs a GUI login
-  session for launchd to run the server and ttyd.
+- **The workload user gets a login secret, inside the guest only** (Architect ruling A1 on #2020).
+  launchd runs the server and ttyd in that user's GUI session, which needs a login. The secret is
+  generated in the guest and must never appear in a command line, a log, the evidence, the repo or
+  Medusa. Nobody, the Operator included, ever sees it.
 
 ## Steps
 
@@ -57,8 +59,17 @@ In the guest, as its admin user over SSH:
    → Expected: the last line is
    `workload user soakrun is ready. Next: start the pinned TangleClaw as soakrun on 127.0.0.1:3102, then run guest-setup.sh`.
 
-8. **BLOCKED, pending an Architect ruling:** open a GUI login session for `soakrun`, so launchd has a
-   `gui/<uid>` domain for it. Stop here until the ruling says how.
+8. Give `soakrun` a GUI session that logs in by itself:
+   - **Unverified: the dry run proves the commands for this, and records them here.** Set a random
+     password for `soakrun`, generated in the guest, and write the matching `/etc/kcpassword`
+     (root, `0600`), without the password ever appearing in a command line. If no way is found that
+     keeps it out of every command line, stop: fail closed and report on #2020. Never weaken this.
+   - Then: `sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser soakrun && sudo shutdown -r now`
+   - After the reboot, over SSH as the admin: `sudo launchctl print "gui/$(id -u soakrun)" | head -1`
+   → Expected: `gui/<uid> = {`, with `soakrun`'s uid.
+   → If it prints `Could not find domain`: the session did not start. Stop and report the output on
+     #2020. Do not start the candidate any other way: without launchd, the restart and ttyd gates cannot
+     pass.
 
 As `soakrun`, in that GUI session:
 
@@ -67,10 +78,12 @@ As `soakrun`, in that GUI session:
    → Expected: the install finishes with its summary banner. If `mkcert -install` asks for a password
    and fails, the install says so and carries on; that is fine here.
 
-10. Confirm the server runs the pin, with the gate off:
+10. Confirm launchd runs both services, and the server runs the pin with the gate off:
+    `launchctl print "gui/$(id -u)/com.tangleclaw.server" | grep -m1 'state ='`,
+    `launchctl print "gui/$(id -u)/com.tangleclaw.ttyd" | grep -m1 'state ='`,
     `curl -s http://127.0.0.1:3102/api/server-info` and
     `node -p "require(process.env.HOME + '/.tangleclaw/config.json').authEnabled === true"`
-    → Expected: `"startupSha"` equal to `$SOAK_SHA`, then `false`.
+    → Expected: `state = running` twice, then `"startupSha"` equal to `$SOAK_SHA`, then `false`.
     → If the gate is on: browser events cannot log in. Turn the gate off before continuing.
 
 As the admin again:
