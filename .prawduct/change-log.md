@@ -114,7 +114,7 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 - **Epoch lapse.** An active epoch never released. Now it lapses when its bound session ends, so an ordinary relaunch needs no operator, and a completed rotation stays `active`, never `abandoned`.
 - **Re-entry turn.** It sent the coordinator to raw routes it could no longer use. Now it names `tc message read|ack` and says why raw HTTP is refused.
 
-**Pending Architect confirmation.** The relaunch baseline retake and the epoch lapse both change how rulings A7a and A11/A12 apply. Both were sent to the Architect (exchange `mx_U7sCk3a8J8HMlEdp`); the Architect's answer decides them.
+**Architect ruling on the epoch lapse (message 704a075b): confirmed, fail-closed.** An epoch lapses only on persisted evidence that its bound session ended, meaning a terminal session status. A missing or unreadable row keeps the fence, and no successor inherits the epoch. A completed rotation stays completed. The relaunch baseline retake was also sent for confirmation (exchange `mx_U7sCk3a8J8HMlEdp`); the ruling does not name it separately.
 
 Also fixed:
 - the dirty-path cap (1000) and the column sizes (1 MB) now agree;

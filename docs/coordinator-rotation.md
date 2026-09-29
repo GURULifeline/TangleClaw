@@ -148,7 +148,9 @@ sets in every tool shell and sends it as `x-tangleclaw-engine-thread`.
 - **How long it binds.** The binding holds while the bound session lives, until a governed next
   rotation replaces it or the operator releases it with abandon.
   - **When the bound session ends.** A wrap or a kill ends the session, and with it the epoch: no
-    context of that epoch can act any more. The coordinator's next ordinary launch is then judged as
+    context of that epoch can act any more. The epoch lapses only on persisted evidence: the bound
+    session's row must record `wrapped`, `killed` or `crashed`. A missing or unreadable row is
+    uncertainty, and uncertainty keeps the fence. No successor inherits the old epoch. The coordinator's next ordinary launch is then judged as
     if it had never rotated, and needs no operator.
   - **How it is recorded.** A completed rotation stays `active` in the record. A lapse is never
     recorded as `abandoned`.

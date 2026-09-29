@@ -914,6 +914,22 @@ describe('coordinator context rotation (#2032)', () => {
         assert.equal(rotation.gate({ projectId: project.id, access: relaunched, threadId: 'fresh-thread', action: 'medusa-send' }), null,
           'the bound session ended, so the epoch lapsed');
         assert.equal(store.coordinatorRotations.get(rot.rotationId).state, 'active', 'a completed rotation is not recorded as abandoned');
+        // Fail closed: without persisted proof the bound session ended, the epoch holds.
+        const realGet = store.sessions.get;
+        store.sessions.get = () => null;
+        try {
+          assert.equal(rotation.gate({ projectId: project.id, access: relaunched, threadId: 'fresh-thread', action: 'medusa-send' }).body.code,
+            'COORDINATOR_EPOCH_MISMATCH', 'a missing session row is uncertainty, not an ending');
+        } finally {
+          store.sessions.get = realGet;
+        }
+        store.sessions.get = () => { throw new Error('store locked'); };
+        try {
+          assert.equal(rotation.gate({ projectId: project.id, access: relaunched, threadId: 'fresh-thread', action: 'medusa-send' }).body.code,
+            'COORDINATOR_EPOCH_MISMATCH', 'an unreadable session row keeps the fence');
+        } finally {
+          store.sessions.get = realGet;
+        }
         assert.equal(rotation.abandon({ caller: { kind: 'operator' }, body: { rotationId: rot.rotationId, reason: 'explicit release' } }).status, 200,
           'the operator can still release it explicitly');
       } finally {
