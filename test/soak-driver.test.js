@@ -143,6 +143,19 @@ describe('soak driver — a complete run', () => {
     assert.ok(expected.length > 0);
     assert.deepEqual(seen, expected);
   });
+
+  it('tells each executor which event it is running, without changing the shared context', async () => {
+    const s = apiSchedule({ durationMs: 60 * MIN });
+    const shared = { tag: 'guest' };
+    const seen = [];
+    const executors = {};
+    for (const kind of new Set(s.events.map((e) => e.kind))) {
+      executors[kind] = async (ctx) => { seen.push([ctx.eventIndex, ctx.tag]); return { ok: true, code: 'OK' }; };
+    }
+    await driver.runSchedule({ schedule: s, executors, ctx: shared, logPath, clock: fakeClock(T0) });
+    assert.deepEqual(seen, s.events.map((e) => [e.index, 'guest']));
+    assert.deepEqual(shared, { tag: 'guest' });
+  });
 });
 
 describe('soak driver — refusals', () => {

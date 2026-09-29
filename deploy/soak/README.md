@@ -93,9 +93,8 @@ node scripts/soak.js validate --schedule soak-certifying.json
   succeeded, both sessions are killed at the end whatever failed between, and a failed kill is
   reported (`cleanupFailed`). Killing the recipient retires the exchange, so the message needs no
   reply and no close.
-- **The message and its request id name the event**, so a resumed event resends under the same
-  request id. The driver does not pass the event index to executors yet, so today every message
-  carries the generic text and no request id.
+- **The message and its request id name the event** (`soak-medusa-<index>`): the driver tells
+  every executor which event it is running, so a resumed event resends under the same request id.
 
 ### Prerequisites on the target
 
