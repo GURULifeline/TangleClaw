@@ -82,6 +82,10 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
     - R-3: records are created through `private-fs#createOnceAtomic` (a temporary file hard-linked into place), so a crash cannot leave a partial record.
     - R-6: the docs name the files the host actually writes.
     - R-4: the runner test now asserts the isolation evidence is dropped with a moved verdict.
+  - **RM05 independent review (GREEN at b1d3d1c9), two bounded remediations required by the Architect before push:**
+    - Finding 1: `finalize()` rewrote `finalization-<runId>.json` on every call, so re-running `host-finalize` after a relay broke that relay's record for good. The finalization is now sealed once a relay record exists for the run (`FINALIZATION_SEALED`). Before any relay, a re-finalize is still allowed.
+    - Finding 2: the switchboard request id `soak-medusa-<index>` collided across runs, because the server keeps request ids unique across all sends, and its 409 was logged as a failed send. The id is now scoped to the run (`soak-medusa-<runKey>-<index>`, with the run key taken from the schedule digest and the log start time). A resumed event's refused re-send is its own outcome, `SEND_ALREADY_ATTEMPTED`. The README no longer calls the resend idempotent.
+    - **Tests changed with the contract, not weakened:** the executor tests that pinned `soak-medusa-<index>` encoded the defect, and now assert the run-scoped id.
   - **Process incident:** a full suite ran at `44e768f1` without the PM's quiet-window lease (A40), because the inbox was not read between chunks. It is quarantined as non-evidence. A learning now requires reading the inbox before any gated action.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.

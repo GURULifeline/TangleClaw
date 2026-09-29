@@ -391,7 +391,8 @@ describe('soak executors — switchboard cycle', () => {
     const clock = fakeClock();
     let n = 0;
     const f = medusaFetch({ medusaStatus: (p) => ({ status: 200, body: { state: ++n <= 3 ? 'connecting' : 'listening', workspaceId: WS[p] } }) });
-    const r = await ex.EXECUTORS['engine.session.medusa-cycle'](ctx(f.fetch, { ...clock, eventIndex: 41 }), PAIR);
+    const runKey = `${'c'.repeat(16)}-1790000000000`;
+    const r = await ex.EXECUTORS['engine.session.medusa-cycle'](ctx(f.fetch, { ...clock, eventIndex: 41, runKey }), PAIR);
     assert.deepEqual(r, { ok: true, code: 'OK', status: null, step: null, steps: 7, messageId: 'msg-1' });
     const seq = f.calls.map(route);
     assert.deepEqual(seq.slice(0, 4), ['GET /api/sessions/soak-a/status', 'GET /api/sessions/soak-b/status', 'POST /api/sessions/soak-a', 'POST /api/sessions/soak-b']);
@@ -402,21 +403,24 @@ describe('soak executors — switchboard cycle', () => {
     const send = f.calls.find((c) => c.path.endsWith('/medusa/send'));
     assert.deepEqual(Object.keys(send.body).sort(), ['message', 'requestId', 'to']);
     assert.equal(send.body.to, 'ws-b', 'the recipient\'s workspace, from its own status');
-    assert.equal(send.body.requestId, 'soak-medusa-41');
+    assert.equal(send.body.requestId, `soak-medusa-${runKey}-41`, 'scoped to the run, since the server keeps request ids unique across all sends');
     assert.match(send.body.message, /event 41/);
     assert.deepEqual(f.calls.find((c) => c.path.endsWith('/medusa/read')).body, { ids: ['msg-1'] });
     assert.ok(clock.slept.length > 0, 'the listener wait used the injected sleep');
   });
 
-  it('sends the same text on a rerun of the same event, and no request id without an event index', async () => {
+  it('sends the same body on a rerun of the same event in the same run, and no request id without an event index and run key', async () => {
     const bodies = [];
-    for (const extra of [{ eventIndex: 3 }, { eventIndex: 3 }, {}]) {
+    const runKey = `${'d'.repeat(16)}-1790000000001`;
+    for (const extra of [{ eventIndex: 3, runKey }, { eventIndex: 3, runKey }, {}, { eventIndex: 3 }]) {
       const f = medusaFetch();
       await ex.EXECUTORS['engine.session.medusa-cycle'](ctx(f.fetch, { ...fakeClock(), ...extra }), PAIR);
       bodies.push(f.calls.find((c) => c.path.endsWith('/medusa/send')).body);
     }
     assert.deepEqual(bodies[0], bodies[1]);
+    assert.equal(bodies[0].requestId, `soak-medusa-${runKey}-3`);
     assert.equal(bodies[2].requestId, undefined);
+    assert.equal(bodies[3].requestId, undefined, 'an unscoped id could collide with another run\'s');
     assert.equal(bodies[2].inReplyTo, undefined);
     assert.equal(bodies[2].priority, undefined);
   });
@@ -688,5 +692,39 @@ describe('soak executors — wrap cycle', () => {
     const f = wrapFetch({ status: () => ({ status: 200, body: { active: true, engine: 'soak-stub' } }) });
     const r = await run(f);
     assert.deepEqual([r.ok, r.preKilled], [true, true]);
+  });
+});
+
+describe('soak executors: switchboard request ids are scoped to the run (RM05 finding 2)', () => {
+  it('names the run and event in the request id, and reads a server refusal of a re-send as its own outcome', async () => {
+    const ex = require('../lib/soak/executors');
+    const sends = [];
+    const replies = {
+      status: { ok: true, body: { active: false } },
+      medusaStatus: { ok: true, body: { state: 'listening', workspaceId: 'soak-b-12345678' } }
+    };
+    /**
+     * A target that refuses the send as already attempted.
+     * @param {URL} url - Request URL
+     * @param {object} init - Request init
+     * @returns {Promise<object>} Response
+     */
+    const fetch = async (url, init) => {
+      const p = new URL(url).pathname;
+      const json = (status, body) => ({ status, headers: { get: () => null }, text: async () => JSON.stringify(body) });
+      if (p.endsWith('/medusa/send')) {
+        sends.push(JSON.parse(init.body));
+        return json(409, { error: 'already attempted', code: 'SEND_ALREADY_ATTEMPTED' });
+      }
+      if (p.endsWith('/medusa/status')) return json(200, replies.medusaStatus.body);
+      if (p.endsWith('/status')) return json(200, replies.status.body);
+      return json(200, {});
+    };
+    const ctx = { apiBase: 'http://127.0.0.1:1', fetch, eventIndex: 7, runKey: `${'a'.repeat(16)}-1790000000000`, sleep: async () => {}, now: () => 0 };
+    const out = await ex.EXECUTORS['engine.session.medusa-cycle'](ctx, { from: 'soak-a', to: 'soak-b' });
+    assert.equal(sends[0].requestId, `soak-medusa-${'a'.repeat(16)}-1790000000000-7`);
+    assert.equal(out.code, ex.OUTCOME.SEND_ALREADY_ATTEMPTED);
+    assert.equal(out.step, 'send');
+    assert.notEqual(out.code, ex.OUTCOME.HTTP_STATUS, 'never recorded as a failed send');
   });
 });

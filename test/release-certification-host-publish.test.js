@@ -414,3 +414,27 @@ describe('private-fs: create once, atomically', () => {
     assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('rec.json')), ['rec.json']);
   });
 });
+
+describe('host relay: a relayed run\'s finalization is sealed (RM05 finding 1)', () => {
+  it('refuses to re-finalize a relayed run, so its record still verifies', async () => {
+    const run = await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const before = fs.readFileSync(hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID), 'utf8');
+    await assert.rejects(
+      () => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 99 }),
+      (e) => e.code === REFUSAL.FINALIZATION_SEALED
+    );
+    assert.equal(fs.readFileSync(hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID), 'utf8'), before, 'not rewritten');
+    assert.deepEqual(await hostPublish.verifyRecord(r, { hostBase, remoteUrl: pub }), { ok: true, reasons: [] });
+    const again = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    assert.deepEqual(again, r, 'a re-relay finds the same record rather than a conflict');
+  });
+
+  it('allows a re-finalize before any relay, e.g. after a failed one', async () => {
+    const run = await guestRun({ observe: async () => ({ observation: { state: 'ok', checks: { test: 'failure' } }, error: null }) });
+    assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, false);
+    const out = await hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN });
+    assert.equal(out.ok, true);
+    assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, true);
+  });
+});

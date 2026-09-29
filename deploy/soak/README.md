@@ -93,8 +93,13 @@ node scripts/soak.js validate --schedule soak-certifying.json
   succeeded, both sessions are killed at the end whatever failed between, and a failed kill is
   reported (`cleanupFailed`). Killing the recipient retires the exchange, so the message needs no
   reply and no close.
-- **The message and its request id name the event** (`soak-medusa-<index>`): the driver tells
-  every executor which event it is running, so a resumed event resends under the same request id.
+- **The message and its request id name the run and the event**
+  (`soak-medusa-<runKey>-<index>`, where `runKey` is the schedule digest's first 16 hex characters
+  and the log's start time). The server keeps request ids unique across all its sends, so scoping
+  the id to the run keeps a second soak against the same target from colliding with the first.
+  The send is **not** idempotent: a resumed event re-sends under its earlier id, the server refuses
+  it (409 `SEND_ALREADY_ATTEMPTED`) rather than sending again, and the cycle records that as its own
+  outcome, `SEND_ALREADY_ATTEMPTED`, never as a failed send.
 
 ### Prerequisites on the target
 
