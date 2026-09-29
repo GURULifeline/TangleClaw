@@ -59,33 +59,33 @@ The PM dispatched this over Medusa as a v5.30 release blocker, under RULE #120 (
 
 <!-- prawduct: type=bugfix | scope=2032-coordinator-rotation -->
 
-The Architect dispatched this as an emergency (message e2f2d7c2, the plan at TangleClaw-Architect/.tangleclaw/plans/2032-coordinator-context-rotation-emergency.md), and the PM confirmed it. The scope was E1, then the smallest complete safe path through E2 and E3; E4 (full wrap/relaunch parity, operator surface) is not built. The incident: Architect session 1199 survived `/clear`, but its startup-control channel stayed on the pre-clear Codex thread, so every wake answered `thread-not-loaded` and the replacement context resumed with no fence and no proof it had reconciled.
+The Architect dispatched this as an emergency (message e2f2d7c2, the plan at TangleClaw-Architect/.tangleclaw/plans/2032-coordinator-context-rotation-emergency.md), and the PM confirmed it. The scope was E1–E3 first, then the replacement Architect's rulings A1–A16, which made E4 (relaunch parity and the operator surface) part of the certifying scope. The incident: Architect session 1199 survived `/clear`, but its startup-control channel stayed on the pre-clear Codex thread, so every wake answered `thread-not-loaded` and the replacement context resumed with no fence and no proof it had reconciled.
 
 **Reproduction first.** `test/coordinator-rotation.test.js` opens with the incident against the fake app-server: the recorded thread unloads, a replacement loads, observation answers `thread-not-loaded` and keeps the old binding. It still does after this change, with or without an open rotation, so the #1628/D8 invariant (observation never replaces a recorded thread) holds.
 
 **The change.**
-- **Record and fence.** A `coordinator_rotations` record (schema v51) is created by `prepare` together with a validated, canonical-JSON-digested checkpoint and the inbox ids at that moment, in one insert, so the checkpoint never exists without the fence. A partial unique index allows one open rotation per project.
+- **Record and fence.** A `coordinator_rotations` record (schema v52 after the A1 renumber; v51 is claimed by #1971 and #1966) is created by `prepare` together with a validated, canonical-JSON-digested checkpoint and the inbox ids at that moment, in one insert, so the checkpoint never exists without the fence. A partial unique index allows one open rotation per project.
 - **Clear and rebind.** The server's driver types `/clear` when the prior thread is idle, then binds the one provable replacement through `startup-control-codex#rebindThread`: new since the clear, root, same directory, prior gone. That function is a compare-and-set on the channel and the only writer allowed to move a recorded thread.
 - **Re-entry.** The re-entry turn is delivered by `deliverTurn`, which reads the thread back for the rotation's client-id digest before sending.
-- **Resume.** It is accepted only on the server's own checks (digest, prepare interval drained, git head, control generation, a post-prepare workload receipt), and acceptance is the compare-and-set that lifts the fence.
-- **What the fence holds.** Medusa `send` (non-replies) and the wake (`coordinator-rotating`).
+- **Resume.** It is accepted only on the server's own checks, detailed below, and acceptance is the compare-and-set that lifts the fence.
+- **What the fence holds.** Every coordinator-authority mutation, through the epoch gate below, plus the wake (`coordinator-rotating`).
 - **Wiring.** `tc rotation prepare|show|advance|resume`, launch-bound routes under `/api/tc/rotation`, operator-only abandon, and driver recovery at boot. Engines without a rebindable channel are refused at prepare.
 
-**Decisions to confirm.** Schema v51 is also claimed by #1971 and #1966, so whichever lands second renumbers. "Dispatch" is taken as new outbound Medusa sends, with replies allowed. The inbox high-water mark is the set of message ids present at prepare. Old and new contexts share one pane and one launch, so generation is enforced where it is carried (resume); marking mail handled and closing an exchange are not generation-bound. GitHub reconciliation is asserted in the receipt, not queried by the server.
+**Decisions.**
+- **Schema.** Per ruling A1 the migration took the next number past the open claims (#1971 and #1966 both hold v51), so it is v52.
+- **The first cut's readings are superseded.** "Dispatch" as outbound sends only, and "generation only at resume", were replaced by rulings A2, A11 and A12: the epoch gate covers every listed mutation.
+- **Inbox high-water mark.** It stays the set of message ids present at prepare.
 
-**Architect rulings A1–A13 (after the E1–E3 checkpoint).** The replacement Architect ruled most of the first cut insufficient. Two are built in this entry:
+**Architect rulings A1–A16 (after the E1–E3 checkpoint).** The replacement Architect ruled most of the first cut insufficient, and each ruling is built:
 - **A6a.** An operator-granted, versioned `coordinator_roles` contract is now the only authority to prepare. A role or version change during absence is non-acceptable authority drift.
 - **A7a.** A content fingerprint of the checkout is taken at prepare, which refuses undeclared dirt. It is re-observed at resume, where any difference is non-acceptable integrity drift. The old receipt-asserted `git.head` and `github.checkedAt` fields were removed.
-
 - **A11/A12.** The epoch gate now judges every listed coordinator-authority mutation, including control, session-rule, wrap and workload routes and the Medusa send, ack and close routes. It accepts them only from the bound replacement thread, session and launch. `tc` forwards `CODEX_THREAD_ID` as `x-tangleclaw-engine-thread`. Reconciling allows only workload, the control ack and interval-scoped replies, acks and closes. Resume needs a one-time nonce, minted lazily when the re-entry turn is actually sent and stored hashed. The adapter's `deliverTurn` now decides "already sent" by client id alone, because each send's text carries a fresh secret.
-
 - **A10.** The checkpoint enumerates GitHub facts, which `lib/github-facts.js` reads through `gh` at prepare (unreadable or wrongly declared facts refuse the prepare) and at resume. There are two drift classes:
   - Trusted GitHub drift (key plus before/after digests) must be disposed of in `receipt.drift` (`accepted`/`superseded`/`follow-up`).
   - Authority and checkout-integrity drift can never be accepted.
 
   Unavailable evidence blocks. Observations and dispositions are persisted on every resume attempt.
 - **A8.** A readiness verdict: a workload receipt published after the re-entry turn, current, `working`/`waiting-external` and `do-not-clear`. It is persisted either way. Prepare and resume are now async.
-
 - **A13/E4.** Relaunch parity:
   - A `relaunch`-mode rotation stays fenced across the session's end. The ending session may only wrap itself, from its prior thread.
   - An operator-only relaunch claim launches the successor and binds exactly its session, launch and channel in one compare-and-set.
@@ -93,7 +93,7 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 - **Operator surface.** `nextStep` gives exactly one next command per state. Every view shows the binding (session, thread, generation) and never a launch id or nonce. It surfaces in `tc rotation show`, the fleet lane (`tc sessions` shows `ROTATING …`) and the operator's `GET /api/rotations`.
 - **A14 live-Codex check.** `scripts/rotation-live-check.js` (pre / prepare / post) is for an independent executor at the exact head. `GET /api/tc/rotation` reports the forwarded-vs-channel thread binding it reads. The script's own verdicts are tested against a stub.
 
-**Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. There are also route-binding, verb, send-fence route and wake-gate tests. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
+**Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
 

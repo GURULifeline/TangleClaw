@@ -1178,8 +1178,8 @@ describe('coordinator context rotation (#2032)', () => {
     });
   });
 
-  describe('schema v51 migration', () => {
-    it('upgrades a v50 store: the table and its one-open-rotation index appear, and the version advances', () => {
+  describe('schema v52 migration', () => {
+    it('upgrades an older store: the tables and their one-open indexes appear, and the version advances', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-mig-'));
       const saved = store._getBasePath();
       store.close();
@@ -1191,7 +1191,7 @@ describe('coordinator context rotation (#2032)', () => {
         const db = new DatabaseSync(dbPath);
         db.exec('DROP TABLE coordinator_rotations');
         db.exec('DROP TABLE coordinator_roles');
-        db.exec('DELETE FROM schema_version WHERE version >= 51');
+        db.exec('DELETE FROM schema_version WHERE version >= 52');
         db.exec('INSERT INTO schema_version (version) VALUES (50)');
         db.close();
 

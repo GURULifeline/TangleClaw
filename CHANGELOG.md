@@ -30,7 +30,7 @@ All notable changes to TangleClaw are documented in this file.
   - **Safety.** Every step can be retried or resumed after a restart without repeating itself. Only the operator can abandon a rotation.
   - **Unchanged.** Ordinary wake observation still never replaces a recorded thread.
   - **Other engines.** A managed rotation is refused for them, with the reason. Claude keeps its SessionStart re-entry.
-  - **Storage.** The record is schema v51.
+  - **Storage.** The rotation and coordinator-role records are schema v52.
   - **Reference:** `docs/coordinator-rotation.md`.
 
 - **The server reports when a session has stopped being woken for its mail** (#1978). When a session's Medusa wake has been held as `engine-thread-unknown` for 10 minutes with mail waiting, the server logs one warning per episode. That code means the engine's channel exists but could not prove the session idle. `/api/server-info` also carries `medusaWakeStalls`: how many sessions are affected, plus the oldest one's project, how long it has waited and the engine's own reason. It is read-only evidence, and no dashboard UI shows it yet. The alert is read from the wake monitor's own verdict, so it clears by itself when the engine answers, the mail is read or the session ends. It never types into a pane, sends a message or starts anything. Before this, the only sign was an unread badge somebody had to notice.
