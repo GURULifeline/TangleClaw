@@ -135,7 +135,7 @@ Also fixed:
   - **Fix.** `GET /api/tc/rotation` now also returns `latest`, and `post` accepts a rotation that is already active and bound to this thread.
 
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
-## 2026-09-28 — A reproducible load-and-fault schedule for the release-candidate soak (#2020)
+
 ## 2026-09-29 — Never certify a soak log whose lock ownership could not be verified (#2025 remediation, #2020 Chunk 2A)
 
 <!-- prawduct: type=bugfix | scope=2020-soak-schedule -->
