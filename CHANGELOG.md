@@ -95,7 +95,61 @@ All notable changes to TangleClaw are documented in this file.
     - It logs every outcome to an fsynced, owner-only ndjson file.
     - Interrupted, it resumes without running any logged event twice. Only an event in flight at a crash runs again. Ctrl-C takes effect within a second, even during a long wait.
   - **The engine load uses a network-free stub engine** (`deploy/soak/stub-engine/`), because the soak guest has no egress and no vendor credentials. Real-vendor engine behaviour is outside this soak.
-  - **Not built yet:** the browser and fault executors, the isolated guest and the evidence bundle. Until the executors exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently. The Chunk 1 guest must also provision the synthetic `soak-*` repos before the first dry run; until then, they must already exist on the target. Chunk 2B's load is below.
+  - **Not built yet:** the browser and fault executors and the evidence bundle. Until the executors exist, `run` refuses a schedule that includes those kinds (`NO_EXECUTOR`) rather than skipping them silently. The link from the soak to the certification judge is Chunks 3 and 4; until then, only `run`'s exit 5 acts on an ownership-unverified disposition. The guest and the synthetic `soak-*` repos (Chunk 1) and Chunk 2B's load are below.
+- **The soak guest's definition, and the synthetic `soak-*` repos it runs against** (#2020 Chunk 1, part of #1949). This builds the Chunk 1 part that the Chunk 2A entry above lists as not built yet.
+  - **`node scripts/soak.js repos --root <dir> --origins <dir>` creates the synthetic projects** (`soak-a`, `soak-b`, `soak-c` by default, held to the schedule's own naming rules). Each is a git repo with a bare origin on the local filesystem, never a network remote.
+    - **Each repo's first commit has the same SHA on every machine and every run.** It is built from a fixed tree, author, date and message, and the operator's git config, environment and hooks are kept out. The SHA is computed independently of git and checked, so the evidence can name exactly which repos a soak ran against. The output carries a digest of the set.
+    - **It touches only repos it made.** Each repo and its origin carry a `soak.owner` marker. A file, an empty directory, a repo with another marker or remote, or one missing its seed commit is refused (`NOT_OWNED`, exit 3) and left alone. Every path is checked before anything is written, so a refusal creates nothing.
+    - **Running it again changes nothing** and reports each repo `present`, with `pristine` showing whether it has moved past its seed. Each repo is built in a staging directory and renamed into place, so a crash cannot leave a half-made repo behind. A work repo lost after its origin survived is rebuilt from that origin.
+    - The seed includes the project's `.tangleclaw/project.json` naming the `soak-stub` engine, and a `CHANGELOG.md`, so attaching the project to TangleClaw adds nothing to its work tree.
+  - **`deploy/soak/guest/` holds the guest as files.**
+    - `guest.conf`: the pinned VM settings. Holds no secrets.
+    - `pf/soak-deny.conf`: a default-deny network profile.
+      - Loopback is open.
+      - SSH in from the host is allowed, and so is DHCP (port 68 to 67) with the configured DHCP server, which must match the guest's lease. It is never assumed to be the host.
+      - Both are allowed on the guest interface only. Nothing else goes in or out.
+    - `host-provision.sh`: prints the tart commands.
+      - Creating a VM is an operator-only host action, so it runs them only with both `--execute` and `SOAK_OPERATOR_APPROVED=1`.
+      - It refuses to reuse an existing VM.
+      - It first checks that its own checkout can be trusted: `host-provision.sh`, `guest.conf` and every directory above them.
+      - It shares one dedicated directory, `/Users/Shared/tc-soak-share` by default. The share must be owned by the operator, closed to group and others, and empty when a guest is created. It refuses `/`, `$HOME`, anything containing `$HOME`, or anything inside it, comparing real paths so `..` or a symlink can't slip one through.
+    - `guest-setup.sh`: run inside the guest.
+      - **Checkout trust comes first.** In every mode, before its config is read, it checks every file the admin sources, loads, installs or runs, and every directory above them up to `/`:
+        - each must be a plain file or directory, with no symlink or ambiguous path;
+        - each must be owned by root or the admin, and not writable by group or others, with no exception;
+        - once the workload user is known, a check run as that user must fail to write any of them.
+        - So the checkout lives in a dedicated root- or admin-owned hierarchy such as `/opt/tangleclaw-soak`.
+      - It creates a dedicated workload user with no admin rights and no sudo, and refuses an existing account that has either or whose identity conflicts. `--bootstrap-user` does only that, so a fresh guest can start TangleClaw as that user before the rest of setup.
+      - It attests the guest from two planes. Each prints one JSON line (`tc.soak-guest-attest/v1`) built by a real JSON encoder, carrying the boot identity and the sha256 of the script, the pf profile and `guest.conf`:
+        - `--verify-admin` repeats the trust check and the workload account's identity checks, with sudo judged strictly by exit status after two positive controls (the admin's sudo works; the same policy query says yes for the admin). It then checks:
+          - pf is enabled with exactly the profile's rules, compared with pfctl's own parse, reporting both digests;
+          - the guest interface and the SSH management path;
+          - the TangleClaw process, bound to the workload user by kernel evidence: one listening pid, its uid, and a canonical node executable;
+          - the DHCP lease, normalized to epochs. It fails when the lease is missing, inconsistent or expired, when renewal does not come strictly before rebinding and rebinding before expiry, or when less lease remains than the next sample interval plus a margin.
+        - `--verify-workload` runs as the workload user and proves that sudo and pfctl are refused to it, that loopback works, and that nothing outside answers over IPv4, IPv6 or DNS over UDP. The probes target well-formed public addresses, judged by node's IP parser and a block list, and are recorded.
+      - Every input is validated before pfctl sees it, and every probe has a timeout; a hang is a failure.
+      - Then it installs the stub engine, creates the repos as the workload user, and attaches them through the guest's own TangleClaw, which must run as the workload user.
+      - It refuses to run outside a macOS VM or in a live TangleClaw pane.
+  - **Not in this chunk:** installing and starting the pinned release candidate inside the guest (the operator runbook, a later chunk). Also the runner's side of attestation: running both verifiers at admission, at every sample and at finalization, and restarting the clock after a reboot. Also the dry run, and everything else the Chunk 2A entry lists.
+
+- **A finished session can retire itself headlessly with `tc finalize`** (#2027). `tc finalize --reason "<why>"` (`POST /api/sessions/:project/finalize`) ends a session with no wrap drawer, no wrap pipeline and no git.
+  - **What it does:**
+    - stages a minimal final handoff through the same code the wrap uses;
+    - records the session `wrapped`, with that handoff bound eligible in the same transaction;
+    - publishes the handoff, so the next launch reads `ok` rather than a recovery verdict;
+    - tears down its Medusa workspace, startup channel and tmux pane;
+    - audits every step.
+  - **Who can use it:** a coordinator in the target assignment's `authority.lifecycle` can do the same for the session that assignment is bound to, with `--project` and `--session`. Every other caller is refused: another project, a peer outside the matrix, the operator, an unbound request. The request must name the session, so a relaunch in between answers `SESSION_CHANGED`.
+  - **It retires only a session with nothing left to decide:**
+    - The lane must compose `AVAILABLE`: a current `complete` + `safe-to-clear` receipt, and the engine at rest. A self caller attests being at rest with that receipt, since its own pane is running the request. The composition is checked again at the commit point.
+    - It must have no unresolved Medusa obligation: mail sent to it acknowledged, and answered where a reply is required, and replies it is owed received.
+    - It must work in the project's registered checkout: a session whose pane is in a linked worktree, or whose pane cannot be read, is refused. Every linked worktree is also compared with its launch record, so work in a worktree the pane does not show is still found.
+    - A webui session is refused, because its tunnel is not part of the shared teardown.
+    - It must have no work of its own since launch: no changed paths, no change to a file already dirty at launch, no commits a freshly fetched remote lacks (on HEAD, any local branch or tag, or any worktree's HEAD, a detached one included), and nothing stashed.
+    - It must not be held or stopped, and no wrap may be running.
+  - **Anything else refuses with nothing changed** and a code naming the one blocker (`NOT_CLEAR`, `EXCHANGES_OPEN`, `OWNED_WORK_PRESENT`, `WORK_STATE_UNKNOWN`, `WRAP_IN_PROGRESS`, `SESSION_CHANGED`, `FINALIZE_STAGE_FAILED`). `tc` exits 3.
+  - **Success means it finished.** If publishing or teardown is interrupted, the answer is `FINALIZE_INCOMPLETE` with what is left, and repeating the request (`tc finalize --session <id>`) finishes the same attempt without staging another.
+  - **Files already dirty at launch are left exactly as they were.** A session with work of its own still goes through the full wrap, which is unchanged. See `docs/session-finalize.md`.
 
 - **The server reports when a session has stopped being woken for its mail** (#1978). When a session's Medusa wake has been held as `engine-thread-unknown` for 10 minutes with mail waiting, the server logs one warning per episode. That code means the engine's channel exists but could not prove the session idle. `/api/server-info` also carries `medusaWakeStalls`: how many sessions are affected, plus the oldest one's project, how long it has waited and the engine's own reason. It is read-only evidence, and no dashboard UI shows it yet. The alert is read from the wake monitor's own verdict, so it clears by itself when the engine answers, the mail is read or the session ends. It never types into a pane, sends a message or starts anything. Before this, the only sign was an unread badge somebody had to notice.
 
@@ -301,6 +355,10 @@ All notable changes to TangleClaw are documented in this file.
   - **Who sees what:** the operator and the Master see every live project; a project session sees its own row and those of its project groups' members; a pane with no launch binding gets no rows and is told why; a binding that is presented and not honoured is refused (`403 PROJECT_BINDING_INVALID`), and `tc freshness` then exits nonzero, so a broken binding never reads as an empty fleet.
   - **What a row carries:** an allowlist of the checkout facts, no workspace path, the restart verdict without its file list, and, for a project session, no project or group name it could not already see (the summary is re-worded from what is shown). `tc capabilities` lists it as `checkouts`, for projects and the Master, and the prime's `tc` verb list names `freshness`.
   - Informational only: nothing here pulls, checks out, restarts or gates anything. `lib/checkout-fleet.js`.
+
+### Removed
+
+- **Printing a marker into a session's pane no longer opens the wrap drawer** (#2027). The prime used to tell every engine to print a fixed marker when the user said "wrap", and a monitor watched pane text for it. Anything that could print into a pane could therefore open the drawer: the engine quoting a document, a tool's output, a relayed message. Both are gone. The drawer opens only from the Wrap button, and the headless path is the authenticated `tc finalize`. The pane read that remains feeds engine API error detection (#261) only (`lib/engine-error-monitor.js`). The `/wrap-sentinel/ack` route and the status field `wrapRequested` are removed, and a workload receipt is no longer superseded by a typed wrap request (ADR 0020 §4, amended). A test keeps every tracked file free of it, except released CHANGELOG sections, which are locked to their published Release pages.
 
 ### Changed
 

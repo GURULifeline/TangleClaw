@@ -8,16 +8,15 @@ It judges nothing. Whether the release candidate passes is decided by the releas
 judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces the conditions and
 records what happened.
 
-> **Status: Chunk 2 (the core, plus plans, switchboard and wrap load).** This directory has the
-> schedule, the runner for the `api` and `engine` load classes, and the stub engine. Not built yet:
-> - the guest itself;
+> **Status: Chunks 2 (the core, plus plans, switchboard and wrap load) and 1 (the guest and the
+> synthetic repos).** This directory has the schedule, the runner for the `api` and `engine` load
+> classes, the stub engine, the guest definition (`guest/`) and the generator for the synthetic
+> `soak-*` repos. Not built yet:
+> - installing and starting the pinned release candidate inside the guest (the operator runbook);
 > - the executors for the `browser` and `fault` classes;
 > - integrity sampling, the evidence bundle and the operator runbook;
 > - the certification judge (Chunks 3 and 4 of #2020, with the link to rc-cert). Until it exists,
 >   nothing but `run`'s exit 5 acts on a log's ownership-unverified disposition;
-> - **Chunk 1, mandatory before the dry run:** deterministic, idempotent creation of the
->   exact-owned synthetic `soak-*` repos with local bare origins. Until then they must already exist
->   on the target.
 >
 > Until the missing executors exist, `run` **refuses** any schedule containing those kinds
 > (`NO_EXECUTOR`) rather than skipping them. Plan with `--classes api,engine` to run the load
@@ -335,3 +334,265 @@ The guest has no network access and holds no vendor credentials, so the `engine`
 
 It exercises TangleClaw's side of a session: launch, tmux, ttyd, command injection and kill.
 **Real-vendor engine behaviour is outside this soak.**
+
+## The synthetic repos
+
+The load targets projects that must exist on the target. `repos` creates them:
+
+```sh
+node scripts/soak.js repos --root ~/Projects --origins ~/soak-origins [--projects soak-a,soak-b,soak-c]
+```
+
+- **Each project is `<root>/<name>`, with a bare origin at `<origins>/<name>.git`.** The origin is a
+  local path, never a network remote, and nothing is pushed anywhere else. `--root` must be the
+  target TangleClaw's `projectsDir`.
+- **The names follow the schedule's rules** (`soak-…`, at most 20, no repeats), and the default set is
+  the schedule's own, so the repos and the load agree.
+- **Each repo's seed commit has the same SHA on every machine and every run.**
+  - It is built from a fixed tree, author, date and message. The operator's git config, `GIT_*`
+    environment and hooks are all kept out.
+  - The SHA is also computed without git, and a commit that differs is refused (`SEED_MISMATCH`).
+  - The output carries each seed SHA and a `digest` of the set, so evidence can name exactly which
+    repos a soak ran against.
+- **The seed tree:**
+  - `.soak-synthetic.json`, the marker;
+  - `.tangleclaw/project.json`, naming the `soak-stub` engine;
+  - `CHANGELOG.md`;
+  - `README.md`;
+  - `src/index.js`.
+
+  Because of the first two, attaching the project to TangleClaw picks the stub engine and adds nothing
+  to the work tree.
+- **It touches only repos it made.**
+  - A repo is owned when its git config holds `soak.owner = tc.soak-repos/v1:<name>`, its origin's
+    does too, its `origin` remote is exactly that local path, and its history contains the seed commit.
+  - Anything else at either path is refused with `NOT_OWNED` and left untouched: a file, a symlink,
+    an empty directory, a plain directory inside some other repo, a repo with another marker or
+    remote, or a work repo whose origin is gone.
+  - Every path is inspected before anything is written, so a refusal creates nothing.
+- **Running it again is safe.**
+  - An owned repo is reported `present` and not written to.
+  - `pristine` says whether the work repo and its origin still sit exactly at the seed. A soak moves
+    them on, and that does not make them any less owned.
+  - Each repo is assembled in a `.soak-staging-*` directory and renamed into place, origin first. A
+    crash between the two renames leaves an owned origin with no work repo, and the next run rebuilds
+    the work repo from that origin. A process killed mid-build can leave a `.soak-staging-*`
+    directory behind; it is never mistaken for a repo, and can be removed by hand.
+
+Exit codes: 0 done, 2 usage (including relative, identical or nested roots, or a refused project
+list), 3 refused (`NOT_OWNED`, `SEED_MISMATCH` or `GIT_FAILED`, printed as JSON on stderr).
+
+## The guest
+
+`guest/` defines the isolated macOS guest the soak runs in, as files. Nothing here runs by itself.
+Creating, starting or deleting a VM, installing tart, and changing host networking are the operator's
+actions.
+
+- **`guest.conf`** holds the pinned settings: VM name, base image, CPU, memory, disk, the one shared
+  directory, the guest's projects and origins roots, and the synthetic project names.
+  - Every value can be overridden from the environment. Record what was exported with the run's
+    evidence.
+  - It holds no secrets.
+  - The base image and the tart flags are operator-checked: confirm them against the installed tart
+    before the first run.
+- **`pf/soak-deny.conf`** is the default-deny network profile.
+  - Loopback is unfiltered, so the guest's TangleClaw, ttyd and the driver can talk to each other.
+  - Two other things are allowed, both only on the guest interface (`$guest_if`):
+    - SSH in from the host's address (`$host_addr`), the operator's management path. pf's state lets
+      only that session's replies out; the guest cannot open a connection.
+    - DHCP, client port 68 to server port 67 only, so the guest keeps its address, and with it the
+      management path, for a 72-hour run. Broadcast is allowed for DISCOVER, REQUEST and REBIND.
+      Unicast RENEW goes only to the DHCP server (`$dhcp_server`), and replies come in only from it.
+      That server is `SOAK_DHCP_SERVER`, which must be set to the host-controlled service the dry run
+      proved, and must match the single server identifier in the guest's current lease. A server read
+      from the lease alone is refused, and it is never assumed to be the SSH host.
+  - There is no DNS, no IPv6 beyond loopback, no egress and no route to production.
+- **`host-provision.sh`** runs on the host.
+  - Before it reads `guest.conf`, it checks that it can trust its own checkout. `host-provision.sh`,
+    `guest.conf` and every directory above them must be plain (no symlink or ambiguous path), owned by
+    root or the operator, and not writable by group or others.
+  - By default it only prints the `tart clone`, `tart set` and `tart run` commands.
+  - It runs them only with **both** `--execute` and `SOAK_OPERATOR_APPROVED=1`. That is a safety
+    interlock, not authority: creating a VM stays the operator's decision.
+  - It refuses to reuse an existing VM of the same name: a certification starts from a pristine guest,
+    and deleting one is the operator's call.
+  - The shared directory is the only host path the guest sees, read-write, so it must be a dedicated
+    one, `/Users/Shared/tc-soak-share` by default. The script compares real paths, following symlinks
+    and `..`. It refuses:
+    - `/` and `$HOME`;
+    - any directory that contains `$HOME` (such as `/Users`);
+    - any directory inside `$HOME` (such as `~/.ssh`);
+    - a relative path;
+    - a directory that does not exist;
+    - a directory not owned by the operator, or writable by group or others;
+    - with `--execute`, a directory that isn't empty: a new guest gets a new, empty share. It is a place
+      for inputs and evidence, never for trusted code.
+- **`guest-setup.sh`** runs inside the guest, as the admin, from a checkout of the pinned release
+  candidate that the workload user can read and nobody else can write (such as `/opt/tangleclaw-soak`;
+  see the trust check below).
+  - **The guest TangleClaw runs as the workload user, never as the admin.** Its sessions are the
+    workload, and a session with sudo could turn pf off.
+  - A fresh guest therefore goes in three steps:
+    1. `guest-setup.sh --bootstrap-user` creates or confirms the workload user and stops.
+    2. Start the pinned TangleClaw as that user on `127.0.0.1:SOAK_TC_PORT`. That is the runbook's step.
+    3. `guest-setup.sh` sets up the rest.
+  - Setup and the admin verifier refuse a TangleClaw listening as anyone else, checked with `lsof`
+    against the workload user's uid.
+
+  Every mode first:
+  - **checks the checkout can be trusted** (every mode, `--verify-workload` included), before
+    `guest.conf` is even read. The admin sources `guest.conf`, loads the pf profile and installs the
+    stub engine; setup runs `soak.js` as the workload user. Anyone who could change those files could
+    run code as the admin or the workload, or rewrite the firewall. The files checked are:
+    - `guest-setup.sh`, `guest.conf` and `pf/soak-deny.conf`;
+    - `scripts/soak.js` and every `lib/soak/*.js`;
+    - the stub-engine files;
+    - every directory above them, up to `/`.
+
+    Each must be:
+    - a plain file or directory: no symlink, and no path that resolves somewhere else;
+    - owned by root or the invoking admin;
+    - writable by neither group nor others.
+
+    There is no exception, not even a root-owned sticky directory like `/Users/Shared`. On the workload
+    side, the checkout's owner stands in for the admin, and must not be the workload itself.
+
+    Once the workload user is known, setup and every admin attestation also run a check as that user,
+    which must fail to write any of those files or directories. A positive control first shows that
+    checks run as that user work at all. `--bootstrap-user` repeats the check after creating the
+    account.
+
+    **So put the checkout in a dedicated hierarchy owned by root or the admin, mode 0755, such as
+    `/opt/tangleclaw-soak`.** The workload can read it and nobody else can write it;
+  - refuses to run where `TANGLECLAW_API` is set (a live pane), outside macOS, or on a machine that is
+    not a VM (`kern.hv_vmm_present`);
+  - validates its inputs, so nothing ambiguous reaches pfctl, sudo or a URL: the interface name, the
+    host's IPv4 address, the workload user name, the port, the project names and the probe timeout.
+    The egress probe addresses must be public literals, because a malformed or unroutable address would
+    fail for reasons that have nothing to do with pf, and "prove" nothing. node's own parser
+    (`net.isIP`) and a block list judge them, not a pattern. The block list refuses:
+    - for IPv4: loopback, private, link-local, CGNAT, documentation, benchmark, multicast and reserved
+      addresses;
+    - for IPv6: the reserved `::/8` block (which holds unspecified, loopback, IPv4-mapped and NAT64
+      addresses), discard, IETF protocol, documentation, unique-local, link-local and multicast
+      addresses.
+
+    The probed addresses are also recorded in the attestation.
+
+  Setup then, stopping at the first failure:
+  1. **Creates or confirms the workload user** (`SOAK_WORKLOAD_USER`, default `soakrun`). It is a
+     standard account with a random password nobody keeps. It refuses an existing account with that
+     name whose identity conflicts: a system uid (below 501), a home other than `/Users/<user>`,
+     membership of `admin` or `wheel`, or any sudo rights. It never adopts, changes or demotes such an
+     account; fix one by hand.
+  2. **Loads the pf profile and attests both planes** (below). The admin verifier runs as its own
+     `--verify-admin` process, so its line, `ok: false` included, is always printed. Either verifier
+     failing stops setup.
+  3. **Installs** `soak-stub` on `PATH`, and its engine profile for the workload user.
+  4. **Creates the synthetic repos** as the workload user (`soak.js repos`), under its home.
+  5. **Attaches each project** through the guest TangleClaw's own API. With the guest's auth gate down,
+     it uses the dashboard client header. With the gate up, it refuses and tells you to attach from the
+     dashboard. It never reads or writes a token.
+
+  Every step is safe to repeat.
+
+### Attestation
+
+The guest is attested from two planes, because neither can see everything.
+
+- Each verifier prints exactly one JSON line (schema `tc.soak-guest-attest/v1`), built by a real encoder
+  (node's `JSON.stringify`) rather than by pasting strings together.
+- A successful line carries `ok: true`, the boot identity (`kern.bootsessionuuid` and the boot time), the
+  time, and the artifact version: `scriptSha256` and `profileSha256`, the sha256 of `guest-setup.sh` and
+  of the pf profile, reported separately.
+- Any failure or ambiguity is `ok: false` with `code: "REFUSED"` and a `reason`, and exit 3.
+- If node itself is missing, a fixed line with `code: "ENCODER_MISSING"` is printed, with nothing
+  interpolated.
+
+- **`guest-setup.sh --verify-admin`** runs as the admin, with sudo, and inspects pf itself:
+  - pf must report `Enabled`;
+  - the loaded ruleset must equal pfctl's own parse of the profile with the same macros
+    (`pfctl -n -v`), so no pfctl output format is assumed, and must have the profile's rule count;
+  - `lo0` must be skipped.
+
+  It reports:
+  - the sha256 of the expected rules and of the active rules, and whether they match (a mismatch is
+    also reported this way, with `ok: false`);
+  - the guest interface and its IPv4 address, and the host's address;
+  - the DHCP server pf allows and the lease's own server, which must match;
+  - the lease's timing, normalized to epoch seconds: start, expiry, renewal and rebinding, the raw start
+    as reported, when it was observed, and how many seconds remain. It fails closed when:
+    - `ipconfig getsummary` doesn't report `LeaseStartTime` exactly once, in the form
+      `YYYY-MM-DD HH:MM:SS +ZZZZ`;
+    - the start is before 2000 or in the future;
+    - the lease has expired;
+    - the lease doesn't report all three of lease, renewal and rebinding times, or they don't satisfy
+      0 < renewal < rebinding < lease strictly (equality fails);
+    - a lease field appears twice or doesn't parse;
+    - less lease remains than the next sample interval plus a declared margin (`SOAK_SAMPLE_INTERVAL`,
+      default 600 s, plus `SOAK_SAFETY_MARGIN`, default 300 s), so a lease can't lapse unseen. All three
+      numbers are in the line;
+  - that something is listening on port 22, the SSH management path;
+  - that the TangleClaw on `SOAK_TC_PORT` is exactly one process, running as the workload user and
+    executing `node`. The proof starts from the listening socket. `lsof` resolves exactly one pid, whose
+    uid must match from both `lsof` and `ps`. Its executable comes from `lsof`'s text entries, the
+    kernel's view of what the process has mapped: exactly one may be a node binary, and it is recorded
+    canonicalized. `ps`'s command name isn't used, because on macOS it is the process's own `argv[0]`;
+  - that the workload account is still what setup made: a regular uid (501 or above), its own home
+    owned by it, in neither `admin` nor `wheel`, and with no sudo rights. Sudo rights are judged by the
+    exit status of `sudo -l -U <user> <command>`, for a shell, `pfctl` and a no-op. Two positive controls
+    come first: the admin can run `sudo -n true` right now, and the same query says yes for the admin.
+    After that, only exit status 1 counts as the policy's "no". A 0 means the workload has sudo, and a
+    hang or any other status means unknown. Either is refused;
+  - the checkout trust above, and that the workload can't write any of it. `artifact.guestConfSha256`
+    records exactly which settings were attested.
+
+  It never loads pf.
+- **`guest-setup.sh --verify-workload`** runs as the workload user and proves what that user can and
+  cannot do. It never inspects pf, because the workload must not be able to.
+  - It must be running as that user, with a non-system uid, in neither `admin` nor `wheel`.
+  - `sudo` and `pfctl` must both be refused to it. A hang doesn't count as a refusal.
+  - Loopback must answer on `127.0.0.1` and `::1`, and so must the guest TangleClaw's `/api/health`.
+  - Nothing outside may answer: TCP to a literal IPv4 and a literal IPv6 address, and a DNS query over
+    UDP sent straight to a resolver's address. None of it depends on DNS. The addresses probed are in
+    the JSON line (`probes`), so the evidence shows what was tested.
+- **Every probe is killed after `SOAK_PROBE_TIMEOUT` seconds** (default 10). A probe that hangs is a
+  failure, never a pass, including an egress probe, where a hang proves nothing.
+
+The soak runner (a later chunk) joins the two attestations at admission, at every evidence sample and
+at finalization. It binds them to the run and fails closed on a mismatch or a stale one. A reboot
+changes the boot identity, so no time survives one.
+
+**Known limits.**
+- **The admin's own `node` and `PATH` are trusted as given.** The admin runs helpers found on its
+  `PATH`: `node` to encode each attestation and canonicalize paths, and `shasum`, `stat`, `lsof`, `ps`,
+  `pfctl` and `sudo` for the checks themselves. **No workload-writable directory may appear on the
+  admin's `PATH`.** A directory the workload can write would let it replace any of those helpers and
+  run code as the admin. The runbook must install node where only root or the admin can write it, and
+  run setup and every `--verify-admin` with a `PATH` made only of such directories.
+- **The IPv6 probe check refuses known reserved blocks, not every unallocated address.** An address such
+  as `4000::1` passes as public. The dry run's positive control (the probes must answer with pf
+  disabled) catches a probe that could never have answered.
+- **Host-side restriction is not used yet.** `tart run` uses tart's default network, and the boundary is
+  pf inside the guest, attested as above. Tart's softnet options could add a second layer; they are not
+  used until an operator checks them against the installed tart.
+- **pf rules do not survive a guest reboot.** A reboot invalidates the run anyway. Re-provision, run
+  setup again and restart the clock.
+- **The DHCP allowance is itself a small channel out.** Any local process that can bind UDP source port
+  68 (macOS allows that without root) can send to `255.255.255.255:67` and to the DHCP server's port
+  67. That traffic stays on the tart vmnet segment and reaches only the host's DHCP service. It is the
+  price of keeping the address, and the SSH path, through a 72-hour run. A static address would remove
+  it, if the dry run shows one is workable.
+- **The DHCP allowance is a best effort at keeping the management path**, not a proof. It depends on
+  macOS's DHCP client renewing with the configured server over the allowed ports, and on the
+  `ipconfig` output forms the verifier parses (`getpacket`, and `getsummary`'s `LeaseStartTime`).
+  Neither has been seen on a real guest yet; the verifier fails closed when either differs. The dry run
+  must show that the address, and SSH, survive a lease renewal. If they don't, the fallback is a static
+  address or an independently proven tart console path.
+- **Egress denial needs a positive control in the dry run.** A probe that fails proves isolation only if
+  the same probe succeeds when egress is open. The dry run must therefore run the workload verifier's
+  probes once with pf disabled and see them answer, before trusting their denial with pf loaded. The
+  verifier can't do this itself, because it must never touch pf.
+
+The dry run and the certifying run then drive the guest's own TangleClaw from inside the guest, with
+`run --no-live-install`.

@@ -90,6 +90,119 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
   - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).
+## 2026-09-29 — Soak guest definition and synthetic `soak-*` repos (#2020 Chunk 1)
+
+<!-- prawduct: type=feature | scope=2020-chunk1-soak-guest-repos -->
+
+#2020 Chunk 1. The PM dispatched it over Medusa under Rule #124 (RM-LEASE TC-RM07 generation 3). Chunk 1 was reassigned from TC-RM02 on #2020 on 2026-09-29. Plan: `.tangleclaw/plans/2020-chunk1-soak-guest-repos.md` (local, not tracked).
+
+**Why.** The soak's `run` needs the synthetic projects to exist on the target, and the Architect ruling made generating them mandatory before the dry run. There was also no guest definition and no default-deny network profile.
+
+**The change.**
+- `lib/soak/repos.js` and `soak.js repos` create each `soak-*` repo with a local bare origin.
+  - Deterministic seed commit: the SHA is also computed without git and checked.
+  - Exact ownership: a `soak.owner` marker in both repos' config, plus the committed marker file.
+  - Every path is inspected before anything is written.
+  - Each repo is built in staging and renamed into place, origin first.
+  - Running it again is a no-op.
+- `deploy/soak/guest/`:
+  - `guest.conf`;
+  - `pf/soak-deny.conf`;
+  - `host-provision.sh`: dry run unless `--execute` and `SOAK_OPERATOR_APPROVED=1`;
+  - `guest-setup.sh`: in the guest only; loads pf and proves the loaded ruleset, working loopback, and no egress over IPv4, IPv6 or UDP DNS (Architect A38 refinement), installs the stub, creates the repos and attaches them.
+
+**Decisions** (recorded in the plan):
+- pf allows inbound SSH from the host, because the requirement is default-deny, not zero ingress.
+- Installing and starting the pinned RC in the guest is left to the runbook chunk.
+- Attach uses the dashboard client header while the guest's gate is down, and refuses when it is up.
+
+**Tests.** `test/soak-repos.test.js`, all in temp directories:
+- seed determinism across roots, and against the independent computation;
+- idempotency, checked against a snapshot of path, size and mtime;
+- each case that is not owned;
+- rebuilding from the origin;
+- immunity to `GIT_*` in the caller's environment;
+- the CLI's exit codes.
+
+`test/soak-guest.test.js` uses fake tart, sudo and sysctl, so no host action can run:
+- the dry run by default, and the approval gate;
+- refusing an existing VM, and refusing to share `$HOME` or `/`;
+- the exact pf rules, and no secrets in the config;
+- guest-setup refusing in a live pane, outside macOS, or on a machine that is not a VM.
+
+The existing soak tests are unchanged.
+
+**Review.** The cumulative Critic at `52beea1b` found 0 blocking, 4 warnings and 3 notes. All of them are fixed in the follow-up commit:
+- The share guard now compares real paths and refuses any directory containing `$HOME`.
+- The in-guest pf boundary is recorded as a decision, with its known limits. `--verify-network` lets the runner re-prove the boundary without reloading pf.
+- New wrapper-driven tests cover `SEED_MISMATCH`, `GIT_FAILED` staging cleanup, and a path appearing before the rename. Mutation checks confirm the empty-directory pre-check is needed.
+- `place()` checks the destination before the rename.
+- `SOAK_PROJECTS` is trimmed.
+- The DHCP expiry risk is documented, for the dry run to observe.
+
+**Architect A38-final and A44 (security contract), in the third commit.**
+- `guest-setup.sh` creates a dedicated non-admin workload user with no sudo.
+- The pf SSH rule is bound to the guest interface. The DHCP allowance (68 to 67) reaches only the DHCP server attested from the lease or config, never assumed to be the host.
+- All inputs are validated before `pfctl -D`, and every probe has a watchdog.
+- Two JSON verifiers, `--verify-admin` and `--verify-workload`, carry the boot identity and separate `scriptSha256` and `profileSha256`. The admin verifier compares the loaded ruleset with pfctl's own parse and fingerprints it. The workload verifier proves sudo and pfctl are refused and that there is no egress, and never inspects pf.
+- They replace `--verify-network`. The runner's joining of the two is left to its own chunk.
+- No tests ran during RM01's quiet window. In the PM's scoped slot, the two soak test files passed 87/87 on this commit's tree. Full-suite evidence came later, at `99a72892` (below).
+
+**The Critic at `8e139bf6`** found 0 blocking and 3 warnings. W1 (no suite evidence) closed with the full-suite run at `99a72892`. The fourth commit fixes the other two:
+- W2: the guest TangleClaw must run as the workload user. `--bootstrap-user` makes that order workable on a fresh guest, and setup and the admin verifier refuse a TangleClaw listening as any other uid (`lsof`).
+- W3: the egress probe addresses must be public literals, and are recorded in the workload attestation.
+
+The focused run in PM scoped slot 2 found two real bugs, both fixed before `6d122ba0`:
+- the admin attestation emitted during setup carried mode "setup" instead of "admin";
+- under `pipefail`, `lsof` exiting non-zero when nothing listened ended the script with exit 1, instead of a refusal.
+
+The rerun passed 107/107. Three mutation checks (dropping the TangleClaw-owner check, the DHCP config-equals-lease check, or the workload sudo refusal) each turned the tests red.
+
+The same commit carries the Architect's further A44 acceptance conditions:
+- Each attestation line is built by a real JSON encoder (`JSON.stringify` via node), with a fixed fallback line if node is missing.
+- A duplicate or malformed `ipconfig` lease field is refused.
+- The admin evidence records the lease, renewal and rebinding durations, the lease start (null where `ipconfig getsummary` does not report it) and when it was observed.
+- The DHCP server must be configured and must match the lease's single server identifier. A lease-only identity stays refused until the dry run proves it is the host-controlled service.
+
+**A48 (Architect), in the sixth commit.**
+- The fallback line is fixed per mode, with `code: ENCODER_MISSING` and no interpolation. Encoded refusals carry `code: REFUSED`.
+- The DHCP timing is normalized to epochs: start, expiry, renew, rebind, observed and remaining. It fails closed when the start is missing, duplicated, unparseable or out of range, when the lease has expired, when T1 < T2 < lease is violated, or when less than `SOAK_ATTEST_WINDOW` remains.
+- The TangleClaw is bound as exactly one listening pid, whose uid comes from both lsof and ps and whose executable comes from lsof's txt entry, which must be node.
+- `--bootstrap-user` refuses an existing account with a system uid or a foreign home.
+- This also covers the Critic's O-3 lease tests (duplicate renewal field, malformed rebinding value, LeaseStartTime reported twice).
+
+**A50 and A52 (Architect), also in `7e59dba8`.**
+- The timing is strictly 0 < T1 < T2 < lease, with all three required; equality fails.
+- The window is `SOAK_SAMPLE_INTERVAL` + `SOAK_SAFETY_MARGIN`, both bounded and recorded.
+- The executable is exactly one node text entry from lsof, canonicalized (realpath), and must equal ps's canonicalized comm. Multiple node entries fail closed.
+- The workload identity checks (uid, home and its owner, no admin or wheel, no sudo) now also run in every admin attestation, not only at setup.
+- A52: sudo rights are judged by the exit status of `sudo -n -l -U <user> <cmd>` for a shell, pfctl and a no-op, never by sudo's wording.
+
+**The cumulative Critic at `7e59dba8`** found 0 blocking, 2 warnings and 1 note. W1 (full-suite evidence) was left for the PM's window. The seventh commit, `99a72892`, fixes W2 and the note:
+- W2: `public_ipv6` accepted malformed literals such as `2606::4700::1`, which `nc` fails to parse, so a denial would have been "proven" without testing pf. Probe literals are now judged by node's `net.isIP` and a `net.BlockList` of reserved ranges. That also refuses the IPv4 documentation and benchmark ranges (the earlier O-2).
+- The note: a split sentence in the README's attestation section.
+
+In PM scoped slot 4, the first run exposed a real bug in the new validator: node's `BlockList` matches an IPv4 address against the IPv4-mapped IPv6 subnet, so a shared list refused every IPv4 probe. The fix uses one list per family. `::2` then showed that `::/128` was too narrow, so the whole reserved `::/8` block is refused. The final run passed 137/137, and a mutation check dropping IPv6 probe validation turned 8 tests red.
+
+**Evidence at `99a72892`.** The full declared suite ran in the PM's exclusive window (16:08Z): 0 fail, 1 ledgered skip (totals in the recorded evidence, `prawduct-hook test-status`). That closes W1, which the earlier paragraphs record as still pending. PR #2044 was opened at this head.
+
+**The Rule #124 independent review blocked it (Architect A71).** The follow-up commit fixes:
+- B1 (blocking): in every mode, before guest.conf is read, every admin-executed input and every ancestor up to / must be a plain file or directory, with no symlink or ambiguous path. Each must be owned by root or the admin, with no group or other write, and with no exception (Architect A73 vetoed a sticky-directory one). The checkout therefore lives under a dedicated root- or admin-owned hierarchy such as `/opt/tangleclaw-soak`. The workload must also be unable to write any of them, proven after a positive control. This runs in setup, `--bootstrap-user` and every `--verify-admin`, and guest.conf's sha256 joins both planes' attestations. host-provision.sh checks its own checkout the same way.
+- A1: setup runs the admin verifier as its own process, so its `ok:false` line is printed.
+- A3: host-provision refuses a share inside `$HOME`, and one not owned by the operator or open to group and others. With `--execute` it refuses a share that isn't empty. The default share moves to `/Users/Shared/tc-soak-share`.
+- A4: two positive controls come first: the admin's `sudo -n true`, and `sudo -l` saying yes for the admin. After them, only a workload exit status of 1 counts as denial; a hang or any other status is unknown and refused.
+- A6: the CHANGELOG entry is re-audited against the code.
+- The uid floor is 501 on both planes.
+- These corrections, disclosed at A68: the evidence wording above, and the A50 attribution, now listed under `7e59dba8` with A48.
+- A2 (a positive control for egress in the dry run) and A5 (the UDP 68→67 channel and the DHCP limitation) are documented in the README.
+
+**Evidence for the follow-up (PM A62 receipts, one per invocation).**
+- The base run of the two soak files at 17:03Z passed 165/165 on the unmutated tree.
+- Seven mutation checks each turned red, each under its own receipt (17:11Z to 17:38Z): M11 group/other-write, M12 owner, M13 workload write proof, M14 write proof in `--verify-admin`, M15 treating exit 2 as a denial, M16 a share inside `$HOME`, M17 a non-empty share.
+- Earlier runs under the 16:45Z receipt are non-certifying, and a chained mutation run there was quarantined (Architect ruling).
+- The full-range Critic at `50337eea` found one blocking issue: the README still suggested `/Users/Shared` for the checkout, which B1 refuses. It also found a real defect: the executable check compared against `ps -o comm`, which on macOS is the process's own `argv[0]` and would have refused a TangleClaw started as plain `node`. The follow-on commit fixes both. The executable now comes from lsof's kernel text entries alone, and the README records that the admin's own node and PATH are trusted as given.
+- The fresh Rule #124 review at `d44e78d0` confirmed B1 resolved, but found B2: GitHub CI (Linux, uid 1001) failed one host-provision test whose fixture hard-coded uid 501, so the owner check fired before the group-write check it meant to exercise. The remediation commit derives the fixture's uid from the runner, and adds the Architect's README line that no workload-writable directory may appear on the admin's PATH (node, shasum, stat, lsof).
+- Those runs did find a real bug: `trust_path` declared a local named `mode`, and bash's dynamic scoping let `refuse` read it, so trust refusals printed no JSON line. The local is now `bits`.
 
 ## 2026-09-28 — Every rule is named "Rule #<id>" from its DB id (#2029)
 
@@ -265,6 +378,95 @@ Also fixed:
   - **Fix.** `GET /api/tc/rotation` now also returns `latest`, and `post` accepts a rotation that is already active and bound to this thread.
 
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
+## 2026-09-28 — A finished session can retire itself headlessly: `tc finalize` (#2027)
+
+<!-- prawduct: type=feature | scope=v5.30-self-wrap -->
+
+Chunk 01 (the plan's only chunk). The PM dispatched this over Medusa as a v5.30 release blocker, under RM-LEASE TC-RM01 generation 2. Plan: `.prawduct/artifacts/build-plan-2027.md`, sent to the PM and the Architect at the plan checkpoint with four vetoable assumptions. The Architect's rulings on them (A1–A5), and a mandatory AC addition (removing the legacy pane-text wrap sentinel), arrived before the first commit, but I did not read them until after it: I read my inbox only when woken, not at the checkpoint. The first commit therefore did not satisfy A2, A5 or the sentinel removal. They, and ruling A7 on the Critic's W4, are built on top of it in the same chunk.
+
+**The change.** `POST /api/sessions/:project/finalize` with `{sessionId, reason}`, and `tc finalize`. `lib/session-finalize.js` decides and `sessions.finalizeSession` performs. The callers are the session itself (a verified launch, its own session only) or a principal in the target assignment's `authority.lifecycle`, for the bound session only. The order of refusals, each with nothing changed:
+- caller and authority → `403`;
+- session binding → `SESSION_CHANGED`, with an idempotent `200` when the session already ended `wrapped`;
+- the HOLD/STOP gate;
+- a live or requested wrap → `WRAP_IN_PROGRESS`;
+- the composed lane must be `AVAILABLE` → `NOT_CLEAR`;
+- drained → `EXCHANGES_OPEN`;
+- the `session-leftovers` probe against the launch baseline → `OWNED_WORK_PRESENT` / `WORK_STATE_UNKNOWN`.
+
+Then a synchronous re-check, `active → wrapped`, a `session.finalized` audit event, and the teardown now shared with `completeWrap` (`_releaseWrappedSession`, extracted rather than copied; each end path still calls `_teardownMedusa` itself, and `test/api-medusa.test.js`'s every-end-path probe now includes `finalizeSession`). There is no git write anywhere on the path. New store read: `medusaExchanges.listOpenForSenderSession`. `session-leftovers` exports its probe.
+
+**Decisions** (the plan's assumptions):
+- A self caller's current `complete` + `safe-to-clear` receipt stands in for the observer's at-rest, because its own pane is running the request. Every other composition rule still applies.
+- "Drained" means nothing open inbound and no sent exchange awaiting a reply. Sent messages that need no reply may stay in flight, and are counted.
+- Unpushed commits since launch are owned work.
+- The operator is not a caller.
+- The wrap-run registry is not claimed for the finalize. That would make the dashboard show a running wrap, which is a drawer path. The race is closed by re-checking synchronously with the write instead.
+
+**Tests.** `test/api-session-finalize.test.js` runs real `git` checkouts with launch baselines. It covers:
+- self success, with the dirty-at-launch file byte-identical, HEAD, status and index unchanged, no wrap sentinel, and the audit contents (no launch id);
+- idempotent repeat from the ended launch, and an ended launch refused on another session;
+- stale id (`SESSION_CHANGED`) and unknown id (`404`);
+- an unbound caller, the operator and malformed bodies;
+- a cross-project caller, and a hold-only principal;
+- delegated success and repeat, and a delegated busy engine;
+- no receipt, a working receipt and a do-not-clear receipt;
+- a held lane (`423`), a live wrap run, and a wrap begun mid-probe caught by the late re-check;
+- inbound open, a sent exchange awaiting a reply, and a no-reply send allowed;
+- a changed file, an unpushed commit, and no baseline.
+
+Before committing, eleven mutations were applied to `lib/session-finalize.js` one at a time. Each guard turned the file red, with one exception: the self-session match, which holds by the store's one-active-session invariant and is kept so that a broken invariant fails closed. That pass found two guards with no reaching test, and both now have one: an ended launch naming a later wrapped session, and an assignment bound to a session that has since relaunched. `test/api-medusa.test.js`'s every-end-path teardown probe now includes `finalizeSession`. `test/tc-finalize-verb.test.js` covers verb parsing, routing, refusal rendering (exit 3) and fault propagation. The prime golden fixtures and `CLAUDE.md`'s generated verb list gained `finalize`.
+
+**Amended by the Architect rulings (A1–A5, A7, A8, R-SENT), the Critic's W1–W3, and the second cumulative review's R-1–R-9, in the same chunk:**
+- **W1:** `tc finalize --session <id>` confirms a session that is no longer active.
+- **W2:** the idempotent answer is given only within the caller's authority and only for a session this path ended. That is recognised by its bound `finalize-` handoff attempt, never by summary text (R-5); `requireBound` rolls the end back if the attempt cannot bind.
+- **W3:** `control-state#hasLifecycleAuthority` is shared with assignment close, so an unreadable matrix answers 503 here too.
+- **History scrub** (PM dispatch, relaying an Architect ruling whose direct message never reached this session):
+  - The marker is replaced in the archived change-log.
+  - Scrubbing the released 3.27.0 CHANGELOG entry broke the release-lock guard, which requires locked sections to match their published Release pages. By Architect ruling (a) that edit was reverted and the guard kept.
+  - `test/wrap-drawer-triggers.test.js` sweeps every git-tracked file except released CHANGELOG sections, and a test pins that the exemption stops at `[Unreleased]`.
+  - Two dir-scanner timeouts in that run reproduced on the committed base in a clean worktree at host load ~27, so they are recorded as environmental.
+- **Cumulative review of the rebuilt head 33e43d2f (1 blocking):** an engine's process, and so its pane, stays in the launch directory when its shell moves into a new `git worktree`. B1's pane-directory check could therefore miss worktree work, and its test faked that exact signal.
+  - Fix: the launch baseline records every linked worktree with a digest of its status and of each dirty path's identity, sharing one fingerprint format across launch and finalize.
+  - Strict mode compares every linked worktree: new with work, or changed since launch, is owned work, and a legacy baseline without the record refuses when any worktree exists. Tests model the pane in the registered checkout.
+  - Verify-resolutions (rev-20260929T135047Z-2e8430b2) found commits on a detached HEAD in a linked worktree uncounted: `--branches` misses a HEAD on no branch, and `git worktree add --detach <dir> origin/main` is the ordinary clean start. Every worktree's HEAD from the porcelain listing now joins `--branches` in the unpushed count; the listing is read once for both worktree checks. Tests: a detached worktree with a commit (pane in the registered checkout) refuses `OWNED_WORK_PRESENT`; one at the fetched main with no commit still finalizes.
+  - RM03 exact-head review of 62b0db35 (A40, W4): a post-launch commit kept only by a local tag, its branch deleted, finalized 200. `--tags` now joins the branches and worktree HEADs as roots (deliberately not `--all`; a reflog-only commit stays unread, as the docs say). Tests: lightweight and annotated tag-only roots refuse `OWNED_WORK_PRESENT`; a commit reached by a branch and a tag counts once; a tag made since launch on pre-launch history still finalizes. 62b0db35 is kept at `keep/2027-62b0db35` as superseded evidence.
+  - Warnings: the fingerprint format is now one shared definition, with a parity test. A webui session is refused (FINALIZE_UNSUPPORTED) rather than claimed torn down while its tunnel survives. Merging the three teardown copies is accepted as outside #2027.
+  - Notes: squash-merge behaviour is documented; the v5.30 base is corrected; the unused `tangleclawOwnedCount` is removed; one predicate now serves both finalized-here checks; the check order in the header and the docs is corrected.
+- **Independent review by RM03 at e5d41eec: NOT GREEN.** The branch was held until #2032 merged, then rebuilt on `f0713c66` as one squashed change (the reviewed tip is kept at `keep/2027-e5d41eec`).
+  - **Conflicts:** CHANGELOG, `tc-verbs` and the fixtures. Both verbs are kept, and the fixtures were regenerated.
+  - **Rotation fence (#2032):** the coordinator epoch gate fences the finalize route, as `wrap` on the target lane and `control-mutate` for a coordinator acting on another lane. The rotation suite's exemption for the removed wrap-sentinel route is dropped.
+  - **B1:** the work tree is resolved before the probe. A linked worktree, or a pane that cannot be read, refuses `WORK_STATE_UNKNOWN`.
+  - **W1:** strict mode also counts commits since start on any local branch that no remote has, and stashes since start. Both are judged by commit time. The fixtures now date their setup history before launch, as real history is.
+  - **W2:** obligations are re-checked at the commit point.
+  - **W3:** the finisher is named. The next launch's preflight publishes an eligible final, the operator's kill reconciles an orphaned pane, and a test pins the preflight path.
+  - **Notes:** N2, the reason is collapsed to one line; N6, the archive prose is repaired. N1, N3, N4, N5 and N7 are accepted and recorded in the dispositions.
+- **Second cumulative review (R-1–R-9):**
+  - A repeat after a relaunch no longer kills the new session's pane, which reuses the project's pane name (R-1).
+  - Only the lane's own verified-launch acknowledgement discharges incoming mail (R-2).
+  - Strict fingerprinting is asynchronous and byte-budgeted, and the budget has a test. The ownership judge is the wrap's own synchronous one, which is accepted and documented (R-4).
+  - Every outcome is logged (R-8).
+  - Docs and this entry were corrected (R-3, R-9).
+- **A1:** the lane is composed again inside the synchronous commit-point re-check.
+- **A2:** "drained" is read from exchange facts. Mail to the lane must be acknowledged by the lane (not by the dashboard's `operator-ui`), and answered where a reply is required. Mail the lane sent that requires a reply must have been answered. Its own no-reply sends are counted.
+- **A3/A8:** `session-leftovers.probe` gained a strict mode.
+  - It fetches first, and a failed fetch means unknown.
+  - It requires the launch baseline's identity fingerprints. A8 superseded my first, mtime-based cut: `launch-baseline` now fingerprints each launch-dirty path (kind, SHA-256 of the bytes or the symlink target, and the executable bit), with per-file and total byte caps. Strict mode compares the same fingerprint, reading asynchronously within the same budget. An identical rewrite is preserved; any identity change is a delta; a legacy or unfingerprinted baseline is unknown.
+  - It excludes TangleClaw-owned paths via `_tc-owned-paths#judge`, as the wrap does. Without that, the launch-time managed-block rewrite made every session read as owning work.
+- **A7:** `handoff-stage#stageAttempt` was extracted from the wrap step, and the wrap now calls it too (handoff and wrap suites green, unchanged).
+  - Finalize stages a minimal `final` document: principal, reason, receipt, branch/head, and `nextAction: null`.
+  - The attempt is bound eligible in the same `sessions.wrap` transaction and published afterwards.
+  - Pre-transition leftovers are abandoned first.
+- **A5:** `sessions#finishFinalization` publishes and tears down, reads each resource back from its live source, and records a `session.finalize-teardown` event.
+  - `FINALIZE_INCOMPLETE` is returned until both are done, and a repeat finishes the same attempt.
+  - A concurrent second request reports the one finalization.
+- **R-SENT:** removed the pane-text wrap marker, the prime instruction to print it, the `wrap-requested` flag, its status field, its acknowledge route and the dashboard auto-open.
+  - The pane read survives as `lib/engine-error-monitor.js`, because engine-error detection (#261) rides it.
+  - The workload composition no longer has a wrap-request staleness rule (ADR 0020 §4 amended in place).
+  - The tests that asserted the removed trigger and its staleness rule were removed with the feature they tested. Their surviving intents (engine-error scanning, prime-cap survival of the wrap directive, wrap-run supersession) were kept and retargeted.
+  - `test/wrap-drawer-triggers.test.js` pins the two explicit drawer openers and sweeps every shipped source for the marker. A planted marker and a planted auto-open both turned it red.
+  - Released CHANGELOG history and an archived change-log still quote the marker. It is inert now that nothing reads pane text for it, and rewriting released notes would alter history.
+
+**Docs.** New `docs/session-finalize.md`. Also updated: `docs/control-state.md` (authority table), `docs/user-guide.md`, FEATURES, CHANGELOG (Added) and the `docs/releases/v5.30-status.md` scorecard row.
 
 ## 2026-09-29 — Never certify a soak log whose lock ownership could not be verified (#2025 remediation, #2020 Chunk 2A)
 
