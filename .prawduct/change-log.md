@@ -66,6 +66,10 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
   - `rc-cert host-publish` relays the guest's exact tip to the public remote, fast-forward only. It first requires the host's `ok` finalization of that run and manifest digest, and a clean verifier run over the guest's whole history. It then reads the remote back (the OID, plus the admission and scorecard bytes), and only then writes `record-<runId>.json`. That record is the only certification of record: `certified` means `passed`, canonical and finalized.
   - R-4 (B1 review): the origin and the identity are read separately, so a pinned remote with a withheld actor needs no git config.
   - Tests: `test/release-certification-host-publish.test.js`, against two local bare repos, mutation-checked on each fail-closed step.
+  - **B4 review (`rev-20260929T152715Z-bcaccd3b`, 0 blocking).**
+    - R-1, a real time-of-check/time-of-use hole: the relay read the untrusted guest's branch several times, so a guest moving it after the history check could get an unverified commit published. The guest is now fetched once, pinned by OID, and only that commit is verified, compared and pushed. The regression test fails on the old relay.
+    - R-3: one relay repo per remote, held under a lock for the whole relay.
+    - R-5: a verdict the host could not read GitHub for carries a closed `reason`, covered by its digest. It is reported on the host (`host-github-unavailable`) and surfaced as the guest sample's diagnostic.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
   - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).

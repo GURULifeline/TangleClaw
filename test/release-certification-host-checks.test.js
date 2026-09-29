@@ -152,7 +152,7 @@ describe('host checks: the guest accepts only a verdict bound to its own sample'
    * @returns {object} Verdict
    */
   function verdict(over = {}, pre = {}) {
-    const v = { schema: hc.VERDICT_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0, observedAt: T0 + 10, observation: GREEN, ...pre };
+    const v = { schema: hc.VERDICT_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0, observedAt: T0 + 10, observation: GREEN, reason: null, ...pre };
     v.verdictDigest = hc.verdictDigest(v);
     return { ...v, ...over };
   }
@@ -421,5 +421,35 @@ describe('host checks: nothing in the exchange can stall the responder', () => {
     assert.deepEqual(r.answered, [1]);
     assert.equal(fs.lstatSync(path.join(exchange, 'verdicts', '1.json')).isSymbolicLink(), false, 'the answer replaced the link rather than writing through it');
     assert.equal(fs.readFileSync(path.join(tmp, 'elsewhere.json'), 'utf8'), '{}');
+  });
+});
+
+describe('host checks: a GitHub failure on the host leaves a trace on both sides (B4 review R-5)', () => {
+  it('binds the reason into the verdict, reports it on the host, and surfaces it in the guest sample', async () => {
+    mint();
+    const lapsed = async () => ({ observation: { state: 'unavailable', checks: null }, error: 'gh-failed' });
+    const c = clock();
+    const r = await hc.attest(guest(), { seq: 1, manifestDigest: DIGEST }, {
+      now: c.now,
+      sleep: async (ms) => {
+        const out = await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: lapsed, now: c.now });
+        if (out.answered.length) assert.deepEqual(out.unavailable, [{ sampleSeq: 1, reason: 'gh-failed' }]);
+        c.advance(ms);
+      }
+    });
+    assert.deepEqual(r.observation, { state: 'unavailable', checks: null });
+    assert.equal(r.error, 'host-gh-failed');
+    assert.equal(r.binding.sampleSeq, 1, 'still a verdict the host issued, so still bound');
+    const ledger = fs.readFileSync(hc.hostPaths(hostBase, SHA).ledger, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.equal(ledger[0].reason, 'gh-failed');
+  });
+
+  it('refuses a verdict whose reason was edited, since the digest covers it', () => {
+    const v = { schema: hc.VERDICT_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0, observedAt: T0, observation: { state: 'unavailable', checks: null }, reason: 'gh-failed' };
+    v.verdictDigest = hc.verdictDigest(v);
+    const expected = { candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: 1, requestedAt: T0 };
+    assert.equal(hc.judgeVerdict(JSON.stringify(v), expected).reason, 'gh-failed');
+    assert.deepEqual(hc.judgeVerdict(JSON.stringify({ ...v, reason: null }), expected), { diagnostic: hc.DIAGNOSTIC.MISMATCH });
+    assert.deepEqual(hc.judgeVerdict(JSON.stringify({ ...v, reason: 'Not A Code!' }), expected), { diagnostic: hc.DIAGNOSTIC.INVALID });
   });
 });

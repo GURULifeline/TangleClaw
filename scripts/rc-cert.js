@@ -460,6 +460,9 @@ async function cmdHostChecks(c) {
   const once = async () => {
     const r = await hostChecks.answerRequests(opts);
     if (r.answered.length > 0 || r.skipped.length > 0) c.emit({ event: 'host-checks', ...r });
+    // Reported on its own line, so a lapsed GitHub login is seen on the host,
+    // not only in the guest's samples.
+    for (const u of r.unavailable) c.emit({ event: 'host-github-unavailable', ...u });
   };
   if (!c.flags.watch) {
     await once();

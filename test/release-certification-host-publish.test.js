@@ -257,3 +257,48 @@ describe('rc-cert: the guest publishes locally with no git identity, and the hos
     assert.equal(store.readRun(base, SHA).manifest.private.publishRemote, guest);
   });
 });
+
+describe('host relay: the guest is read once, and relays to one remote never overlap (B4 review)', () => {
+  it('publishes only the commit it verified, even when the guest moves its branch straight after the check', async () => {
+    await guestRun();
+    const verified = tip(guest);
+    const realVerify = require('../lib/release-certification/verify').verifyHistory;
+    let moved = false;
+    // The moment the history check has passed, the guest pushes a commit the
+    // verifier would reject.
+    const racing = async (o) => {
+      const result = await realVerify(o);
+      moved = true;
+      const wc = path.join(tmp, 'wc-race');
+      cloneRepo(guest, wc, ['-b', 'metrics']);
+      fs.writeFileSync(path.join(wc, 'server.js'), 'x');
+      const g = (...a) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', ...a], { cwd: wc, stdio: 'pipe' });
+      g('add', '-A');
+      g('commit', '-q', '-m', 'unverified');
+      g('push', '-q', 'origin', 'HEAD:metrics');
+      return result;
+    };
+    const record = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, verifyHistory: racing });
+    assert.ok(moved);
+    assert.notEqual(tip(guest), verified, 'the guest did move');
+    assert.equal(record.oid, verified);
+    assert.equal(tip(pub), verified, 'only the verified commit reached the public branch');
+  });
+
+  it('refuses a second relay to the same remote while one is running', async () => {
+    await guestRun();
+    const lockfile = require('../lib/release-certification/lockfile');
+    const crypto = require('node:crypto');
+    const root = path.join(hostBase, '_relay');
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    const lock = path.join(root, `${crypto.createHash('sha256').update(pub).digest('hex').slice(0, 32)}.lock`);
+    const token = lockfile.acquire(lock, { timeoutMs: 0 });
+    try {
+      await refuses(REFUSAL.LOCK_HELD);
+    } finally {
+      lockfile.release(lock, token);
+    }
+    const record = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    assert.equal(record.oid, tip(pub), 'the lock was released, so the next relay runs');
+  });
+});
