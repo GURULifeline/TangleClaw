@@ -68,7 +68,7 @@ function guestManifest(over = {}) {
 function isolationPair(binding, over = {}) {
   const b = { candidateSha: binding.candidateSha, runId: binding.runId, manifestDigest: binding.manifestDigest, sampleSeq: binding.sampleSeq };
   return {
-    admin: { schema: isolation.ADMIN_SCHEMA, ...b, bootId: BOOT_ID, pfEnabled: true, rulesetSha256: RULESET, interfaces: ['lo0=127.0.0.1'], managementPath: 'closed', observedAt: T0, ...over.admin },
+    admin: { schema: isolation.ADMIN_SCHEMA, ...b, bootId: BOOT_ID, pfEnabled: true, rulesetSha256: RULESET, interfaces: ['lo0=127.0.0.1'], managementPath: 'host-only', observedAt: T0, ...over.admin },
     workload: { schema: isolation.WORKLOAD_SCHEMA, ...b, bootId: BOOT_ID, uid: 501, groups: [20], sudoRefused: true, pfctlRefused: true, loopbackApi: true, egressDenied: { ipv4: true, ipv6: true, dns: true }, observedAt: T0, ...over.workload }
   };
 }

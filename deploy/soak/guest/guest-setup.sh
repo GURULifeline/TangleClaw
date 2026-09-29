@@ -5,6 +5,10 @@
 #   guest-setup.sh                    set the guest up (admin, with sudo)
 #   guest-setup.sh --verify-admin     attest the admin plane (admin, with sudo)
 #   guest-setup.sh --verify-workload  attest the workload plane (as the workload user)
+#   guest-setup.sh --verify-network --candidate <sha> --run-id <id>
+#                  --manifest-digest <hex> --sample-seq <n>
+#                                     attest one certification sample (admin only):
+#                                     both planes, fresh, joined and bound to it
 #
 # The guest TangleClaw must run as the workload user, never as the admin: its
 # sessions are the workload, and a session with sudo could switch pf off. So a
@@ -26,9 +30,17 @@
 #
 # Each verifier prints exactly one JSON line on stdout (schema
 # tc.soak-guest-attest/v1), with "ok" true or false, the boot identity and the
-# sha256 of this script, the pf profile and guest.conf. The soak runner (a
-# later chunk) is to join the two at admission, at every evidence sample and at
-# finalization; a reboot changes the boot identity.
+# sha256 of this script, the pf profile and guest.conf. The certification
+# runner does not read those lines. It pins this script and calls
+# --verify-network for every sample, which runs as the guest admin, takes one
+# FRESH --verify-admin line and one FRESH --verify-workload line (the latter as
+# the workload user), and prints exactly one {admin, workload} pair in the
+# release-certification isolation schemas, with the sample's binding (candidate,
+# run id, manifest digest, sample number) in both planes
+# (lib/soak/attest-bridge.js). Nothing is cached or reused, and nothing is
+# stamped with a binding it was not produced for. Any failure prints nothing on
+# stdout and exits non-zero, which the runner records as unattested. A reboot
+# changes the boot identity, which fails the run.
 #
 # Setup, in order, stopping at the first failure:
 #   1. create (or confirm) the workload user: not an admin, no sudo;
@@ -53,15 +65,41 @@ set -euo pipefail
 
 SCHEMA='tc.soak-guest-attest/v1'
 mode='setup'
-usage='usage: guest-setup.sh [--bootstrap-user | --verify-admin | --verify-workload]'
+usage='usage: guest-setup.sh [--bootstrap-user | --verify-admin | --verify-workload | --verify-network --candidate <sha> --run-id <id> --manifest-digest <hex> --sample-seq <n>]'
 case "${1:-}" in
   '') ;;
   --bootstrap-user) mode='bootstrap' ;;
   --verify-admin) mode='admin' ;;
   --verify-workload) mode='workload' ;;
+  --verify-network) mode='network' ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
-[ "$#" -le 1 ] || { echo "$usage" >&2; exit 2; }
+# --verify-network takes its sample's binding, each flag exactly once and each
+# value in its exact form. Anything else is a usage error before anything
+# runs: a binding that could be read two ways must never be attested.
+net_candidate='' net_run_id='' net_digest='' net_seq=''
+if [ "$mode" = 'network' ]; then
+  shift
+  seen=' '
+  while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
+    case "$seen" in *" $1 "*) echo "duplicate $1" >&2; echo "$usage" >&2; exit 2 ;; esac
+    seen="$seen$1 "
+    case "$1" in
+      --candidate) net_candidate="$2" ;;
+      --run-id) net_run_id="$2" ;;
+      --manifest-digest) net_digest="$2" ;;
+      --sample-seq) net_seq="$2" ;;
+      *) echo "$usage" >&2; exit 2 ;;
+    esac
+    shift 2
+  done
+  [[ "$net_candidate" =~ ^[0-9a-f]{40}$ ]] && [[ "$net_run_id" =~ ^[0-9a-f]{32}$ ]] \
+    && [[ "$net_digest" =~ ^[0-9a-f]{64}$ ]] && [[ "$net_seq" =~ ^[1-9][0-9]{0,15}$ ]] \
+    || { echo "--verify-network needs --candidate <40 hex>, --run-id <32 hex>, --manifest-digest <64 hex> and --sample-seq <positive integer>, each exactly once" >&2; echo "$usage" >&2; exit 2; }
+else
+  [ "$#" -le 1 ] || { echo "$usage" >&2; exit 2; }
+fi
 
 # Print one JSON line, built by a real encoder (node's JSON.stringify), from
 # `path=type:value` arguments. Types: s string, n number, b boolean, z null.
@@ -284,7 +322,7 @@ profile_sha="$(sha_of "$here/pf/soak-deny.conf")"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # What every successful line carries after its schema, mode and verdict.
 common_json=("time=s:$now" "boot.session=s:$boot_session" "boot.time=n:$boot_time" "artifact.scriptSha256=s:$script_sha" "artifact.profileSha256=s:$profile_sha" "artifact.guestConfSha256=s:$conf_sha")
-if [ "$mode" = 'admin' ] || [ "$mode" = 'workload' ]; then
+if [ "$mode" = 'admin' ] || [ "$mode" = 'workload' ] || [ "$mode" = 'network' ]; then
   command -v node >/dev/null 2>&1 || refuse "node is missing, so no attestation can be encoded"
 fi
 
@@ -490,6 +528,13 @@ verify_workload() {
   for g in $groups; do
     case "$g" in admin|wheel) refuse "$user is in the $g group" ;; esac
   done
+  # The numeric group ids too, so the certification record never has to infer
+  # them from names. Admin (80) and wheel (0) are refused by number as well.
+  gids="$(id -G)"
+  [[ "$gids" =~ ^[0-9]+( [0-9]+)*$ ]] || refuse "cannot read $user's numeric group ids: '$gids'"
+  for g in $gids; do
+    case "$g" in 0|80) refuse "$user is in group $g (wheel or admin)" ;; esac
+  done
   # Each must be refused to the workload. A hang is not a refusal.
   local rc=0
   bounded sudo -n true >/dev/null 2>&1 || rc=$?
@@ -514,15 +559,37 @@ verify_workload() {
   must_be_denied "a DNS query to $SOAK_DNS_PROBE_ADDR over UDP" dig "@$SOAK_DNS_PROBE_ADDR" +time=2 +tries=1 +short tangleclaw.invalid
 
   emit_json "schema=s:$SCHEMA" "mode=s:workload" "ok=b:true" "${common_json[@]}" \
-    "identity.user=s:$me" "identity.uid=n:$uid" "identity.groups=s:$groups" \
+    "identity.user=s:$me" "identity.uid=n:$uid" "identity.groups=s:$groups" "identity.gids=s:$gids" \
     "refused.sudo=b:true" "refused.pfctl=b:true" \
     "loopback.ipv4=b:true" "loopback.ipv6=b:true" "loopback.api=b:true" \
     "egress.tcp4=s:denied" "egress.tcp6=s:denied" "egress.udpDns=s:denied" \
     "probes.tcp4=s:$SOAK_EGRESS_PROBE_ADDR" "probes.tcp6=s:$SOAK_EGRESS_PROBE_ADDR6" "probes.udpDns=s:$SOAK_DNS_PROBE_ADDR"
 }
 
+# --- One certification sample: both planes, fresh, joined and bound ---
+# Runs as the trusted guest admin only. Each call takes a new --verify-admin
+# line and a new --verify-workload line (as the workload user, with exactly
+# the SOAK_ settings), and hands both, with the binding, to the bridge, which
+# refuses anything it cannot convert without guessing. Nothing is read from a
+# file or reused from an earlier sample, so no attestation is ever stamped
+# with a binding it was not produced for. Any failure prints nothing on stdout.
+verify_network() {
+  [ "$admin_name" != "$user" ] || refuse "--verify-network runs as the guest admin, not as the workload user $user"
+  bounded sudo -n true >/dev/null 2>&1 || refuse "--verify-network needs the admin's non-interactive sudo"
+  local net_env=() v admin_line workload_line pair
+  while IFS= read -r v; do net_env+=("$v=${!v}"); done < <(compgen -v SOAK_)
+  admin_line="$(bash "$here/guest-setup.sh" --verify-admin)" || refuse "the admin verifier did not attest"
+  workload_line="$(sudo -n -u "$user" -H env "${net_env[@]}" bash "$here/guest-setup.sh" --verify-workload)" || refuse "the workload verifier did not attest"
+  pair="$(node -e 'process.exitCode = require(process.argv[1]).main(process.argv.slice(2), process)' \
+    "$repo/lib/soak/attest-bridge.js" "$admin_line" "$workload_line" "$net_candidate" "$net_run_id" "$net_digest" "$net_seq")" \
+    || refuse "the two attestations could not be joined into one bound pair"
+  [ -n "$pair" ] && [ "$(grep -c . <<< "$pair")" -eq 1 ] || refuse "the bridge did not produce exactly one line"
+  printf '%s\n' "$pair"
+}
+
 if [ "$mode" = 'admin' ]; then verify_admin; exit 0; fi
 if [ "$mode" = 'workload' ]; then verify_workload; exit 0; fi
+if [ "$mode" = 'network' ]; then verify_network; exit 0; fi
 
 # --- Setup (admin, with sudo) ---
 sudo -v

@@ -278,6 +278,8 @@ function guestFakes(dir, over = {}) {
       '  -u) if [ "$u" = admin ]; then echo 501; else echo 502; fi;;',
       '  "-u soakrun") echo 502;;',
       '  -Gn) if [ "$u" = admin ]; then echo "staff admin"; else echo "staff everyone localaccounts"; fi;;',
+      // Numeric group ids, as `id -G` prints them: the admin is in 80 (admin).
+      '  -G) if [ "$u" = admin ]; then echo "20 80"; else echo "${FAKE_GIDS:-20 12 61}"; fi;;',
       '  *) [ -n "$FAKE_USER_EXISTS" ] && exit 0; exit 1;;',
       'esac'
     ].join('\n'),
@@ -881,5 +883,83 @@ describe('soak guest: guest-setup.sh guards', () => {
     assert.equal(r.status, 3);
     assert.match(r.stderr, /not a virtual machine/);
     assert.ok(!f.calls().some((c) => c.startsWith('sudo')));
+  });
+});
+
+
+describe('soak guest: --verify-network, one bound sample (Architect ruling 2baeac0d)', () => {
+  const isolation = require('../lib/release-certification/isolation');
+  let tmp;
+  beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'soak-guest-net-')); });
+  afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+  const B = { candidateSha: 'a'.repeat(40), runId: 'b'.repeat(32), manifestDigest: 'c'.repeat(64), sampleSeq: 7 };
+  const ARGS = ['--verify-network', '--candidate', B.candidateSha, '--run-id', B.runId, '--manifest-digest', B.manifestDigest, '--sample-seq', String(B.sampleSeq)];
+
+  it('prints exactly one bound pair from two fresh child verifiers, the workload one as the workload user', () => {
+    const f = guestFakes(tmp);
+    const r = setup(ARGS, f, tmp);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim().split('\n').length, 1, 'exactly one line');
+    const pair = JSON.parse(r.stdout);
+    for (const plane of [pair.admin, pair.workload]) {
+      assert.deepEqual([plane.candidateSha, plane.runId, plane.manifestDigest, plane.sampleSeq], [B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], 'the binding is in both planes');
+    }
+    assert.equal(pair.admin.managementPath, 'host-only', 'a listening SSH behind the exact profile is host-only, never closed');
+    assert.deepEqual(pair.workload.groups, [20, 12, 61], 'numeric group ids, not names');
+    const judged = isolation.judgeIsolation(pair, B);
+    assert.equal(judged.error, null);
+    assert.equal(judged.observation.state, 'ok', 'the pair the guest prints is one the judge accepts');
+    // Two fresh child calls: one --verify-admin as the admin, one --verify-workload through sudo -u.
+    const calls = f.calls();
+    assert.ok(calls.some((c) => c.startsWith('[admin] sudo -n -u soakrun -H env')), 'the workload verifier ran through sudo -n -u');
+    assert.equal(calls.filter((c) => /^\[admin\] pfctl -s rules/.test(c)).length, 1, 'the admin plane was attested once, freshly');
+    assert.equal(calls.filter((c) => /^\[soakrun\] (nc|dig) /.test(c)).length, 3, 'the workload plane probed egress once each, as the workload user');
+  });
+
+  for (const [label, args] of [
+    ['a missing binding', ARGS.slice(0, -2)],
+    ['a duplicated flag', [...ARGS, '--sample-seq', '8']],
+    ['an unknown flag', [...ARGS, '--extra', 'x']],
+    ['a flag with no value', [...ARGS, '--candidate']],
+    ['an uppercase SHA', ARGS.map((a) => (a === B.candidateSha ? 'A'.repeat(40) : a))],
+    ['a short run id', ARGS.map((a) => (a === B.runId ? 'b'.repeat(31) : a))],
+    ['a zero sample number', ARGS.map((a) => (a === '7' ? '0' : a))],
+    ['a signed sample number', ARGS.map((a) => (a === '7' ? '+7' : a))]
+  ]) {
+    it(`exits 2 with nothing on stdout, before anything runs, for ${label}`, () => {
+      const f = guestFakes(tmp);
+      const r = setup(args, f, tmp);
+      assert.equal(r.status, 2, r.stderr);
+      assert.equal(r.stdout, '');
+      assert.deepEqual(f.calls(), [], 'nothing was run');
+    });
+  }
+
+  it('refuses to run as the workload user, printing no pair', () => {
+    const f = guestFakes(tmp);
+    const r = setup(ARGS, f, tmp, { FAKE_USER: 'soakrun' });
+    assert.equal(r.status, 3);
+    assert.equal(r.stdout, '');
+  });
+
+  for (const [label, over, env] of [
+    ['the admin plane cannot attest (pf off)', { pfctl: '[ "$*" = "-s info" ] && echo "Status: Disabled" ; exit 0' }, {}],
+    ['the workload plane cannot attest (egress answers)', { nc: 'exit 0' }, {}],
+    ['the workload is in the admin group by number', {}, { FAKE_GIDS: '20 80' }]
+  ]) {
+    it(`prints no pair and exits 3 when ${label}`, () => {
+      const f = guestFakes(tmp, over);
+      const r = setup(ARGS, f, tmp, env);
+      assert.equal(r.status, 3, r.stderr);
+      assert.equal(r.stdout, '', 'the runner records unattested');
+    });
+  }
+
+  it('keeps the raw verifiers for diagnostics, the workload one now with numeric group ids', () => {
+    const f = guestFakes(tmp);
+    const r = setup(['--verify-workload'], f, tmp, { FAKE_USER: 'soakrun' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json[0].identity.gids, '20 12 61');
   });
 });

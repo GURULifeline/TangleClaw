@@ -190,11 +190,17 @@ to be able to trust it. That creates two problems:
    finalization** (#2020, Architect rulings A43 and A44). The workload a soak runs as must be
    refused `pfctl`, so it cannot also read the packet filter: isolation is attested in two joined
    planes. The admin plane covers the packet filter being enabled, its exact normalized ruleset
-   digest, the interfaces and addresses, the boot identity and a closed management path. The
+   digest, the interfaces and addresses, the boot identity and a `host-only` management path
+   (inbound SSH admitted only from the configured host, all guest-initiated egress denied; `open` is
+   a breach, and a listening SSH is never called closed). The
    workload plane covers its dedicated non-admin identity, `sudo` and `pfctl` refused, the loopback
    API reachable, and IPv4, IPv6 and DNS egress denied. A program pinned in the manifest (Chunk 1's
    `guest-setup.sh --verify-network`) produces both for each sample, echoing that sample's binding
-   (candidate, run id, manifest digest, sample number). Both must agree on the boot identity. A
+   (candidate, run id, manifest digest, sample number). It runs as the guest admin only, takes one
+   fresh raw `--verify-admin` line and one fresh `--verify-workload` line (the latter as the workload
+   user, through `sudo -n -u`), and joins them through `lib/soak/attest-bridge.js`, which copies the
+   binding into both planes and refuses anything it cannot convert without guessing. Nothing is
+   cached or reused, and any failure prints no pair. Both must agree on the boot identity. A
    missing, malformed, unbound or split pair earns no time (`ISOLATION_UNATTESTED`); a well-formed
    pair that shows isolation broken fails the run (`ISOLATION_BREACHED`); so does a boot identity
    or ruleset other than the admission's (`BOOT_CHANGED`, `ISOLATION_CHANGED`). The digests of
