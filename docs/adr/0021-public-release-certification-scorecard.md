@@ -115,6 +115,32 @@ to be able to trust it. That creates two problems:
    publisher runs the verifier on each commit before pushing it; a violation fails the publish
    (`WOULD_VIOLATE`) instead of landing on a branch whose history is permanent.
 
+10. **A runner with no route to GitHub gets its checks from the host, sample by sample** (#2020,
+   Architect rulings Q1, A31 and A32). The certifying soak runs in a guest with no egress and no
+   credentials, so a manifest can set `checksSource: host-attested`. The host mints the run's id
+   (`rc-cert host-mint`: 128 random bits, recorded with the repository and checks it will judge),
+   and the guest's `start --run-id` pins it in the checksummed manifest along with the exchange
+   directory. For the admission sample and for every later sample the guest writes a request, and
+   the host (`rc-cert host-checks`) reads GitHub and answers with a verdict bound to the candidate
+   SHA, the run id, the sample's number and the manifest digest, carrying a digest of its own
+   content. The host appends every verdict to its own ledger before the guest can see it. The guest
+   accepts a verdict only when every binding matches the sample it is taking; a missing, late,
+   unparsable, mismatched or stale verdict reads as GitHub unavailable, which earns no time, and a
+   verdict for a run the host never minted is never written. Admission is therefore two-phase: the
+   manifest is staged first, and the admission sample is taken bound to its digest, so no run and
+   no time exist before a green verdict for that exact manifest. At the end,
+   `rc-cert host-finalize` joins the run's exported samples against the ledger (the admission
+   sample and every sample that earned time must carry a verdict the host really issued, green for
+   every required check), reads the checks once more, and records the outcome; any gap, mismatch,
+   non-green verdict or drift fails it. In `gh` mode the runner reads GitHub itself, as before, and
+   mints its own run id.
+
+11. **A crash between publishing the admission and committing the run never uses up the
+   candidate, even across a reboot** (B1 review, R-3). The run's ttyd baseline is the generation
+   the admission sample observes, kept in the run's state; the manifest's value records what was
+   seen when it was staged. A retry that reuses the public manifest after the ttyd changed is
+   admitted against what it now observes, and a generation change during the run still fails it.
+
 ## Consequences
 
 - Until the owner creates the `metrics` ruleset, the digest is published but not tamper-proof. The

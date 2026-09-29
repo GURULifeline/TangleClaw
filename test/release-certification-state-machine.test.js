@@ -79,7 +79,9 @@ describe('buildManifest', () => {
     const m = manifest();
     assert.equal(m.candidateSha, SHA);
     assert.equal(m.schema, 'tc.release-certification/v1');
-    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, baseline: { ttydGeneration: GEN } });
+    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, checksExchange: null, baseline: { ttydGeneration: GEN } });
+    assert.equal(m.runId, fx.RUN_ID, 'the host-minted run id is pinned under the digest');
+    assert.equal(m.checksSource, 'gh');
     assert.equal(m.publishActor, true);
     assert.equal(m.thresholds.targetQualifiedMs, 259_200_000);
     assert.equal(m.thresholds.maxIntervalMs, 150_000);
@@ -97,12 +99,18 @@ describe('buildManifest', () => {
     ['an unknown required-checks source', { requiredChecksSource: 'guess' }],
     ['a publishActor that is not a boolean', { publishActor: 'no' }],
     ['no required checks, which would pass GitHub vacuously', { requiredChecks: [] }],
-    ['a worktree id that is not a sha256', { worktreeId: 'abc' }]
+    ['a worktree id that is not a sha256', { worktreeId: 'abc' }],
+    ['no run id', { runId: undefined }],
+    ['a run id that is not 32 hex characters', { runId: 'B'.repeat(32) }],
+    ['an unknown checks source', { checksSource: 'github' }],
+    ['a host-attested run with no exchange directory', { checksSource: 'host-attested' }],
+    ['a host-attested run with a relative exchange directory', { checksSource: 'host-attested', checksExchange: 'x' }],
+    ['an exchange directory on a gh run', { checksExchange: '/x' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
         candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1,
-        worktreePath: '/w', worktreeId: WTID, ttydGeneration: GEN, ...input
+        worktreePath: '/w', worktreeId: WTID, ttydGeneration: GEN, runId: fx.RUN_ID, ...input
       }), REFUSAL.INVALID_MANIFEST);
     });
   }

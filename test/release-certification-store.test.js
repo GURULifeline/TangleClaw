@@ -392,7 +392,7 @@ describe('store', () => {
   it('refuses to pass a smoke run, and records an operator decision and its snapshot', () => {
     const base = path.join(tmp, 'v1');
     const m = sm.buildManifest({
-      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN,
+      candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection', createdAt: 1000, worktreePath: '/w', worktreeId: 'c'.repeat(64), ttydGeneration: GEN, runId: fx.RUN_ID,
       thresholds: { targetQualifiedMs: MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 }
     });
     const s0 = sample(0);

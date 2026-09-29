@@ -30,6 +30,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const tangleclawHome = require('../lib/tangleclaw-home');
 const store = require('../lib/release-certification/store');
 const sm = require('../lib/release-certification/state-machine');
@@ -37,23 +38,29 @@ const probesLib = require('../lib/release-certification/probes');
 const runnerLib = require('../lib/release-certification/runner');
 const publisherLib = require('../lib/release-certification/publisher');
 const publicationLib = require('../lib/release-certification/publication');
+const hostChecks = require('../lib/release-certification/host-checks');
+const { RUN_ID_RE } = require('../lib/release-certification/formats');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
 const USAGE = [
   'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>] [--no-publish-actor]',
+  '                      [--checks-source host-attested --run-id <32 hex> --exchange <abs>]   (host-attested needs --repo and --required-check)',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
   '       rc-cert accept --sha <40> --actor <id>',
   '       rc-cert cancel --sha <40> --actor <id>',
   '       rc-cert publish --sha <40>',
   '       rc-cert list',
+  'host:  rc-cert host-mint     --sha <40> --repo owner/name --required-check <name>... --host-base <abs>',
+  '       rc-cert host-checks   --sha <40> --exchange <abs> --host-base <abs> [--watch --interval <ms>]',
+  '       rc-cert host-finalize --sha <40> --host-base <abs> [--base <abs>]',
   'common: [--base <abs>] [--api <url>] [--ca <file>]; a gated API reads its token from TANGLECLAW_SERVICE_TOKEN'
 ].join('\n');
 const REPEATABLE = new Set(['required-check']);
 
 /** A malformed or incomplete command line: exit 2 with the usage text. */
 class UsageError extends Error {}
-const BOOLEAN = new Set(['json', 'no-publish-actor']);
+const BOOLEAN = new Set(['json', 'no-publish-actor', 'watch']);
 
 /**
  * Parse `--flag value` arguments.
@@ -163,7 +170,7 @@ function _need(flags, name) {
  * Probe context for a run.
  * @param {object} flags - Parsed flags
  * @param {object} env - Environment
- * @param {object} spec - `{sha, worktreePath, repo, requiredChecks, maxReadingAgeMs}`
+ * @param {object} spec - `{sha, worktreePath, repo, requiredChecks, maxReadingAgeMs, checksSource?, runId?, exchangeDir?}`
  * @returns {object} Probe context
  */
 function _probeCtx(flags, env, spec) {
@@ -178,7 +185,10 @@ function _probeCtx(flags, env, spec) {
     candidateSha: spec.sha,
     repo: spec.repo,
     requiredChecks: spec.requiredChecks,
-    maxReadingAgeMs: spec.maxReadingAgeMs
+    maxReadingAgeMs: spec.maxReadingAgeMs,
+    checksSource: spec.checksSource || 'gh',
+    runId: spec.runId ?? null,
+    exchangeDir: spec.exchangeDir ?? null
   };
 }
 
@@ -320,20 +330,32 @@ async function cmdStart(c) {
   const sha = _need(c.flags, 'sha');
   const thresholds = c.flags.thresholds ? _jsonObject(c.flags.thresholds, '--thresholds') : undefined;
   const worktreePath = _absolute(_need(c.flags, 'worktree'), '--worktree');
+  const checksSource = c.flags['checks-source'] || 'gh';
+  if (!['gh', 'host-attested'].includes(checksSource)) throw new UsageError('--checks-source must be gh or host-attested');
+  const hostAttested = checksSource === 'host-attested';
+  // A host-attested runner has no route to GitHub, so everything it would
+  // otherwise look up there comes from the host that minted its run id.
+  if (hostAttested && (!c.flags.repo || !c.flags['required-check'] || !c.flags['run-id'] || !c.flags.exchange)) {
+    throw new UsageError('--checks-source host-attested needs --repo, --required-check, --run-id and --exchange from the host');
+  }
+  if (c.flags['run-id'] !== undefined && !RUN_ID_RE.test(c.flags['run-id'])) throw new UsageError('--run-id must be 32 lowercase hex characters');
+  // With `gh` checks this process is the host, so it mints the run id itself.
+  const runId = c.flags['run-id'] || crypto.randomBytes(16).toString('hex');
+  const exchangeDir = hostAttested ? _absolute(c.flags.exchange, '--exchange') : null;
   const repo = c.flags.repo || await (c.deps.repository || probesLib.repository)(worktreePath);
   if (!repo) throw new UsageError('could not determine the repository; pass --repo owner/name');
   const { checks: requiredChecks, source: requiredChecksSource } = await _startChecks(c, repo);
   const version = runnerLib.worktreeVersion(worktreePath);
   if (!version) throw new UsageError('the worktree has no readable version.json');
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
-  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs }));
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs, checksSource, runId, exchangeDir }));
   const publishActor = !c.flags['no-publish-actor'];
   const facts = c.deps.publication ? { remoteUrl: null } : await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
   const publication = await _publication(c, sha, { worktreePath, remoteUrl: facts.remoteUrl, publishActor });
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const state = await runner.start({
     version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
-    publishActor, remoteUrl: facts.remoteUrl
+    publishActor, remoteUrl: facts.remoteUrl, runId, checksSource, checksExchange: exchangeDir
   });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
   return 0;
@@ -358,7 +380,8 @@ async function cmdRun(c) {
   const { manifest } = store.readRun(c.base, sha);
   const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, {
     sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
-    requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs
+    requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs,
+    checksSource: manifest.checksSource, runId: manifest.runId, exchangeDir: manifest.private.checksExchange
   }));
   const publication = c.deps.publication || _runPublication(c, sha, manifest);
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
@@ -378,6 +401,73 @@ async function cmdRun(c) {
   return 0;
 }
 
+/**
+ * `host-mint`: mint a run id for a host-attested run, recording the
+ * repository and checks the host will judge it by. Run on the host; the
+ * printed id is passed to the guest's `start --run-id`.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdHostMint(c) {
+  const sha = _need(c.flags, 'sha');
+  const hostBase = _absolute(_need(c.flags, 'host-base'), '--host-base');
+  const { runId } = hostChecks.mintRun(hostBase, { candidateSha: sha, repository: _need(c.flags, 'repo'), requiredChecks: _need(c.flags, 'required-check') });
+  c.out.write(`${JSON.stringify({ runId })}\n`);
+  return 0;
+}
+
+/**
+ * `host-checks`: answer the guest's pending check requests from GitHub. Once
+ * by default; with `--watch`, every `--interval` ms until signalled.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdHostChecks(c) {
+  const sha = _need(c.flags, 'sha');
+  const opts = {
+    hostBase: _absolute(_need(c.flags, 'host-base'), '--host-base'),
+    exchangeDir: _absolute(_need(c.flags, 'exchange'), '--exchange'),
+    candidateSha: sha,
+    observe: c.deps.observeGithub || ((ctx) => probesLib.observeGithub(ctx))
+  };
+  const once = async () => {
+    const r = await hostChecks.answerRequests(opts);
+    if (r.answered.length > 0 || r.skipped.length > 0) c.emit({ event: 'host-checks', ...r });
+  };
+  if (!c.flags.watch) {
+    await once();
+    return 0;
+  }
+  const intervalMs = _int(c.flags.interval, '--interval') ?? 2000;
+  while (!(c.signal && c.signal.aborted)) {
+    await once();
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return 0;
+}
+
+/**
+ * `host-finalize`: join a finished host-attested run's exported evidence
+ * against the host's ledger and read the checks once more. Exit 0 when the
+ * run's checks were vouched for throughout, 3 otherwise.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdHostFinalize(c) {
+  const sha = _need(c.flags, 'sha');
+  const { manifest, state } = store.readRun(c.base, sha);
+  const outcome = await hostChecks.finalize({
+    hostBase: _absolute(_need(c.flags, 'host-base'), '--host-base'),
+    manifest,
+    manifestDigest: state.manifestDigest,
+    state,
+    samples: store.readSamples(c.base, sha),
+    observe: c.deps.observeGithub || ((ctx) => probesLib.observeGithub(ctx))
+  });
+  c.out.write(`${JSON.stringify(outcome)}\n`);
+  return outcome.ok ? 0 : 3;
+}
+
 /** Each command's handler. */
 const COMMANDS = Object.freeze({
   list: cmdList,
@@ -386,7 +476,10 @@ const COMMANDS = Object.freeze({
   cancel: (c) => cmdDecide(c, sm.cancel),
   start: cmdStart,
   run: cmdRun,
-  publish: cmdPublish
+  publish: cmdPublish,
+  'host-mint': cmdHostMint,
+  'host-checks': cmdHostChecks,
+  'host-finalize': cmdHostFinalize
 });
 
 /**

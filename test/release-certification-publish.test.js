@@ -441,7 +441,7 @@ describe('rc-cert publishing identity and failure records', () => {
   it('keeps sampling when the publisher cannot be built, recording the failure instead', async () => {
     const m = sm.buildManifest({
       candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection',
-      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h'
+      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h', runId: fx.RUN_ID
     });
     const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };
     store.createRun(base, m, sm.admit(m, s0), s0);
@@ -470,7 +470,7 @@ describe('rc-cert publishing identity and failure records', () => {
   it('needs no git facts to publish a run whose remote is pinned and whose actor is withheld', async () => {
     const m = sm.buildManifest({
       candidateSha: SHA, version: '5.30.0', repository: 'o/r', requiredChecks: ['test'], requiredChecksSource: 'branch-protection',
-      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h', publishActor: false, publishRemote: remote
+      createdAt: T0, worktreePath: '/tmp/wt', worktreeId: WTID, ttydGeneration: GEN, host: 'h', runId: fx.RUN_ID, publishActor: false, publishRemote: remote
     });
     const s0 = { wallAt: T0, monoAt: 0, runnerInstance: 'r', observations: obs() };
     fs.mkdirSync(store.runPaths(base, SHA).dir, { recursive: true, mode: 0o700 });
@@ -522,7 +522,7 @@ describe('runner: fail-closed start and background publishing', () => {
    * @returns {object} Probes
    */
   const probes = () => ({ collect: async () => ({ observations: obs(), diagnostics: {} }) });
-  const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h' };
+  const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h', runId: fx.RUN_ID };
 
   it('refuses to start with no publisher', async () => {
     await rejects(() => runnerLib.createRunner({ base, candidateSha: SHA, probes: probes() }).start(SPEC), REFUSAL.ADMISSION_UNPUBLISHED);

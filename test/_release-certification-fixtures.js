@@ -19,6 +19,8 @@ const WTID = 'c'.repeat(64);
 const GEN = '4242@Sun Sep 27 09:00:00 2026';
 const MIN = 60 * 1000;
 const T0 = 1_000_000;
+/** A host-minted run id for the fixture run. */
+const RUN_ID = 'b'.repeat(32);
 
 /**
  * A manifest for the candidate, from `sm.buildManifest`.
@@ -37,6 +39,7 @@ function manifest(over = {}) {
     worktreeId: WTID,
     ttydGeneration: GEN,
     host: 'h',
+    runId: RUN_ID,
     ...over
   });
 }
@@ -73,4 +76,4 @@ function sample(t, obs = observations(), extra = {}) {
   return { wallAt: T0 + t, monoAt: t, runnerInstance: 'r1', observations: obs, ...extra };
 }
 
-module.exports = { SHA, WTID, GEN, MIN, T0, manifest, observations, sample };
+module.exports = { SHA, WTID, GEN, MIN, T0, RUN_ID, manifest, observations, sample };

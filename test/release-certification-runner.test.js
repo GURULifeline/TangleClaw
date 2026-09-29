@@ -66,7 +66,7 @@ async function rejects(fn, code) {
   return caught;
 }
 
-const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h' };
+const SPEC = { version: '5.30.0', repository: 'o/r', worktreePath: '/tmp/rc-wt', worktreeId: WTID, requiredChecks: ['test'], requiredChecksSource: 'branch-protection', host: 'h', runId: fx.RUN_ID };
 /**
  * A publication that always succeeds, recording what it was asked.
  * @param {object} [over] - Method overrides
@@ -582,5 +582,259 @@ describe('rc-cert CLI', () => {
     const dirAsConfig = path.join(tmp, 'a-directory');
     fs.mkdirSync(dirAsConfig);
     assert.throws(() => cli.resolveBase({}, dirAsConfig), (e) => e.code === REFUSAL.STORE_UNSAFE, 'an unreadable config is a refusal, not a crash');
+  });
+});
+
+describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () => {
+  const hostChecks = require('../lib/release-certification/host-checks');
+  const SPEC_HA = { ...SPEC, checksSource: 'host-attested' };
+
+  /**
+   * A runner whose checks come from the host through the real exchange.
+   * The host answers whenever the guest waits, unless `answering` is false.
+   * @param {object} [opts] - `{answering, observation, script, pub}`
+   * @returns {object} `{r, f, base, exchange, hostBase, requests, ghCalls}`
+   */
+  function hostAttested(opts = {}) {
+    const base = path.join(tmp, 'v1');
+    const exchange = path.join(tmp, 'exchange');
+    const hostBase = path.join(tmp, 'host');
+    const f = fakes(opts.script || [healthy()]);
+    const requests = [];
+    let i = 0;
+    const script = opts.script || [healthy()];
+    const probesStub = {
+      collect: async (now, binding) => {
+        if (binding) requests.push(binding);
+        const checks = await hostChecks.attest({ candidateSha: SHA, runId: fx.RUN_ID, exchangeDir: exchange, hostVerdictWaitMs: 2000, maxReadingAgeMs: 150_000 }, binding, {
+          now: f.clock.wall,
+          sleep: async (ms) => {
+            if (opts.answering !== false) {
+              await hostChecks.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, now: f.clock.wall, observe: async () => ({ observation: opts.observation || { state: 'ok', checks: { test: 'success' } }, error: null }) });
+            }
+            f.advance(ms);
+          }
+        });
+        const observations = { ...script[Math.min(i++, script.length - 1)], github: checks.observation };
+        return { observations, diagnostics: checks.error ? { github: checks.error } : {}, ...(checks.binding ? { checks: checks.binding } : {}) };
+      }
+    };
+    hostChecks.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
+    // Every read moves the clock on, as a real one does, so two samples taken
+    // concurrently still carry distinct times.
+    const ticking = { wall: f.clock.wall, mono: () => { f.advance(1); return f.clock.mono(); } };
+    const r = runnerLib.createRunner({ publication: opts.pub || fakePub(), base, candidateSha: SHA, probes: probesStub, clock: ticking });
+    return { r, f, base, exchange, hostBase, requests };
+  }
+  const specFor = (h) => ({ ...SPEC_HA, checksExchange: h.exchange });
+
+  it('admits only on a verdict bound to the staged manifest, then binds every sample to its own number', async () => {
+    const h = hostAttested();
+    const state = await h.r.start(specFor(h), NOW);
+    assert.equal(state.state, STATES.RUNNING);
+    assert.deepEqual(h.requests, [{ seq: 1, manifestDigest: state.manifestDigest }], 'admission asked about the staged manifest, as sample 1');
+    for (let n = 0; n < 2; n++) {
+      h.f.advance(MIN);
+      await h.r.tick();
+    }
+    const samples = store.readSamples(h.base, SHA);
+    assert.deepEqual(samples.map((s) => s.checks && s.checks.sampleSeq), [1, 2, 3]);
+    assert.deepEqual(h.requests.map((b) => b.seq), [1, 2, 3]);
+    assert.ok(h.requests.every((b) => b.manifestDigest === state.manifestDigest));
+    const { manifest } = store.readRun(h.base, SHA);
+    assert.deepEqual([manifest.runId, manifest.checksSource, manifest.private.checksExchange], [fx.RUN_ID, 'host-attested', h.exchange]);
+    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { state: 'awaiting-review' }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
+    assert.deepEqual(out, { ok: true, reasons: [] }, 'the host can vouch for every earning sample this run took');
+  });
+
+  it('refuses admission when no host answers, and no run or time exists', async () => {
+    const h = hostAttested({ answering: false });
+    const err = await rejects(() => h.r.start(specFor(h), NOW), REFUSAL.ADMISSION_REFUSED);
+    assert.ok(err.details.reasons.some((x) => x.code === 'GITHUB_UNAVAILABLE'));
+    assert.deepEqual(store.listRuns(h.base), []);
+  });
+
+  it('extends rather than earns when the host reports checks still pending, and fails on a failed check', async () => {
+    const pending = hostAttested({ observation: { state: 'ok', checks: { test: 'pending' } } });
+    await rejects(() => pending.r.start(specFor(pending), NOW), REFUSAL.ADMISSION_REFUSED);
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.mkdirSync(tmp);
+    const failed = hostAttested({ observation: { state: 'ok', checks: { test: 'failure' } } });
+    const err = await rejects(() => failed.r.start(specFor(failed), NOW), REFUSAL.ADMISSION_REFUSED);
+    assert.ok(err.details.reasons.some((x) => x.code === 'REQUIRED_CHECK_FAILED'));
+  });
+
+  it('drops a verdict bound to a sample number another commit took first', async () => {
+    const h = hostAttested();
+    await h.r.start(specFor(h), NOW);
+    h.f.advance(MIN);
+    await Promise.all([h.r.tick(), h.r.tick()]);
+    const samples = store.readSamples(h.base, SHA);
+    assert.equal(samples.length, 3);
+    const moved = samples[2];
+    assert.equal(moved.checks, undefined, 'the second commit carries no binding');
+    assert.equal(moved.observations.github.state, 'unavailable');
+    assert.equal(moved.diagnostics.github, 'host-verdict-seq-moved');
+  });
+
+  it('never reads GitHub in host-attested mode, and forwards the sample binding to the host', async () => {
+    const seen = [];
+    const p = probes.createProbes({ apiBase: 'http://x', worktreePath: '/w', candidateSha: SHA, repo: 'o/r', requiredChecks: ['test'], maxReadingAgeMs: 1, checksSource: 'host-attested', runId: fx.RUN_ID, exchangeDir: '/x' }, {
+      fetchJson: async () => ({ body: null, error: 'connect-failed' }),
+      measure: async () => null,
+      ghJson: async () => { throw new Error('GitHub must not be read from a host-attested runner'); },
+      attest: async (ctx, binding) => { seen.push(binding); return { observation: { state: 'ok', checks: { test: 'success' } }, error: null, binding: { sampleSeq: 4, verdictDigest: 'd'.repeat(64) } }; }
+    });
+    const out = await p.collect(T0, { seq: 4, manifestDigest: 'e'.repeat(64) });
+    assert.deepEqual(seen, [{ seq: 4, manifestDigest: 'e'.repeat(64) }]);
+    assert.deepEqual(out.checks, { sampleSeq: 4, verdictDigest: 'd'.repeat(64) });
+    assert.deepEqual(out.observations.github, { state: 'ok', checks: { test: 'success' } });
+  });
+});
+
+describe('runner: a crash between publishing and committing never uses up the candidate (R-3, ADR 0021 point 3)', () => {
+  it('reuses the public manifest after a reboot, and baselines the ttyd generation it now observes', async () => {
+    const base = path.join(tmp, 'v1');
+    const AFTER = '5151@Mon Sep 28 10:00:00 2026';
+    let staged = null;
+    const crashing = fakePub({ admit: async (m, digest) => { staged = digest; throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'crashed after the push, before the read-back'); } });
+    const before = fakes([healthy()]);
+    await rejects(() => runnerLib.createRunner({ publication: crashing, base, candidateSha: SHA, probes: before.probes, clock: before.clock }).start(SPEC, NOW), REFUSAL.PUBLISH_FAILED);
+    const rebooted = fakes([healthy({ ttyd: { generation: AFTER } }), healthy({ ttyd: { generation: AFTER } }), healthy()]);
+    rebooted.advance(10 * MIN);
+    const retry = runnerLib.createRunner({ publication: fakePub({ publishedDigest: async () => staged }), base, candidateSha: SHA, probes: rebooted.probes, clock: rebooted.clock });
+    const state = await retry.start(SPEC, NOW);
+    assert.equal(state.state, STATES.RUNNING, 'the retry admitted instead of refusing the candidate for a ttyd that changed before the run existed');
+    assert.equal(state.manifestDigest, staged, 'it kept the manifest whose admission is public');
+    assert.equal(state.baseline.ttydGeneration, AFTER);
+    rebooted.advance(MIN);
+    assert.equal((await retry.tick()).state, STATES.RUNNING);
+    rebooted.advance(MIN);
+    const failed = await retry.tick();
+    assert.equal(failed.state, STATES.FAILED, 'a generation change during the run still fails it');
+    assert.equal(failed.failure.code, 'TTYD_GENERATION_CHANGED');
+  });
+});
+
+describe('runner: a loop error survives a failing final publish (O-2)', () => {
+  it('surfaces MANIFEST_TAMPERED even when the final publish throws too', async () => {
+    const base = path.join(tmp, 'v1');
+    const f = fakes([healthy()]);
+    const throwing = fakePub({ publishCurrent: async () => { throw new CertificationError(REFUSAL.PUBLISH_FAILED, 'boom'); } });
+    const r = runnerLib.createRunner({ publication: throwing, base, candidateSha: SHA, probes: f.probes, clock: f.clock });
+    await r.start(SPEC, NOW);
+    const paths = store.runPaths(base, SHA);
+    fs.chmodSync(paths.manifest, 0o600);
+    fs.writeFileSync(paths.manifest, fs.readFileSync(paths.manifest, 'utf8').replace('"h"', '"tampered"'));
+    f.advance(MIN);
+    await rejects(() => r.run({ intervalMs: MIN, wait: async () => f.advance(MIN) }), REFUSAL.MANIFEST_TAMPERED);
+  });
+});
+
+describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
+  const hostChecks = require('../lib/release-certification/host-checks');
+  /**
+   * Run the CLI with captured output.
+   * @param {string[]} argv - Arguments
+   * @param {object} [extra] - More io
+   * @returns {Promise<{code: number, out: string, err: string}>} Result
+   */
+  async function run(argv, extra = {}) {
+    let out = '';
+    let err = '';
+    const code = await cli.main(argv, { stdout: { write: (s) => { out += s; } }, stderr: { write: (s) => { err += s; } }, env: {}, configFile: path.join(tmp, 'missing-config.json'), ...extra });
+    return { code, out, err };
+  }
+  /**
+   * A candidate worktree carrying a version.
+   * @returns {string} Path
+   */
+  function worktree() {
+    const wt = path.join(tmp, 'wt');
+    fs.mkdirSync(wt);
+    fs.writeFileSync(path.join(wt, 'version.json'), '{"version":"5.30.0"}');
+    return wt;
+  }
+  const GREEN = async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null });
+
+  it('mints a fresh 128-bit run id when it is its own host (gh checks)', async () => {
+    const base = path.join(tmp, 'v1');
+    const wt = worktree();
+    const f = fakes([healthy({ server: { checkoutId: runnerLib.worktreeId(wt) } })]);
+    const deps = { repository: async () => 'o/r', requiredChecks: async () => ['test'], publication: fakePub(), probes: () => f.probes, runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: f.clock }) };
+    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1'], { deps })).code, 0);
+    const { manifest } = store.readRun(base, SHA);
+    assert.match(manifest.runId, /^[0-9a-f]{32}$/);
+    assert.equal(manifest.checksSource, 'gh');
+  });
+
+  it('refuses a host-attested start missing anything only the host can supply', async () => {
+    const wt = worktree();
+    const full = ['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', fx.RUN_ID, '--exchange', path.join(tmp, 'x')];
+    for (const drop of ['--repo', '--required-check', '--run-id', '--exchange']) {
+      const i = full.indexOf(drop);
+      const argv = [...full.slice(0, i), ...full.slice(i + 2)];
+      assert.equal((await run(argv)).code, 2, `missing ${drop}`);
+    }
+    assert.equal((await run([...full.slice(0, -4), '--run-id', 'short', '--exchange', path.join(tmp, 'x')])).code, 2, 'a malformed run id');
+    assert.equal((await run(['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'github'])).code, 2, 'an unknown checks source');
+  });
+
+  it('carries a host-attested run from mint to finalization through the CLI alone', async () => {
+    const base = path.join(tmp, 'v1');
+    const hostBase = path.join(tmp, 'host');
+    const exchange = path.join(tmp, 'exchange');
+    const wt = worktree();
+    const minted = await run(['host-mint', '--sha', SHA, '--repo', 'o/r', '--required-check', 'test', '--host-base', hostBase]);
+    assert.equal(minted.code, 0, minted.err);
+    const { runId } = JSON.parse(minted.out);
+    const f = fakes([healthy()]);
+    const ticking = { wall: f.clock.wall, mono: () => { f.advance(1); return f.clock.mono(); } };
+    const probeCtxs = [];
+    // The real probes in host-attested mode; the host answers through its own
+    // CLI command whenever the guest waits for a verdict.
+    const guestProbes = (ctx) => {
+      probeCtxs.push(ctx);
+      return probes.createProbes(ctx, {
+        fetchJson: async () => ({ body: null, error: 'connect-failed' }),
+        measure: async () => null,
+        ghJson: async () => { throw new Error('the guest must not read GitHub'); },
+        attest: (c, b) => hostChecks.attest(c, b, { now: f.clock.wall, sleep: async (ms) => { await run(['host-checks', '--sha', SHA, '--exchange', exchange, '--host-base', hostBase], { deps: { observeGithub: GREEN } }); f.advance(ms); } })
+      });
+    };
+    // PTY use counts from the admission baseline, so each sample reports one
+    // more terminal attached and detached than the last.
+    let used = 0;
+    const observed = () => { used++; return healthy({ server: { checkoutId: runnerLib.worktreeId(wt) }, pty: { attaches: used, detaches: used, lastAt: f.clock.wall() } }); };
+    const deps = {
+      publication: fakePub(),
+      probes: (ctx) => {
+        const real = guestProbes(ctx);
+        return { collect: async (now, b) => { const out = await real.collect(now, b); return { ...out, observations: { ...observed(), github: out.observations.github } }; } };
+      },
+      runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: ticking })
+    };
+    const TH = JSON.stringify({ targetQualifiedMs: 2 * MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 });
+    const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', runId, '--exchange', exchange, '--thresholds', TH], { deps });
+    assert.equal(started.code, 0, started.err);
+    assert.deepEqual([probeCtxs[0].checksSource, probeCtxs[0].runId, probeCtxs[0].exchangeDir], ['host-attested', runId, exchange]);
+    const controller = new AbortController();
+    let ticks = 0;
+    const running = await run(['run', '--sha', SHA, '--base', base, '--api', 'http://127.0.0.1:1', '--interval', '60000'], {
+      signal: controller.signal,
+      deps: { ...deps, runner: (ctx) => {
+        const real = runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: ticking });
+        return { ...real, run: (a) => real.run({ ...a, wait: async () => { f.advance(MIN); if (++ticks >= 4) controller.abort(); } }) };
+      } }
+    });
+    assert.equal(running.code, 0, running.err);
+    assert.deepEqual([probeCtxs[1].checksSource, probeCtxs[1].runId, probeCtxs[1].exchangeDir], ['host-attested', runId, exchange], 'run reads them from the pinned manifest');
+    assert.equal(store.readRun(base, SHA).state.state, 'awaiting-review');
+    const fin = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase], { deps: { observeGithub: GREEN } });
+    assert.equal(fin.code, 0, fin.out + fin.err);
+    assert.deepEqual(JSON.parse(fin.out), { ok: true, reasons: [] });
+    const drifted = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase], { deps: { observeGithub: async () => ({ observation: { state: 'ok', checks: { test: 'failure' } }, error: null }) } });
+    assert.equal(drifted.code, 3);
+    assert.deepEqual(JSON.parse(drifted.out).reasons, [{ code: 'FINAL_CHECKS_NOT_GREEN' }]);
   });
 });
