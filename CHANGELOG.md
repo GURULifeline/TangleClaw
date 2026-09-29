@@ -36,6 +36,15 @@ All notable changes to TangleClaw are documented in this file.
   - **Storage.** The rotation and coordinator-role records are schema v51.
   - **Reference:** `docs/coordinator-rotation.md`.
 
+- **The soak can run its faults and a real browser, sample the guest's integrity, and bundle its evidence** (#2020 Chunk 3, part of #1949).
+  - **Faults and browser events run.** Before this, `run` refused them (`NO_EXECUTOR`).
+    - Six faults: a server restart through the product's own restart route, a tmux kill of the harness's own session, client aborts, an exclusive database lock (rolled back), bounded disk ballast, and a ttyd kickstart. The ttyd kickstart runs in the destructive phase only.
+    - Two browser events drive Safari through `safaridriver`: the dashboard's scripts must fill in its stats, and a terminal attach must be counted by the server.
+  - **Where they run.** They act on the machine the driver runs on, so `run` admits them only inside the soak guest: `--no-live-install`, a virtual machine, a loopback `--api`, the guest home as `--home` and, for browser events, a loopback `--webdriver`. Anywhere else it refuses with `LOCAL_CONTROL_REFUSED` before any load.
+  - **`soak sample`** records the guest database's `quick_check`/`integrity_check`, the server's memory and open descriptors, disk space and health, every ten minutes by default.
+  - **`soak bundle`** gathers a run's schedule, log, sidecars, samples, attestations and a checked database snapshot into a new directory, with a manifest binding every file by sha256. A log the driver refuses as evidence is still bundled, with the refusal recorded.
+  - **Two operator runbooks** cover the procedure: installing and starting the pinned candidate in the guest, and running, sampling and bundling the soak. The step that gives the workload user a GUI login session, which launchd needs for the server and ttyd restarts, is marked pending an Architect ruling.
+
 - **The soak's load reaches plans, the Medusa switchboard and wrap** (#2020 Chunk 2B, part of #1949). Four load kinds join the schedule:
   - `api.plans.read`: lists a project's plans, requires the provisioned `soak-plan.md`, and fetches its page. A listing link that points off the soak target is refused, so the soak's token is never sent elsewhere.
   - `api.medusa.reads`: the fleet-wide switchboard deliveries and escalations.

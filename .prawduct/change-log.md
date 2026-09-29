@@ -35,6 +35,33 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-29 — #2020 Chunk 3: fault and browser executors, integrity sampling, evidence bundle, operator runbooks
+
+<!-- prawduct: type=feature | scope=2020-chunk-3 -->
+
+Lease Rule #142 (RM-LEASE TC-RM08 generation 3). PM dispatch `fe7c8a9d`. Branch `feat/2020-chunk3-soak-runbook-executors` from `origin/main` `a5253de6`.
+
+**Why.** The schedule already drew `browser` and `fault` events, but `run` refused them (`NO_EXECUTOR`). Nothing sampled the guest database or the server process, nothing gathered a run into one evidence set, and no procedure installed the pinned candidate in the guest. The Architect ruling on #2020 requires all of it before the dry run.
+
+**What.**
+- **3a: local control and faults.** `lib/soak/local.js` admits a schedule with any fault or browser kind only inside the guest: `--no-live-install`, `kern.hv_vmm_present` = 1, a loopback IP `--api`, and an owned `--home` with its `tangleclaw.db`. Otherwise it refuses with `LOCAL_CONTROL_REFUSED` before any load. `lib/soak/faults.js` implements the six faults (the table is in `deploy/soak/README.md`).
+- **3b: browser events.** `lib/soak/webdriver.js` is a minimal W3C client, and `lib/soak/browser.js` implements the dashboard load and the terminal attach. The attach is proven by the server's `pty-activity` counter on the same instance.
+- **3c: sampling and the bundle.** `lib/soak/integrity.js` backs `soak sample`: database check verdicts, RSS and descriptors, disk, and health. `lib/soak/bundle.js` backs `soak bundle`: copies, a `VACUUM INTO` snapshot checked with `integrity_check`, and a sha256 manifest. Both are admitted by `local.admitGuestReader`.
+- **3d: runbooks and docs.** `docs/runbooks/soak-install-the-candidate.md` and `docs/runbooks/soak-run-sample-and-bundle.md`. `deploy/soak/README.md`, CHANGELOG and FEATURES are updated too.
+
+**Decisions.**
+- The server restart goes through `POST /api/server/restart`, and is never forced past a wrap.
+- The tmux kill targets only the session the harness's own launch named (`=<name>`).
+- The ttyd restart reuses `lib/ttyd-watcher.js`'s kickstart form, and refuses outside the destructive phase.
+- Disk ballast leaves 2 GiB free, is capped at 64 GiB, and is swept at the start of the next disk fault.
+- `lib/soak/` stays self-contained, so the guest's checkout trust check (`lib/soak/*.js`) still covers everything the soak runs. That is why the pidfile is parsed locally.
+
+**Test contract changed, not weakened.** `test/soak-cli.test.js` expected `NO_EXECUTOR` for a full schedule. Every kind now has an executor, and the new guard is what stops a full schedule outside the guest. The test now expects `LOCAL_CONTROL_REFUSED` with no request sent and no log written. A new test pins an executor for every catalogue kind.
+
+**Open.** The workload user has no GUI login session (it was created with a password nobody keeps). But the product restarts the server and ttyd through launchd `gui/<uid>`. The Architect was asked for a ruling (exchange `mx_2MqeMZK9ZwoqbQr5`), and install runbook step 8 is marked BLOCKED until then.
+
+**Verification.** Unit and integration tests use fakes for HTTP, WebDriver, launchctl, tmux and statfs, and a real SQLite database and real files. Nothing was run in a real guest: the runbooks mark those steps unverified until the first dry run.
+
 ## 2026-09-29 — #2020 Chunk 2B: soak load for plans, switchboard and wrap; C01/C02 integrated; host-attested checks (Q1)
 
 <!-- prawduct: type=feature | scope=2020-chunk-2b -->

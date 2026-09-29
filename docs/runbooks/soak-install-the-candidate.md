@@ -1,0 +1,94 @@
+# Install and start the pinned candidate in the soak guest
+
+The Operator runs this runbook. It creates a VM, installs software in it, and ends by cutting the guest
+off the network. Builders never run it.
+
+## When to use this
+
+A release candidate is pinned to one 40-character SHA for the #2020 soak, and you need a fresh guest
+running exactly that SHA. Run it again for every certifying run and after every destructive-phase run:
+a certification starts from a pristine guest.
+
+**Not this runbook:** the guest is already set up and you want to run the soak. Use
+[Run, sample and bundle the soak](soak-run-sample-and-bundle.md).
+
+## Before you start
+
+- **Everything the guest needs comes from the network before step 11.** Step 11 loads the default-deny
+  profile, and after that the guest cannot reach GitHub or Homebrew.
+- **Unverified until the first dry run:** steps 4, 9 and 10 have not yet been run in a real guest.
+  Record what each one printed with the run's evidence.
+- **Step 8 is blocked.** It waits on an Architect ruling (#2020): the workload user needs a GUI login
+  session for launchd to run the server and ttyd.
+
+## Steps
+
+On the host, from a TangleClaw checkout:
+
+1. Pin the candidate:
+   `export SOAK_SHA=<the pinned 40-hex SHA>; [[ $SOAK_SHA =~ ^[0-9a-f]{40}$ ]] && echo pinned`
+   → Expected: `pinned`.
+
+2. Preview the VM:
+   `bash deploy/soak/guest/host-provision.sh`
+   → Expected: the `tart clone`, `tart set` and `tart run` commands it would run, and nothing else.
+   → If it refuses: it names the setting it rejected. Fix that in the environment and run it again.
+
+3. Create and start the VM:
+   `SOAK_OPERATOR_APPROVED=1 bash deploy/soak/guest/host-provision.sh --execute`
+   → Expected: the same three commands, then a running VM named `tc-soak-guest`.
+
+In the guest, as its admin user over SSH:
+
+4. Install the tools (network still open): the Xcode Command Line Tools, Homebrew, then
+   `brew install node tmux ttyd mkcert caddy`
+   → Expected: `node --version` prints `v22` or later.
+
+5. Check out the pin into a root-owned tree that the workload user can read and nobody else can write:
+   `sudo git clone --no-checkout https://github.com/Jason-Vaughan/TangleClaw.git /opt/tangleclaw-soak && sudo git -C /opt/tangleclaw-soak checkout --detach "$SOAK_SHA"`
+
+6. Confirm the checkout:
+   `sudo git -C /opt/tangleclaw-soak rev-parse HEAD; stat -f '%Su %Lp' /opt/tangleclaw-soak`
+   → Expected: exactly `$SOAK_SHA`, then `root 755`.
+   → If not: delete `/opt/tangleclaw-soak` and go back to step 5.
+
+7. Create the workload user:
+   `cd /opt/tangleclaw-soak && bash deploy/soak/guest/guest-setup.sh --bootstrap-user`
+   → Expected: the last line is
+   `workload user soakrun is ready. Next: start the pinned TangleClaw as soakrun on 127.0.0.1:3102, then run guest-setup.sh`.
+
+8. **BLOCKED, pending an Architect ruling:** open a GUI login session for `soakrun`, so launchd has a
+   `gui/<uid>` domain for it. Stop here until the ruling says how.
+
+As `soakrun`, in that GUI session:
+
+9. Install and start the candidate:
+   `git config --global --add safe.directory /opt/tangleclaw-soak && cd /opt/tangleclaw-soak && bash deploy/install.sh`
+   → Expected: the install finishes with its summary banner. If `mkcert -install` asks for a password
+   and fails, the install says so and carries on; that is fine here.
+
+10. Confirm the server runs the pin, with the gate off:
+    `curl -s http://127.0.0.1:3102/api/server-info` and
+    `node -p "require(process.env.HOME + '/.tangleclaw/config.json').authEnabled === true"`
+    → Expected: `"startupSha"` equal to `$SOAK_SHA`, then `false`.
+    → If the gate is on: browser events cannot log in. Turn the gate off before continuing.
+
+As the admin again:
+
+> ⚠️ **Step 11 cuts the guest off the network.** Anything it still needs must already be installed.
+> **Proceed only if:** steps 9 and 10 passed. **Abort if:** anything is missing. Aborting costs
+> nothing; after step 11 it costs a new guest.
+
+11. Run the egress positive control, then set the guest up:
+    `sudo -u soakrun -H bash deploy/soak/guest/guest-setup.sh --verify-workload`, then
+    `bash deploy/soak/guest/guest-setup.sh`
+    → Expected: the first exits 3 and its line names `egress-permitted`. pf is not loaded yet, so the
+    probes can answer, which proves they can detect egress. The second ends with
+    `guest ready: workload user soakrun, default-deny network attested on both planes, stub engine, projects soak-a,soak-b,soak-c`.
+    → If the first exits 0: the probes cannot detect egress, so their later denial proves nothing.
+    Stop and report it on #2020.
+
+## If it fails
+
+Anything not covered above: stop, keep the guest as it is, and report the step number and its output on
+#2020. Do not reuse a guest that failed partway: create a new one from step 2.
