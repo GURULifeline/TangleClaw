@@ -269,6 +269,8 @@ checks are:
   and does not block);
 - `control.stateGeneration` is the lane's current control generation, or `null` when there is no
   assignment;
+- for a relaunch, the successor's own launch sequence has been attested READY. Until then the
+  successor holds no coordinator authority;
 - the **readiness verdict** (ruling A8): the replacement's newest `tc workload set` receipt was
   published after the re-entry turn, is still current, and says `working` or `waiting-external` with
   `do-not-clear`. The verdict is persisted on the rotation either way.

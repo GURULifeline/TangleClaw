@@ -1231,6 +1231,11 @@ describe('coordinator context rotation (#2032)', () => {
       const nonceNow = /Resume nonce[^`]*`([^`]+)`/.exec(text)[1];
       const body = { rotationId: r.rotationId, attemptKey: r.attemptKey, generation: r.generation, resumeNonce: nonceNow, receipt: receipt(rotation.view(r)) };
       assert.equal((await rotation.resume({ access: access(), threadId: SUCCESSOR_THREAD, body }, deps())).body.code, 'ROTATION_NOT_YOURS');
+      // Before its own launch sequence is attested READY, the successor holds no authority.
+      const unready = await rotation.resume({ access: successorAccess, threadId: SUCCESSOR_THREAD, body }, deps());
+      assert.equal(unready.body.code, 'ROTATION_EVIDENCE_MISSING');
+      assert.deepEqual(unready.body.missing.map((m) => m.fact), ['launch-ready']);
+      store.getDb().prepare('UPDATE launch_sequences SET ready_at = ? WHERE launch_id = ?').run(new Date(clockMs).toISOString(), r.launchId);
       const done = await rotation.resume({ access: successorAccess, threadId: SUCCESSOR_THREAD, body }, deps());
       assert.equal(done.status, 200, JSON.stringify(done.body));
     });
@@ -1301,6 +1306,7 @@ describe('coordinator context rotation (#2032)', () => {
       assert.deepEqual(blocked.body.drift.relaunch.map((i) => i.key), ['checkout.head'], 'the claim\'s observation survives the attempt');
       // Undo it, and the resume goes through against the claim-time baseline.
       checkout.fingerprint.trackedDiffDigest = 't'.repeat(64);
+      store.getDb().prepare('UPDATE launch_sequences SET ready_at = ? WHERE launch_id = ?').run(new Date(clockMs).toISOString(), r.launchId);
       const done = await rotation.resume({ access: successorAccess, threadId: SUCCESSOR_THREAD, body }, deps());
       assert.equal(done.status, 200, JSON.stringify(done.body));
     });
