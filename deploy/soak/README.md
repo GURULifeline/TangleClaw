@@ -8,19 +8,15 @@ It judges nothing. Whether the release candidate passes is decided by the releas
 judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces the conditions and
 records what happened.
 
-> **Status: Chunks 2A (the core) and 1 (the guest and the synthetic repos).** This directory has the
-> schedule, the runner for the `api` and `engine` load classes, the stub engine, the guest definition
-> (`guest/`) and the generator for the synthetic `soak-*` repos. Not built yet:
+> **Status: Chunks 2 (the core, plus plans, switchboard and wrap load) and 1 (the guest and the
+> synthetic repos).** This directory has the schedule, the runner for the `api` and `engine` load
+> classes, the stub engine, the guest definition (`guest/`) and the generator for the synthetic
+> `soak-*` repos. Not built yet:
 > - installing and starting the pinned release candidate inside the guest (the operator runbook);
 > - the executors for the `browser` and `fault` classes;
 > - integrity sampling, the evidence bundle and the operator runbook;
 > - the certification judge (Chunks 3 and 4 of #2020, with the link to rc-cert). Until it exists,
 >   nothing but `run`'s exit 5 acts on a log's ownership-unverified disposition;
-> - **Chunk 2B, mandatory before the first guest dry run** (Architect ruling):
->   - API load against plans and the switchboard (this chunk, 2A, covers health, server-info,
->     projects and ports);
->   - stub-engine sessions that exercise wrap and the switchboard (2A's engine cycle covers launch,
->     commands and kill);
 >
 > Until the missing executors exist, `run` **refuses** any schedule containing those kinds
 > (`NO_EXECUTOR`) rather than skipping them. Plan with `--classes api,engine` to run the load
@@ -56,6 +52,90 @@ node scripts/soak.js validate --schedule soak-certifying.json
     faults (the default is ten);
   - a schedule holds at most 300,000 events. A 72-hour run at the one-second floor is 259,200.
 - **`plan` never overwrites** an existing schedule file.
+- **A schedule names its catalogue** (`tc.soak-schedule/v2`). Adding a kind changes what a seed
+  draws, so a schedule from an earlier catalogue is refused (`SCHEMA`), never read as the same run.
+
+## What the load does
+
+| Kind | Class | Weight | What it proves |
+|---|---|---|---|
+| `api.health`, `api.server-info`, `api.projects.list`, `api.ports.list` | api | 6, 3, 4, 3 | The read routes keep answering. |
+| `api.ports.lease-release` | api | 2 | A port lease and its release both succeed, under `soak-harness`. |
+| `api.plans.read` | api | 1 | `GET /api/projects/<p>/plans` lists `soak-plan.md`, and the page at its `urlPath` answers 200. |
+| `api.medusa.reads` | api | 1 | The fleet-wide switchboard reads, deliveries then escalations, keep answering. |
+| `engine.session.cycle` | engine | 3 | A stub session launches, takes commands, and is killed. |
+| `engine.session.medusa-cycle` | engine | 1 | Two stub sessions on distinct projects both reach `listening`; a message from one is delivered to the other's inbox and marked handled; both are killed. |
+| `engine.session.wrap-cycle` | engine | 1 | A stub session is wrapped with every AI-content step skipped; the run the `202` named finishes, succeeds, and ends the session. |
+
+- **The plans, switchboard and wrap kinds are drawn rarely.** Each makes several requests, and the
+  two engine cycles launch sessions and run the wrap pipeline. At a higher weight they would crowd
+  out the steady light load that shows a slow leak.
+- **The switchboard cycle needs two projects.** A schedule with one project never draws it, and
+  `validate` rejects one added by hand, as it does a cycle whose two projects are the same or not in
+  the schedule.
+- **The plans read fetches only a page on the target.** The page is HTML, so only its status and
+  length are recorded. A listing whose `urlPath` resolves anywhere else is refused (`FOREIGN_LINK`)
+  and never requested, since the request would carry the soak's token.
+- **Every wait is bounded.** Both listeners have a minute to reach `listening` (`NOT_LISTENING`,
+  naming the laggard), the message a minute to arrive (`NOT_DELIVERED`), and the wrap ten minutes to
+  finish (`WRAP_TIMEOUT`). Their states are read once a second.
+- **How a wrap cycle is judged:**
+  - `409 STRANDED_WRAPS` is `WRAP_STRANDED`; any other refusal is `HTTP_STATUS`.
+  - `409 WRAP_IN_PROGRESS` is a failure, and the session is **not** killed: another run owns it.
+  - A status naming a different run is ignored. A run claimed and never settled is `WRAP_STALE`.
+  - Success is the run's `ok` and its pipeline's `ok`, never `result.status`, which reads
+    `wrapping` even on success. Otherwise it is `WRAP_BLOCKED`, with `blockedAt` when known.
+  - A successful run that did not end the session is `WRAP_NOT_ENDED`.
+  - The session is killed afterwards only when the run did not end it.
+- **Every engine cycle kills only what the harness launched.** Both projects of a switchboard cycle
+  pass the same status check as a session cycle (below) before anything launches. Once a launch
+  succeeded, both sessions are killed at the end whatever failed between, and a failed kill is
+  reported (`cleanupFailed`). Killing the recipient retires the exchange, so the message needs no
+  reply and no close.
+- **The message and its request id name the run and the event**
+  (`soak-medusa-<runKey>-<index>`, where `runKey` is the schedule digest's first 16 hex characters
+  and the log's start time). The server keeps request ids unique across all its sends, so scoping
+  the id to the run keeps a second soak against the same target from colliding with the first.
+  The send is **not** idempotent: a resumed event re-sends under its earlier id, the server refuses
+  it (409 `SEND_ALREADY_ATTEMPTED`) rather than sending again, and the cycle records that as its own
+  outcome, `SEND_ALREADY_ATTEMPTED`, never as a failed send.
+
+### Prerequisites on the target
+
+These kinds need a target prepared as Chunk 1 will prepare it:
+- **A Medusa hub** running with `A2A_SECRET`, reachable at the TangleClaw process's
+  `MEDUSA_BRIDGE_HTTP_URL`. Without it no listener reaches `listening`.
+- **Each `soak-*` project's `.tangleclaw/project.json`** has `medusaEnabled: true`,
+  `wrapAutoPrEnabled: false` and `releaseMode: "off"`, and the project has a
+  `.tangleclaw/plans/soak-plan.md`.
+- **The driver runs on the guest's loopback**, so the front-door gate treats it as a machine
+  client.
+
+### What this load does not exercise
+
+The guest is offline and the engine is a stub, so:
+- real AI-content capture in a wrap (every such step is skipped);
+- the wrap's push and pull-request path (`wrapAutoPrEnabled: false`);
+- bound switchboard replies and exchange closes: the message needs no reply, and the recipient's
+  kill retires the exchange.
+
+**These are certification gates, not waivers** (Architect ruling A32). Each of them must be
+exercised, or explicitly gated, by the exact-head acceptance and preflight of the guest dry run
+before any soak time counts. A certifying run does not start while any of them is unmet: real
+AI-content capture, the push-and-PR path, and the governed switchboard lifecycle (bound replies
+and closes). This load keeps the rest of those paths under stress; it does not stand in for them.
+
+### Certifying in a guest: host-attested checks and the relay
+
+The guest has no route to GitHub, so a certifying run in it uses the judge's host-attested mode
+(ADR 0021 points 10 to 12): the host mints the run id (`rc-cert host-mint`), answers every
+sample's required checks (`rc-cert host-checks --watch`), finalizes the run against its own ledger
+(`rc-cert host-finalize`), and relays the guest's local `metrics` branch to the public remote
+(`rc-cert host-publish`). The guest runs `rc-cert start --checks-source host-attested --run-id
+<id> --exchange <dir> --metrics-remote <local bare repo> --isolation-producer <guest-setup.sh> …`,
+and every sample also attests the guest's network isolation (ADR 0021 point 13): the runner calls `guest-setup.sh --verify-network` with the sample's binding. That runs both raw verifiers afresh and prints, through `lib/soak/attest-bridge.js`, one bound `{admin, workload}` pair, or a bound `{breach}` envelope when a verifier positively measured an unsafe fact (exit 3 with `code: BREACH`), or nothing when it could not measure. The raw `--verify-admin` and `--verify-workload` modes stay for direct diagnostics. The transport between host and
+guest (Chunk 1) mirrors the exchange directory and brings the guest's `metrics` repository to
+the host. Certification of record exists only as the host's record.
 
 ## Run it
 

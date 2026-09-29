@@ -71,8 +71,16 @@ describe('soak schedule — determinism', () => {
     // If this fails, the change broke every recorded seed; a deliberate change
     // needs a new schema version, not a new pin.
     const s = sched.buildSchedule({ seed: 'pin', phase: 'certifying', durationMs: HOUR });
-    assert.equal(s.digest, 'c8e99aed473041cc472fe517aa86c065784ae4e07a6b61f4ebc9411d20049c61');
-    assert.deepEqual(s.events[0], { index: 0, atMs: 33813, kind: 'api.ports.lease-release', class: 'api', params: { port: 5579 } });
+    assert.equal(s.schema, 'tc.soak-schedule/v2');
+    assert.equal(s.digest, '36872ca383c942129f0ec974369d38b1adbfa194107d86edff02f85a7820a2dd');
+    assert.deepEqual(s.events[0], { index: 0, atMs: 33813, kind: 'api.medusa.reads', class: 'api', params: {} });
+  });
+
+  it('refuses a schedule written under the previous catalogue, even with its digest fixed', () => {
+    // A v1 digest was drawn from a catalogue without the plans, switchboard
+    // and wrap kinds, so the same seed means a different run under v2.
+    const v1 = edited(build(), (c) => { c.schema = 'tc.soak-schedule/v1'; });
+    assert.deepEqual(codes(v1), ['SCHEMA']);
   });
 
   it('mulberry32 gives the same sequence for the same seed and stays in [0, 1)', () => {
@@ -127,6 +135,49 @@ describe('soak schedule — shape', () => {
     const s = build();
     const sum = Object.values(sched.summarize(s)).reduce((a, b) => a + b, 0);
     assert.equal(sum, s.events.length);
+  });
+});
+
+describe('soak schedule — plans, switchboard and wrap load', () => {
+  const s = build({ durationMs: 24 * HOUR });
+
+  it('draws every new kind in a long enough schedule, with params that validate', () => {
+    for (const kind of ['api.plans.read', 'api.medusa.reads', 'engine.session.medusa-cycle', 'engine.session.wrap-cycle']) {
+      assert.ok(s.events.some((e) => e.kind === kind), kind);
+    }
+    assert.deepEqual(sched.validateSchedule(s), []);
+  });
+
+  it('draws a switchboard cycle between two distinct schedule projects', () => {
+    const pairs = s.events.filter((e) => e.kind === 'engine.session.medusa-cycle');
+    assert.ok(pairs.length > 5);
+    for (const e of pairs) {
+      assert.deepEqual(Object.keys(e.params).sort(), ['from', 'to']);
+      assert.notEqual(e.params.from, e.params.to);
+      assert.ok(s.params.projects.includes(e.params.from) && s.params.projects.includes(e.params.to));
+    }
+    const seen = new Set(pairs.map((e) => `${e.params.from}>${e.params.to}`));
+    assert.ok(seen.size > 1, 'the pair is drawn, not fixed');
+  });
+
+  it('never draws a switchboard cycle with fewer than two projects, and flags one added by hand', () => {
+    const one = build({ durationMs: 24 * HOUR, projects: ['soak-only'], classes: ['engine'] });
+    assert.ok(one.events.length > 0);
+    assert.equal(one.events.some((e) => e.kind === 'engine.session.medusa-cycle'), false);
+    assert.deepEqual(sched.validateSchedule(one), []);
+    const bad = edited(one, (c) => { c.events[0].kind = 'engine.session.medusa-cycle'; c.events[0].params = { from: 'soak-only', to: 'soak-only' }; });
+    assert.deepEqual(sched.validateSchedule(bad).map((v) => [v.code, v.index]), [['EVENT_PARAMS', 0]]);
+    assert.match(sched.validateSchedule(bad)[0].detail, /two schedule projects/);
+  });
+
+  it('keeps the heavier new kinds rarer than the light load in each class', () => {
+    const NEW = new Set(['api.plans.read', 'api.medusa.reads', 'engine.session.medusa-cycle', 'engine.session.wrap-cycle']);
+    for (const cls of ['api', 'engine']) {
+      const inClass = sched.TASKS.filter((t) => t.class === cls);
+      const newWeight = inClass.filter((t) => NEW.has(t.kind)).reduce((n, t) => n + t.weight, 0);
+      const oldWeight = inClass.filter((t) => !NEW.has(t.kind)).reduce((n, t) => n + t.weight, 0);
+      assert.ok(newWeight < oldWeight, `${cls}: ${newWeight} vs ${oldWeight}`);
+    }
   });
 });
 
@@ -217,7 +268,17 @@ describe('soak schedule — validation of tampered or malformed schedules', () =
       ['a tmux kill aimed at a project not in the schedule', 'fault.tmux.session-kill', (e) => { e.params.project = 'TangleClaw'; }],
       ['params on a kind that takes none', 'api.health', (e) => { e.params.path = '/api/server/restart'; }],
       ['missing params', 'api.health', (e) => { delete e.params; }],
-      ['params that are not an object', 'api.ports.lease-release', (e) => { e.params = [5510]; }]
+      ['params that are not an object', 'api.ports.lease-release', (e) => { e.params = [5510]; }],
+      ['a plans read on a project not in the schedule', 'api.plans.read', (e) => { e.params.project = 'TangleClaw'; }],
+      ['a plans read with no project', 'api.plans.read', (e) => { delete e.params.project; }],
+      ['params on the switchboard reads', 'api.medusa.reads', (e) => { e.params.project = 'soak-a'; }],
+      ['a switchboard cycle sending to itself', 'engine.session.medusa-cycle', (e) => { e.params.to = e.params.from; }],
+      ['a switchboard cycle from a project not in the schedule', 'engine.session.medusa-cycle', (e) => { e.params.from = 'TangleClaw'; }],
+      ['a switchboard cycle to a project not in the schedule', 'engine.session.medusa-cycle', (e) => { e.params.to = 'TangleClaw'; }],
+      ['a switchboard cycle with no recipient', 'engine.session.medusa-cycle', (e) => { delete e.params.to; }],
+      ['a switchboard cycle with an extra key', 'engine.session.medusa-cycle', (e) => { e.params.project = 'soak-a'; }],
+      ['a wrap cycle on a project not in the schedule', 'engine.session.wrap-cycle', (e) => { e.params.project = 'TangleClaw'; }],
+      ['a wrap cycle with an extra key', 'engine.session.wrap-cycle', (e) => { e.params.commands = 3; }]
     ];
     for (const [label, kind, mutate] of tampered) {
       it(`reports ${label}, even with the digest fixed`, () => {

@@ -35,6 +35,75 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-09-29 — #2020 Chunk 2B: soak load for plans, switchboard and wrap; C01/C02 integrated; host-attested checks (Q1)
+
+<!-- prawduct: type=feature | scope=2020-chunk-2b -->
+
+Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q1/Q2 in scope) and A32 (plan accepted: v2 schedule, host-minted runId, offline limits are gates, not waivers). Branch `feat/2020-chunk-2b` from `origin/main` `20c975a9`. Plan: `.prawduct/artifacts/build-plan.md`.
+
+- **B1: integration.** C01 `3393077e` (#1962) and C02 `0ec417f5` (#1975) are merged by merge commit at their reviewed heads (`9c4bc597`, `266f4c01`). The only conflict was `CHANGELOG.md`. Their files are byte-identical to the reviewed heads, and so is the workflow.
+- **B5: soak load** (delegated to an isolated worktree agent, merged at `6509b7fc`). There are four new kinds and schedule schema v2. The driver now passes `eventIndex`, so a switchboard send carries its idempotency key.
+- **B2: #1975 gates and the B1 review.**
+  - One library-owned publish-failure path (R-8, R-15, which includes #1975's R-4).
+  - Transitions are counted, not flagged (R-2).
+  - The `metrics` clone refuses entries that are not regular files, and the verifier flags them with `NOT_REGULAR_FILE` (R-7, a real write-outside-the-clone hole).
+  - The actor override is gone (R-9).
+  - The test fixtures are shared (R-10, R-5).
+  - The change-log order is repaired (R-16; its `.gitattributes` root cause is outside the lease and was reported).
+  - ADR 0021 carries the orphan `metrics` branch and the C03/C04 constraints.
+  - The E2E publication smoke passed at code `02ba685e`, candidate `20c975a9`, against a local bare `metrics` repo and a stub server under test on a PortHub port. A real scratch TangleClaw was not used, because its ttyd watcher would share the machine-global launchd ttyd job with the live install.
+- **B3: host-attested required checks (Q1).** `host-mint`, `host-checks` and `host-finalize` work over an exchange directory. Every verdict is bound to the SHA, the runId, the sample number and the manifest digest, and is ledgered on the host first. Admission is two-phase. R-3: the ttyd baseline moved into run state, so a crash-retry after a reboot keeps the candidate. Design: ADR 0021 points 10 and 11.
+- **B3 review (`rev-20260929T150326Z-ce635baf`, 1 blocking).** Fixed in one commit:
+  - R-6: the admission record publishes `checksSource` and `runId`; scorecards publish `checksSource`; finalization is kept per run; the host relay is named as its reader.
+  - R-2: freshness is judged on the guest's clock alone.
+  - R-3 and R-10: a bad request file is quarantined once and never stops the responder; `--watch` survives a failed pass.
+  - R-11: the guest clears its request and verdict after each sample.
+  - R-4 and R-13: finalization requires every committed sample, each taken within one interval of its own request.
+  - R-9: the seq-moved diagnostic joins the closed set.
+  - **Tests replaced, not weakened:** the two `STALE` rows in `test/release-certification-host-checks.test.js` encoded a cross-clock freshness rule the review showed was wrong (a guest clock ahead of the host's made every verdict stale). They are replaced by tests that a far-behind or far-ahead host clock still validates and is answered once. Freshness is now pinned by the guest-clock checks in finalization.
+- **B4: split-plane publication (Q2).**
+  - A host-attested manifest must publish to an absolute local path.
+  - `rc-cert host-publish` relays the guest's exact tip to the public remote, fast-forward only. It first requires the host's `ok` finalization of that run and manifest digest, and a clean verifier run over the guest's whole history. It then reads the remote back (the OID, plus the admission and scorecard bytes), and only then writes `record-<runId>.json`. That record is the only certification of record: `certified` means `passed`, canonical and finalized.
+  - R-4 (B1 review): the origin and the identity are read separately, so a pinned remote with a withheld actor needs no git config.
+  - Tests: `test/release-certification-host-publish.test.js`, against two local bare repos, mutation-checked on each fail-closed step.
+  - **B4 review (`rev-20260929T152715Z-bcaccd3b`, 0 blocking).**
+    - R-1, a real time-of-check/time-of-use hole: the relay read the untrusted guest's branch several times, so a guest moving it after the history check could get an unverified commit published. The guest is now fetched once, pinned by OID, and only that commit is verified, compared and pushed. The regression test fails on the old relay.
+    - R-3: one relay repo per remote, held under a lock for the whole relay.
+    - R-5: a verdict the host could not read GitHub for carries a closed `reason`, covered by its digest. It is reported on the host (`host-github-unavailable`) and surfaced as the guest sample's diagnostic.
+- **B7: Architect rulings A43, A44, A47, A51 and A54** (received late; order confirmed by PM `e0a8330f` and Architect A57).
+  - `lib/release-certification/isolation.js` judges joined admin and workload attestations, per sample and bound to it, from the pinned `--isolation-producer`.
+  - The state machine extends on an unattested sample (`ISOLATION_UNATTESTED`), and hard-fails on `ISOLATION_BREACHED`, `BOOT_CHANGED` or `ISOLATION_CHANGED` against a write-once admission baseline (ttyd generation, boot identity, ruleset digest, both attestation digests).
+  - The admission record publishes `isolation` and `baselineSource: admission`.
+  - Finalization joins each earning sample's isolation binding and records `bootId` and `sampleSetDigest`.
+  - The relay's record is create-once (`record-<runId>-<oid>.json`) and binds the commit, its tree, the admission, scorecard and finalization digests, the boot identity and the sample-set digest. `verifyRecord` re-derives all of them.
+  - A test caught a real gap here: a root workload read as malformed (unattested) instead of as a breach, because the validator rejected uid 0. Fixed.
+  - **B7 review (`rev-20260929T161920Z-0ebe1c42`, 0 blocking).**
+    - R-2/R-5: `verifyRecord` trusted the record's verdict fields, so a failed run re-digested as `certified: true` verified. It now re-derives `state`, `canonicalThresholds` and `certified` from the published scorecard and the finalization, and `bootId` and `sampleSetDigest` from the finalization, and fails malformed input instead of throwing.
+    - R-3: records are created through `private-fs#createOnceAtomic` (a temporary file hard-linked into place), so a crash cannot leave a partial record.
+    - R-6: the docs name the files the host actually writes.
+    - R-4: the runner test now asserts the isolation evidence is dropped with a moved verdict.
+  - **RM05 independent review (GREEN at b1d3d1c9), two bounded remediations required by the Architect before push:**
+    - Finding 1: `finalize()` rewrote `finalization-<runId>.json` on every call, so re-running `host-finalize` after a relay broke that relay's record for good. The finalization is now sealed once a relay record exists for the run (`FINALIZATION_SEALED`). Before any relay, a re-finalize is still allowed.
+    - Finding 2: the switchboard request id `soak-medusa-<index>` collided across runs, because the server keeps request ids unique across all sends, and its 409 was logged as a failed send. The id is now scoped to the run (`soak-medusa-<runKey>-<index>`, with the run key taken from the schedule digest and the log start time). A resumed event's refused re-send is its own outcome, `SEND_ALREADY_ATTEMPTED`. The README no longer calls the resend idempotent.
+    - **Tests changed with the contract, not weakened:** the executor tests that pinned `soak-medusa-<index>` encoded the defect, and now assert the run-scoped id.
+  - **B9: base sync and the Chunk 1 / B7 isolation bridge** (Architect ruling 2baeac0d).
+    - `origin/main` (Chunk 1, `tc finalize`) is merged at c8348f3d.
+    - Chunk 1's `guest-setup.sh` attested with `--verify-admin` / `--verify-workload` (`tc.soak-guest-attest/v1`, with no per-sample binding), which B7's producer could not call. The ruling puts the bridge on the provider side. `guest-setup.sh --verify-network` validates each binding flag exactly once, runs as the admin only, and takes a fresh admin line and a fresh workload line (via `sudo -n -u` with the SOAK_ environment). `lib/soak/attest-bridge.js` joins them into one pair in the release-certification schemas, with the binding in both planes, and refuses anything ambiguous.
+    - The workload plane adds numeric `identity.gids`.
+    - The healthy management token is now `host-only` (`open` stays a breach), replacing `closed`, which misdescribed a listening SSH.
+    - Tests: `test/soak-attest-bridge.test.js` and the `--verify-network` block in `test/soak-guest.test.js`, which runs the real script against the stubbed guest.
+  - **B10: one bounded corrective commit on bbeb61f7** (Architect ruling 727dcaaf), for the stale exact-shape assertion in the leased suite and B9 Critic findings 1–5 (`rev-20260929T195253Z-55704a55`).
+    - Finalize and relay take one per-run lock (`hostPaths.runLock`). The relay reads the finalization once, and parses, checks and digests that same buffer.
+    - The producer result is one of exactly three: a healthy pair, a bound `isolation-breach/v1` envelope, or unavailable. The raw verifiers exit 3 with `code: BREACH` and a closed fact only for a positively measured unsafe fact. A missing tool, a timeout, garbled output or unknown pf status stays a plain refusal. The bridge binds a breach to the sample without inventing a healthy plane. `judgeIsolation` validates the closed schema and reads it as `breached`. The state machine no longer adds `ISOLATION_CHANGED` when a breach carries no ruleset.
+    - A producer failure keeps a stable class (`timeout`, `exit-N`, `spawn-failed`, `no-output`, `bad-json`) and a sanitized stderr tail of at most 300 characters. These go in the private sample diagnostics only.
+    - `hostPaths` is now the only place that names relay records (`recordPrefix`, `record`); `host-publish#recordPath` delegates to it.
+    - The resume-named driver test is now a real resume: stop after one event, resume, and assert that the persisted run key survives into the request ids.
+    - The stale `identity` expectation now includes the exact `gids` string. The comparison is not weakened.
+    - Unrun: no test has run at this commit; the full suite is owed under a fresh PM lease.
+  - **Process incident:** a full suite ran at `44e768f1` without the PM's quiet-window lease (A40), because the inbox was not read between chunks. It is quarantined as non-evidence. A learning now requires reading the inbox before any gated action.
+- **Plan deviations recorded (R-5).**
+  - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
+  - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).
 ## 2026-09-29 — Soak guest definition and synthetic `soak-*` repos (#2020 Chunk 1)
 
 <!-- prawduct: type=feature | scope=2020-chunk1-soak-guest-repos -->
@@ -169,6 +238,80 @@ The PM dispatched this over Medusa as a v5.30 release blocker, under RULE #120 (
 **Tests.** `test/rule-label.test.js`, `test/rule-label-drift.test.js` (server and browser agree) and `test/rule-id-display.test.js` (every surface × every state, plus a source guard that every approval-outcome line names the rule). Existing assertions on the old wording were updated to the labelled form, and each still checks the same thing. Mutation checks confirmed four new guards go red when their subject breaks.
 
 **Review.** The cumulative Critic found 0 blocking and 2 warnings: the wrap prompt and the Master's instructions were still unlabelled. Both were fixed in `c4d70c75`, and verify-resolutions was clean. The independent exact-head review (TC-RM03) certified `c4d70c75` green. This also resolves #1695.
+
+## 2026-09-27 — Release-candidate certification: public scorecard, publisher and metrics-branch verifier (#1949 C02)
+
+<!-- prawduct: type=feature | scope=rc-cert-scorecard-v1 -->
+
+Train 30, C02 (Chunks 01–03), stacked on C01 (#1962). The PM dispatched each chunk over Medusa. The Architect ruled on publishing:
+- Q2: admission fails closed until it is published and read back.
+- Q3: publishing failures never extend the soak.
+- Q4: unattended publishing is allowed, to `metrics` only.
+- One combined `scorecard/v1.json`, with the certification section derived from the per-candidate files.
+
+The PM approved moving the GitHub check to `main` on a schedule. PR-review items N1, N2 and N4 from #1962 are folded in. Design: ADR 0021. Plan: `.tangleclaw/plans/1949-c02-public-scorecard.md` (local, not tracked).
+
+**Problem.** The certification evidence is private on the host, but the release decision must be checkable in public, and the manifest digest only binds once it sits where the host user cannot rewrite it.
+
+**The change.**
+- **Chunk 01 — documents** (`scorecard.js`, `formats.js`):
+  - An allowlist-built write-once admission record (with the manifest digest), scorecard, append-only transition log, index and certification summary.
+  - Validators check exact shapes at every nesting level.
+  - Shared formats and the checkout digest live in one module.
+- **Chunk 02 — publishing** (`publisher.js`, `publication.js`, `rc-cert publish`):
+  - A private clone of `metrics` per remote under one lock, allowlisted paths only, never force-pushed.
+  - Admission is published and read back before the run commits. The staged manifest is reused only when its admission is public.
+  - After admission, publishing runs in the background, at most once a minute except a final state. It never delays a sample; failures are recorded with backoff.
+  - Transitions go to a numbered log written before the state commits.
+  - The actor setting and publish remote are pinned in the manifest, and a withheld actor gets a neutral commit identity.
+- **Chunk 03 — verification** (`verify.js`, `scripts/scorecard-verify.js`, `.github/workflows/scorecard-verify.yml`):
+  - Every commit on `metrics` is checked against the rules, and one `TRANSITIONS` table is shared with the state machine, so a `passed` that skipped review or shows unmet targets cannot verify.
+  - The times must be internally consistent (`TIMELINE_INCONSISTENT`). This checks that the history agrees with itself, not that a soak happened.
+  - The publisher preflights the same rules before every push (`WOULD_VIOLATE`).
+  - The workflow runs from `main` every 30 min and re-verifies the whole history.
+  - Unreadable history is reported as such, never as absent.
+- **From #1962 review:**
+  - N1: only canonical thresholds can pass.
+  - N2: the token is read from the environment only.
+  - N4: `requiredChecksSource` is recorded.
+
+**Reviews.** Chunk 01: 1 blocking (evidence), then clean. Chunk 02: 1 blocking (a clone shared across candidates), then clean. Chunk 03: 5 blocking (forged pass, permanent time-backwards, untested rules, evidence), then clean. The cumulative review across the branch has no blocking findings open.
+
+**PR review (Architect gate at 79584b8a).** 1 blocking: the verifier trusted the scorecard's self-reported duration, so a history claiming 72 qualified hours a minute after admission verified clean. Fixed with the `TIMELINE_INCONSISTENT` rule; the probe is a regression test. The state machine was made to satisfy the rule under a stepped clock: earned time is capped by how far `updatedAt` moved, transition/acceptance/cancellation times are clamped to it, and an admission sample older than its manifest is refused. Two state-machine tests that passed an acceptance and a cancellation time predating the run now use real times, with the clamp tested separately. Claims narrowed from "a forgery cannot pass" to "the history is internally consistent" in ADR 0021 §9, `CHANGELOG.md`, `verify.js`, `codes.js` and the tests.
+
+**Tests.** `test/release-certification-{scorecard,publish,verify}.test.js`, and extended C01 suites. Git behaviour is tested against local bare repos made with `test/_temp-repo.js`, with nothing pushed anywhere real. The full suite is clean on da603537 (14,225 pass, 0 fail, 1 skip).
+
+## 2026-09-27 — Release-candidate certification: state machine, evidence store, runner and PTY counter (#1949 C01)
+
+<!-- prawduct: type=feature | scope=rc-cert-v1 -->
+
+Train 30, C01 (Chunks 01–04). The PM dispatched it over Medusa; the Architect ruled A1–A6 (GitHub errors extend while a failed required check on the candidate hard-fails; `extended` is reversible; a late-adopted runtime SHA is unproven and refuses admission; a server restart extends but any owned-ttyd generation change fails; only an operator passes a run; base `<tangleclawHome>/release-certification/v1/`). The PM authorized Chunk 04 to land in the same commit as the Chunk 03 review fixes (Option A). Plan: `.tangleclaw/plans/1949-c01-rc-certification-state-machine.md` (local, not tracked).
+
+**Problem.** The v5.30.0 release needs a 72-hour soak of one exact candidate SHA, judged mechanically: which time counts, what extends the run, what fails it, and whether the terminals were really used. The judgement was previously a manual runbook check that grepped logs.
+
+**The change.**
+- **Chunk 01: pure state machine** (`lib/release-certification/{codes,state-machine}.js`): closed codes; `admit`/`reduce`/`accept`/`cancel`/`summarize`.
+  - An interval earns time only between two healthy samples from the same runner and the same server process, at most 150 s apart, with wall and monotonic time agreeing. Earned time is capped at the 259,200 s target.
+  - Review begins only on a qualifying interval. `passed` requires `accept --actor`.
+- **Chunk 02: evidence store** (`store.js`, `private-fs.js`, `lockfile.js`): 0700/0600 under any umask, and nothing written through a symlink.
+  - `state.json` is the commit point; samples are appended and fsynced, with torn tails cut. A snapshot is written per transition.
+  - A cross-process lock is reclaimed only when it is provably dead. Recoveries are reported, never silent.
+  - The manifest digest catches an out-of-band edit. It is not protection against the owning user; C02 must publish it to make it binding.
+- **Chunk 03: runner, probes, CLI** (`runner.js`, `probes.js`, `scripts/rc-cert.js`): an external process samples the worktree, `server-info`, the system-health ttyd reading, `pty-activity` and the required GitHub checks (queried per name).
+  - Failures are recorded as closed `diagnostics` codes. A single runner is allowed per candidate, and a stop signal takes effect immediately.
+  - The system-health ttyd `reading` gains `wedged`, `orphanGate` and `pool` as values.
+- **Chunk 04: PTY counter** (`lib/pty-activity.js`, `GET /api/system/pty-activity`): an attach counts on ttyd's `101` for a `/terminal` upgrade; a detach counts on close. The instance id is per process.
+
+**Cross-PR Matrix fixes (Pilot-B2, relayed by the PM).**
+1. The server is now tied to the worktree: `server-info` reports `checkoutId` (sha256 of its checkout's real path), recorded as `worktreeId` at admission. A mismatch is `SERVER_NOT_IN_WORKTREE`, and `isStale` or a disk SHA other than the candidate is `RUNTIME_CHECKOUT_DRIFT`; both are hard fails.
+2. Locks carry a stable machine id, so a macOS host-name change no longer wedges a crashed run's lock.
+3. `start` retries admission while only unknowns block it (an idle server's cold health cache). Off macOS the health row says `applicable: false` and admission refuses at once with `TTYD_NOT_APPLICABLE`.
+4. An empty required-checks list is refused, in the manifest and in the CLI.
+
+**Reviews.** Chunk 01: R-1 blocking (a restart between samples earned time), fixed. Chunk 02: R-1 blocking (lock safety paths untested), fixed, plus the tamper-claim wording corrected. Chunk 03: 2 blocking (endpoint missing, `run` untested), fixed in the Chunk 04 commit. Every verify-resolutions pass came back clean.
+
+**Tests.** `test/release-certification-{state-machine,store,runner}.test.js`, `test/pty-activity.test.js`, and `test/system-health.test.js` extended. Full suite in the pilot checkout: 14,097 pass, 1 skip, 1 fail. The failure is `system-health.test.js:114`, a pre-existing load flake reproduced on base c5c05a70 at the same rate (1/5 passes at load average ~30), so the evidence is recorded as degraded. Not mutation-swept; not yet exercised against a live server (the scratch-server E2E smoke is pending).
+
 ## 2026-09-29 — A Codex coordinator's context rotation is a governed transition (#2032)
 
 <!-- prawduct: type=bugfix | scope=2032-coordinator-rotation -->
