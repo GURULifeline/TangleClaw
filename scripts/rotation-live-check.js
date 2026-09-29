@@ -167,7 +167,7 @@ async function post() {
   check(!!r.body && !!r.body.binding && r.body.binding.matches, 'the control channel now records this thread', r.body && r.body.binding);
   check(!!rot && rot.priorThreadId === preThread, 'the rotation\'s prior thread is the old one', rot && rot.priorThreadId);
   const stale = await api('POST', '/api/tc/workload', { schema: 'tc.workload/1', state: 'working', clearance: 'do-not-clear', summary: 'live check' });
-  check(stale.status !== 409, 'the bound replacement may publish workload while reconciling', stale.status);
+  check(stale.status === 201, 'the bound replacement may publish workload while reconciling (201)', stale.status);
 }
 
 /**

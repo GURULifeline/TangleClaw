@@ -83,6 +83,21 @@ describe('tc rotation (#2032)', () => {
       'the nonce travels beside the receipt, never inside it');
   });
 
+  it('refuses a checkpoint or receipt inside the current checkout, which would trip the rotation\'s own integrity check', async () => {
+    const f = fakeCtx(['prepare', '--checkpoint', 'cp.json'], { [require('node:path').resolve('/repo', 'cp.json')]: '{}' });
+    f.ctx.cwd = '/repo';
+    f.ctx.gitRoot = () => null;
+    const out = await verb.run(f.ctx);
+    assert.equal(out.code, 1);
+    assert.match(out.stderr, /inside the current checkout/);
+    assert.equal(f.calls.length, 0);
+    // From a subdirectory, a file one level up is still inside the checkout.
+    const sub = fakeCtx(['prepare', '--checkpoint', '../receipt.json'], { '/repo/receipt.json': '{}' });
+    sub.ctx.cwd = '/repo/lib';
+    sub.ctx.gitRoot = () => '/repo';
+    assert.match((await verb.run(sub.ctx)).stderr, /inside the current checkout/);
+  });
+
   it('refuses a malformed invocation, a missing file and a non-JSON file before any request', async () => {
     for (const argv of [[], ['nope'], ['prepare'], ['resume'], ['prepare', '--checkpoint'], ['show', '--bogus', 'x']]) {
       const f = fakeCtx(argv);

@@ -109,6 +109,20 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 - **N8.** `POST /command` and startup-prompt fire are gated. The route sweep now covers the whole `/api/sessions/:project` family, with each exemption named and checked to still exist.
 - **Item 10.** The search for DBs stamped v52 found none outside the system temp directory. The live install is at v50. The v51/v52 test stores left in temp were reported, not deleted.
 
+**Cumulative Critic on 17a1d4be: 0 blocking.** Three of its warnings broke normal use, so they were fixed rather than accepted:
+- **Own checkout check.** A rotation tripped its own checkout check. Now `tc` refuses checkpoint and receipt files inside the checkout, and a relaunch re-takes its baseline at the claim, after the wrap commit and the successor's config rewrite, keeping the earlier changes as `drift.relaunch`.
+- **Epoch lapse.** An active epoch never released. Now it lapses when its bound session ends, so an ordinary relaunch needs no operator, and a completed rotation stays `active`, never `abandoned`.
+- **Re-entry turn.** It sent the coordinator to raw routes it could no longer use. Now it names `tc message read|ack` and says why raw HTTP is refused.
+
+**Pending Architect confirmation.** The relaunch baseline retake and the epoch lapse both change how rulings A7a and A11/A12 apply. Both were sent to the Architect (exchange `mx_U7sCk3a8J8HMlEdp`); the Architect's answer decides them.
+
+Also fixed:
+- the dirty-path cap (1000) and the column sizes (1 MB) now agree;
+- the live check requires a 201;
+- the driver stops polling on failures that need the operator;
+- failures are logged;
+- the `GET /api/tc/rotation` comment is corrected.
+
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)

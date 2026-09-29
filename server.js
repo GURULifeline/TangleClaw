@@ -4869,7 +4869,8 @@ route('POST', '/api/tc/rotation/prepare', async (req, res, _params, body) => {
 }, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
 
 // GET /api/tc/rotation — the caller's open rotation, checkpoint included (what
-// the replacement context reconciles against), or its most recent one.
+// the replacement context reconciles against), or `rotation: null` when none
+// is open, with the project's current generation.
 route('GET', '/api/tc/rotation', (req, res) => {
   const access = _rotationAccess(req, res);
   if (!access) return;
@@ -4913,8 +4914,8 @@ route('POST', '/api/tc/rotation/resume', async (req, res, _params, body) => {
 // relaunch transition for a `relaunch` rotation. Launches the successor and
 // binds exactly that session and launch to the rotation; nothing else is ever
 // claimed. Operator only.
-route('POST', '/api/tc/rotation/relaunch', (req, res, _params, body) => {
-  const result = coordinatorRotation.claimRelaunch({ caller: resolveControlCaller(req), body });
+route('POST', '/api/tc/rotation/relaunch', async (req, res, _params, body) => {
+  const result = await coordinatorRotation.claimRelaunch({ caller: resolveControlCaller(req), body });
   return jsonResponse(res, result.status, result.body);
 });
 

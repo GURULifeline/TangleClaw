@@ -145,8 +145,16 @@ sets in every tool shell and sends it as `x-tangleclaw-engine-thread`.
 - **Refused callers.** A stale thread, another pane, or a caller with no launch binding is refused
   with `409 COORDINATOR_EPOCH_MISMATCH`. A subagent's own thread is refused too, but only when its call
   goes through `tc`, which forwards the thread the call really runs in (see the next bullet).
-- **How long it binds.** The binding holds until a governed next rotation replaces it, or until the
-  operator abandons the latest rotation.
+- **How long it binds.** The binding holds while the bound session lives, until a governed next
+  rotation replaces it or the operator releases it with abandon.
+  - **When the bound session ends.** A wrap or a kill ends the session, and with it the epoch: no
+    context of that epoch can act any more. The coordinator's next ordinary launch is then judged as
+    if it had never rotated, and needs no operator.
+  - **How it is recorded.** A completed rotation stays `active` in the record. A lapse is never
+    recorded as `abandoned`.
+- **Use `tc`, not raw HTTP.** `tc` is what sends the thread header. A bound coordinator must make
+  every call through it (`tc message read|ack|send|close`, `tc control`, `tc workload`), because a raw
+  HTTP call carries no header and is refused.
 - **The operator.** A verified operator is never gated. Verified means control's own proof: a
   signed-in operator, or an install whose auth gate is deliberately open. A request that only looks
   like the operator is judged as an unbound caller.
@@ -229,7 +237,11 @@ Before it looks at the receipt, the server re-observes what must not change whil
 absent: the coordinator role, and the checkout's content fingerprint. Either kind of difference is
 **integrity drift**. It is stored on the rotation as typed items with before and after digests, and
 the resume is refused with `409 ROTATION_OPERATOR_RECOVERY_REQUIRED`. No acknowledgement in the
-receipt accepts integrity drift. The replacement must therefore not commit or edit its checkout
+receipt accepts integrity drift. Checkpoint and receipt files belong **outside** the checkout, for
+example in `$TMPDIR`; `tc` refuses a path inside it. For a relaunch, the baseline is taken again at
+the claim, after the old session's wrap and the successor's launch, because both legitimately change
+the checkout. What changed before the claim is kept as an observation (`drift.relaunch`). The
+replacement must therefore not commit or edit its checkout
 before it resumes. A checkout that cannot be observed is refused with
 `409 ROTATION_EVIDENCE_UNAVAILABLE`.
 

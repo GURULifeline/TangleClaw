@@ -22,13 +22,14 @@ const SCRIPT = path.join(__dirname, '..', 'scripts', 'rotation-live-check.js');
  * @param {string} phase - pre | post.
  * @param {object} env - CODEX_THREAD_ID and friends.
  * @param {object} answer - The GET body.
+ * @param {number} [postStatus=201] - What a POST answers.
  * @returns {Promise<{code: number, stdout: string}>}
  */
-async function run(phase, env, answer) {
+async function run(phase, env, answer, postStatus = 201) {
   const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.method === 'GET') return res.end(JSON.stringify(answer));
-    res.statusCode = 201;
+    res.statusCode = postStatus;
     return res.end('{}');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -77,5 +78,9 @@ describe('scripts/rotation-live-check.js (#2032)', () => {
     assert.equal(same.code, 1, 'the same thread as before is not a rotation');
     const unbound = await run('post', { TMPDIR: tmp, CODEX_THREAD_ID: 'new' }, { ...good, rotation: { ...good.rotation, replacementThreadId: 'third' } });
     assert.equal(unbound.code, 1);
+    for (const status of [400, 403, 500]) {
+      const refused = await run('post', { TMPDIR: tmp, CODEX_THREAD_ID: 'new' }, good, status);
+      assert.equal(refused.code, 1, `a ${status} to the workload write is not a pass`);
+    }
   });
 });
