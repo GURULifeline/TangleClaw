@@ -235,16 +235,28 @@ describe('API — every gated route answers the epoch gate (#2032)', () => {
   // extend a list. A route here that the gate should not judge must be named
   // below with its reason.
   const GATE_EXEMPT = {
-    'POST /api/session-rules/conflicts': 'a read: it checks text for conflicts and writes nothing'
+    'POST /api/session-rules/conflicts': 'a read: it checks text for conflicts and writes nothing',
+    'POST /api/sessions/:project': 'launching a session: during a relaunch rotation an unclaimed launch stays fenced by the gate itself; only the claim binds',
+    'DELETE /api/sessions/:project': 'ending a session is how a relaunch rotation begins; it dispatches nothing',
+    'POST /api/sessions/:project/launch/recovery-clear': 'the operator clears a launch-recovery requirement; no coordinator authority is exercised',
+    'POST /api/sessions/:project/wrap/cancel': 'stops a wrap before its commit step; it publishes and finalizes nothing',
+    'POST /api/sessions/:project/wrap-sentinel/ack': 'drawer bookkeeping for a typed wrap request; it dispatches nothing'
   };
-  const FAMILIES = [/^\/api\/sessions\/:project\/medusa\//, /^\/api\/control\/assignments/, /^\/api\/session-rules/, /^\/api\/sessions\/:project\/wrap(\/complete|\/handback)?$/, /^\/api\/tc\/workload$/];
+  const FAMILIES = [/^\/api\/sessions\/:project\/medusa\//, /^\/api\/control\/assignments/, /^\/api\/session-rules/,
+    /^\/api\/sessions\/:project(\/|$)/, /^\/api\/tc\/workload$/];
   const registered = require('../server')._routePatterns()
     .filter((r) => r.method !== 'GET' && FAMILIES.some((f) => f.test(r.pattern)))
     .filter((r) => !GATE_EXEMPT[`${r.method} ${r.pattern}`]);
 
+  it('every exemption names a route that is registered, so a stale exemption cannot hide a new one', () => {
+    const all = require('../server')._routePatterns().map((r) => `${r.method} ${r.pattern}`);
+    for (const key of Object.keys(GATE_EXEMPT)) assert.ok(all.includes(key), key);
+  });
+
   it('the enumeration finds the gated families (guards against an empty sweep)', () => {
     assert.ok(registered.length >= ROUTES.length, `${registered.length} registered`);
-    for (const r of ['/api/sessions/:project/medusa/loop', '/api/sessions/:project/medusa/loops/:loopId/continue', '/api/sessions/:project/medusa/toggle']) {
+    for (const r of ['/api/sessions/:project/medusa/loop', '/api/sessions/:project/medusa/loops/:loopId/continue', '/api/sessions/:project/medusa/toggle',
+      '/api/sessions/:project/command', '/api/sessions/:project/startup-prompt/fire']) {
       assert.ok(registered.some((x) => x.pattern === r), r);
     }
   });
@@ -252,7 +264,7 @@ describe('API — every gated route answers the epoch gate (#2032)', () => {
   for (const r of registered) {
     it(`registered ${r.method} ${r.pattern} is fenced for the rotating coordinator`, async () => {
       const url = r.pattern.replace(':project', 'gate-coordinator').replace(/:[A-Za-z]+/g, 'x1');
-      const { status, data } = await req(url, r.method, r.method === 'DELETE' ? null : { to: 'x', message: 'go', target: 'x', task: 't' }, coordinatorHeaders());
+      const { status, data } = await req(url, r.method, r.method === 'DELETE' ? null : { to: 'x', message: 'go', target: 'x', task: 't', command: 'go' }, coordinatorHeaders());
       assert.equal(status, 409, `${r.method} ${url}: ${JSON.stringify(data)}`);
       assert.equal(data.code, 'COORDINATOR_FENCED');
     });

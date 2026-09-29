@@ -35,11 +35,55 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-/** Where the pre phase leaves the thread it saw, for the post phase. */
-const STATE_FILE = path.join(process.env.TMPDIR || '/tmp', `tc-rotation-live-check-${process.env.TANGLECLAW_LAUNCH_ID || 'nolaunch'}.json`);
+/**
+ * The private directory the pre phase leaves its evidence in for the post
+ * phase: created 0700 for this user only, and refused if it already exists as
+ * anything else (a symlink, another user's directory, a looser mode), so no
+ * other local user can plant or read the state.
+ * @returns {string} The directory.
+ * @throws {Error} When the directory is not safe to use.
+ */
+function _stateDir() {
+  const dir = path.join(os.tmpdir(), `tc-rotation-live-check-${process.getuid ? process.getuid() : 'user'}`);
+  try {
+    fs.mkdirSync(dir, { mode: 0o700 });
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+  }
+  const st = fs.lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`${dir} is not a plain directory`);
+  if (process.getuid && st.uid !== process.getuid()) throw new Error(`${dir} is owned by another user`);
+  if ((st.mode & 0o077) !== 0) throw new Error(`${dir} is readable or writable by others`);
+  return dir;
+}
+
+/**
+ * The state file for this launch, inside {@link _stateDir}.
+ * @returns {string}
+ */
+function stateFile() {
+  const launch = (process.env.TANGLECLAW_LAUNCH_ID || 'nolaunch').replace(/[^A-Za-z0-9._-]/g, '_');
+  return path.join(_stateDir(), `${launch}.json`);
+}
+
+/**
+ * Write the state file without following a symlink planted at its path.
+ * @param {string} file - Path.
+ * @param {string} text - Contents.
+ * @returns {void}
+ */
+function writeState(file, text) {
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  try {
+    fs.writeSync(fd, text);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 let failed = false;
 
@@ -89,7 +133,7 @@ async function pre() {
   const b = r.body && r.body.binding;
   check(!!b && b.channelThread === thread, 'the forwarded thread is the one the control channel records', b);
   check(!(r.body && r.body.rotation), 'no rotation is open yet', r.body && r.body.rotation && r.body.rotation.state);
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ preThread: thread, at: new Date().toISOString() }));
+  writeState(stateFile(), JSON.stringify({ preThread: thread, at: new Date().toISOString() }));
 }
 
 /**
@@ -112,8 +156,9 @@ async function prepare(file) {
 async function post() {
   const thread = process.env.CODEX_THREAD_ID || null;
   let preThread = null;
-  try { preThread = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')).preThread; } catch { /* checked below */ }
-  check(!!preThread, 'the pre phase recorded the old thread', STATE_FILE);
+  const file = stateFile();
+  try { preThread = JSON.parse(fs.readFileSync(file, 'utf8')).preThread; } catch { /* checked below */ }
+  check(!!preThread, 'the pre phase recorded the old thread', file);
   check(!!thread && thread !== preThread, 'this context runs in a different thread from before the clear', { before: preThread, now: thread });
   const r = await api('GET', '/api/tc/rotation');
   const rot = r.body && r.body.rotation;

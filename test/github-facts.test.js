@@ -68,6 +68,37 @@ describe('github facts (#2032)', () => {
     assert.deepEqual(gf.staleDeclarations([{ repo: 'o/r', kind: 'pr', number: 5, state: 'closed' }], obs), ['github:o/r#pr5']);
   });
 
+  it('refuses a repo whose owner or name is only dots', () => {
+    for (const repo of ['../r', 'o/..', './.', '.../x']) {
+      assert.equal(gf.validateFacts([{ repo, kind: 'issue', number: 1, state: 'open' }]).ok, false, repo);
+    }
+    assert.equal(gf.validateFacts([{ repo: 'o.o/r.r', kind: 'issue', number: 1, state: 'open' }]).ok, true);
+  });
+
+  it('reads at most CONCURRENCY facts at once, and a fact not read before the deadline is unavailable', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    gf._internal.exec = async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight -= 1;
+      return { exitCode: 0, stdout: JSON.stringify({ state: 'open' }), stderr: '', error: null, errorCode: null, timedOut: false };
+    };
+    const facts = Array.from({ length: 10 }, (_, i) => ({ repo: 'o/r', kind: 'issue', number: i + 1, state: 'open' }));
+    const all = await gf.observeAll(facts);
+    assert.equal(all.observations.length, 10);
+    assert.ok(peak <= gf.CONCURRENCY, `peak ${peak}`);
+    const realDeadline = gf._internal.deadlineMs;
+    gf._internal.deadlineMs = 30;
+    try {
+      const late = await gf.observeAll(facts);
+      assert.ok(late.unavailable.some((u) => /before the deadline/.test(u)));
+    } finally {
+      gf._internal.deadlineMs = realDeadline;
+    }
+  });
+
   it('validates the list: shape, bounds, kinds, and no fact twice', () => {
     assert.equal(gf.validateFacts([]).ok, true);
     for (const bad of [null, {}, [{}], [{ repo: 'o/r', kind: 'commit', number: 1, state: 'open' }],

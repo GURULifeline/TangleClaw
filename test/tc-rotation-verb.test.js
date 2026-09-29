@@ -65,6 +65,15 @@ describe('tc rotation (#2032)', () => {
     assert.equal(keyed.calls[0].body.attemptKey, 'my-key-0001');
   });
 
+  it('prepare says plainly when its key replays a finished rotation, and exits non-zero (N3)', async () => {
+    const files = { '/tmp/cp.json': '{"schema":1}' };
+    const replay = fakeCtx(['prepare', '--checkpoint', '/tmp/cp.json'], files,
+      { rotation: { ...ROTATION, state: 'active', fenced: false }, replayed: true, replayOnly: true, note: 'This attempt key already names a finished rotation (active); nothing was reopened.' });
+    const out = await verb.run(replay.ctx);
+    assert.equal(out.code, 1);
+    assert.match(out.stderr, /nothing was reopened.*--key/);
+  });
+
   it('resume reads the rotation back and sends its own identity with the receipt', async () => {
     const f = fakeCtx(['resume', '--receipt', '/tmp/r.json'], { '/tmp/r.json': '{"schema":1,"resumeNonce":"n-1"}' });
     const out = await verb.run(f.ctx);

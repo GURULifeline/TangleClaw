@@ -78,6 +78,19 @@ authority. The database allows one open rotation per project, enforced by a part
   - **Unbindable successor.** A successor with no rebindable channel is not claimed. It is recorded as
     `relaunch-unbindable`, and the next command is the operator's abandon.
 
+## Pacing the clear
+
+`/clear` is typed at a bounded pace:
+- **Only admitted attempts count.** An attempt counts toward the limit of three only when the pane
+  admitted it. A HOLD, a missing pane or any other refusal is recorded as `clear-refused` and not
+  counted.
+- **Retry spacing.** A refused attempt is retried no sooner than 15 seconds later.
+- **Settle window.** After an admitted clear, the old thread gets 20 seconds to unload
+  (`clear-settling`). No second `/clear` is typed over it inside that window.
+- **One pass at a time.** Passes over one rotation are serialized in the server, so two passes can
+  never type twice or send two re-entry turns.
+- **Recorded failures.** A pass that throws leaves `driver-error` on the rotation.
+
 ## The replacement thread
 
 After `/clear`, the replacement is the **one** root thread in the project directory that was not
@@ -110,6 +123,8 @@ Once a project has rotated, its coordinator-authority mutations are judged by th
 - Medusa send (replies included), acknowledge (`/read`) and exchange close;
 - Medusa loops: opening one, and continuing, force-closing or closing one out;
 - the Medusa listener toggle;
+- typing into the coordinator's pane (`POST /api/sessions/:project/command`) and firing its startup
+  prompt;
 - `tc workload set`;
 - session-rule writes;
 - control create, hold, release, stop, close and ack;
@@ -120,18 +135,27 @@ Once a project has rotated, its coordinator-authority mutations are judged by th
 |---|---|
 | none, or `abandoned` | Everything, as before: the project is not judged. |
 | `fenced` or `rebinding` | Nothing: no replacement is bound yet. Refused with `409 COORDINATOR_FENCED`. |
-| `reconciling` | Only from the bound replacement: `tc workload set`, the control ack, the listener toggle, and replies to, acks of, or closes of the messages and exchanges the checkpoint recorded. Anything else, loops included, is `COORDINATOR_FENCED`. |
+| `reconciling` | Only from the bound replacement: `tc workload set`, the control ack, turning the listener **on** (`enabled: true`; turning it off waits), and replies to, acks of, or closes of the messages and exchanges the checkpoint recorded. Anything else, loops and typed commands included, is `COORDINATOR_FENCED`. |
 | `active` | Everything, but only from the bound replacement. |
 
 "The bound replacement" is one exact combination: the replacement thread, the session and the launch
 the rotation bound. `tc` forwards the thread automatically: it reads the `CODEX_THREAD_ID` that Codex
 sets in every tool shell and sends it as `x-tangleclaw-engine-thread`.
 - **Nothing to carry.** No secret rides in argv, shell history or an environment the model manages.
-- **Refused callers.** A stale thread, another pane, a subagent's thread, or a caller with no launch
-  binding is refused with `409 COORDINATOR_EPOCH_MISMATCH`.
+- **Refused callers.** A stale thread, another pane, or a caller with no launch binding is refused
+  with `409 COORDINATOR_EPOCH_MISMATCH`. A subagent's own thread is refused too, but only when its call
+  goes through `tc`, which forwards the thread the call really runs in (see the next bullet).
 - **How long it binds.** The binding holds until a governed next rotation replaces it, or until the
   operator abandons the latest rotation.
-- **The operator.** The operator is never gated.
+- **The operator.** A verified operator is never gated. Verified means control's own proof: a
+  signed-in operator, or an install whose auth gate is deliberately open. A request that only looks
+  like the operator is judged as an unbound caller.
+- **What the thread header is, and is not.** `x-tangleclaw-engine-thread` is attribution: the server
+  compares it with the thread the rotation bound. It is not authentication. Anything that can run in
+  the coordinator's launch environment can send the same header, including a subagent that shares
+  that environment, so such a process is not cryptographically excluded. The binding keeps a stale
+  or other context from acting by mistake. The launch binding and the operator's controls remain the
+  security boundary.
 
 The Medusa wake also holds while a rotation is open. Its skip reason is `coordinator-rotating`. Once
 the rotation is active, a newer inbox edge is nudged once, like any other.

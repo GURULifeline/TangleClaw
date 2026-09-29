@@ -91,6 +91,8 @@ describe('coordinator context rotation (#2032)', () => {
     }
     return { observations, unavailable };
   }
+  /** The test clock, in ms. */
+  let clockMs = Date.now();
   /** Whether the session has a Medusa listener. */
   let listening = true;
   /** What the checkout fingerprint seam observes. */
@@ -130,6 +132,7 @@ describe('coordinator context rotation (#2032)', () => {
     typed = [];
     checkout = { ok: true, fingerprint: cleanCheckout() };
     listening = true;
+    clockMs = Date.now();
     githubState = {};
     launchId = `launch-architect-${++launchN}`;
     onClear = () => {
@@ -222,7 +225,10 @@ describe('coordinator context rotation (#2032)', () => {
       if (command === '/clear') onClear();
       return { ok: true };
     },
-    sleep: () => Promise.resolve()
+    // A test clock: every driver pause moves it forward, so the /clear retry
+    // and settle windows can be exercised without waiting for them.
+    now: () => new Date(clockMs).toISOString(),
+    sleep: (ms) => { clockMs += ms; return Promise.resolve(); }
   });
 
   /**
@@ -240,8 +246,8 @@ describe('coordinator context rotation (#2032)', () => {
    * @param {number} [offsetMs=1000]
    * @returns {void}
    */
-  function workloadReceipt(offsetMs = 1000) {
-    const nowMs = Date.now() + offsetMs;
+  function workloadReceipt(offsetMs = 60000) {
+    const nowMs = clockMs + offsetMs;
     store.workloadReceipts.append({
       project_id: project.id, session_id: session.id, launch_id: launchId, assignment_id: null,
       state: 'working', clearance: 'do-not-clear', summary: 'reconciling after rotation',
@@ -357,6 +363,17 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(rotation.gate({ projectId: project.id, access: { kind: 'operator' }, threadId: null, action: 'control-mutate' }), null, 'the operator is never gated');
     });
 
+    it('a checkpoint nested past the depth cap is refused, not recursed into', async () => {
+      await serve();
+      channel();
+      let deep = {};
+      const top = deep;
+      for (let i = 0; i < rotation.MAX_JSON_DEPTH + 5; i++) { deep.x = {}; deep = deep.x; }
+      const r = await prepare({ checkpoint: checkpoint({ note: 'deep', decisions: [top] }) });
+      assert.equal(r.status, 400);
+      assert.match(r.body.error, /nested deeper/);
+    });
+
     it('the digest does not depend on key order', () => {
       const a = rotation.validateCheckpoint(checkpoint());
       const reordered = Object.fromEntries(Object.entries(checkpoint()).reverse());
@@ -432,6 +449,75 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(again.updatedAt, first.updatedAt);
     });
 
+    it('a refused /clear (a HOLD, a missing pane) is not counted, and is retried only after the retry window', async () => {
+      await serve();
+      channel();
+      let refusals = 2;
+      const refusing = { ...deps(), inject: (_n, command, opts) => {
+        typed.push({ command, opts });
+        if (refusals > 0) { refusals -= 1; return { ok: false, error: 'CONTROL_HELD: lane is held' }; }
+        onClear();
+        return { ok: true };
+      } };
+      const id = (await prepare()).body.rotation.rotationId;
+      let r = await rotation.advance(id, refusing);
+      assert.equal(r.failureCode, 'clear-refused');
+      assert.equal(r.clearAttempts, 0, 'a refusal is not an attempt');
+      r = await rotation.advance(id, refusing);
+      assert.equal(typed.length, 1, 'no retry inside the window');
+      clockMs += rotation.CLEAR_RETRY_MS;
+      r = await rotation.advance(id, refusing);
+      assert.equal(typed.length, 2);
+      assert.equal(r.clearAttempts, 0);
+      clockMs += rotation.CLEAR_RETRY_MS;
+      r = await rotation.advance(id, refusing);
+      assert.equal(r.clearAttempts, 1, 'the admitted one counts');
+      r = await rotation.drive(id, { attempts: 5, deps: refusing });
+      assert.equal(r.state, 'reconciling');
+    });
+
+    it('a slow unload is not typed over: no second /clear inside the settle window, one after it', async () => {
+      await serve();
+      channel();
+      onClear = () => {};
+      const id = (await prepare()).body.rotation.rotationId;
+      await rotation.advance(id, deps());
+      assert.equal(typed.length, 1);
+      for (let i = 0; i < 5; i++) {
+        clockMs += 1000;
+        const r = await rotation.advance(id, deps());
+        assert.equal(r.failureCode, 'clear-settling');
+      }
+      assert.equal(typed.length, 1, 'still one /clear while the first may be unloading');
+      clockMs += rotation.CLEAR_SETTLE_MS;
+      await rotation.advance(id, deps());
+      assert.equal(typed.length, 2, 'a second, only after the settle window');
+    });
+
+    it('concurrent passes send one re-entry turn with one live nonce (W1)', async () => {
+      await serve();
+      channel();
+      const id = (await prepare()).body.rotation.rotationId;
+      await rotation.advance(id, deps());
+      await Promise.all([rotation.advance(id, deps()), rotation.advance(id, deps()), rotation.advance(id, deps()), rotation.advance(id, deps())]);
+      assert.equal(server.calls('turn/start').length, 1);
+      const stored = store.coordinatorRotations.get(id);
+      assert.equal(stored.state, 'reconciling');
+      assert.equal(stored.resumeNonceHash, require('node:crypto').createHash('sha256').update(nonce()).digest('hex'),
+        'the stored hash is the nonce that was actually sent');
+    });
+
+    it('a pass that throws on the first try leaves driver-error on the record (W2)', async () => {
+      await serve();
+      channel();
+      const id = (await prepare()).body.rotation.rotationId;
+      const throwing = { ...deps(), adapter: () => ({ rotationThreads: () => { throw new Error('socket exploded'); } }) };
+      const r = await rotation.drive(id, { attempts: 1, deps: throwing });
+      assert.equal(r.failureCode, 'driver-error');
+      assert.match(r.failureDetail, /socket exploded/);
+      assert.equal(store.coordinatorRotations.get(id).failureCode, 'driver-error');
+    });
+
     it('waits for the coordinator\'s turn to finish before clearing', async () => {
       await serve({ [PRIOR]: { status: { type: 'active', activeFlags: [] } } });
       channel();
@@ -450,7 +536,7 @@ describe('coordinator context rotation (#2032)', () => {
       await serve();
       channel();
       onClear = () => {};
-      const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 10, deps: deps() });
+      const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 200, deps: deps() });
       assert.equal(r.state, 'rebinding');
       assert.equal(r.failureCode, 'clear-not-applied');
       assert.equal(typed.length, rotation.MAX_CLEAR_ATTEMPTS);
@@ -741,14 +827,16 @@ describe('coordinator context rotation (#2032)', () => {
       await toReconciling();
       assert.equal(judge('workload-set'), null);
       assert.equal(judge('control-ack'), null);
-      assert.equal(judge('medusa-listener'), null, 'the replacement may keep its listener running');
+      assert.equal(judge('medusa-listener', {}, { enable: true }), null, 'the replacement may turn its listener on');
+      assert.equal(judge('medusa-listener', {}, { enable: false }).body.code, 'COORDINATOR_FENCED', 'but not off, until it resumes');
+      assert.equal(judge('medusa-listener').body.code, 'COORDINATOR_FENCED', 'and a toggle that does not say which is not an enable');
       assert.equal(judge('medusa-send', {}, { inReplyTo: 'm-old' }), null);
       assert.equal(judge('medusa-ack', {}, { messageIds: ['m-old'] }), null);
       assert.equal(judge('exchange-close', {}, { exchangeId: 'mx_1' }), null, 'mx_1 is in the checkpoint\'s exchanges');
       for (const [action, extra] of [
         ['medusa-send', {}], ['medusa-send', { inReplyTo: 'm-new' }], ['medusa-ack', { messageIds: ['m-old', 'm-new'] }],
         ['exchange-close', { exchangeId: 'mx_other' }], ['wrap', {}], ['session-rule-write', {}], ['control-mutate', {}],
-        ['medusa-loop', {}]
+        ['medusa-loop', {}], ['session-command', {}]
       ]) {
         assert.equal(judge(action, {}, extra).body.code, 'COORDINATOR_FENCED', `${action} ${JSON.stringify(extra)} waits for the resume`);
       }
@@ -814,6 +902,59 @@ describe('coordinator context rotation (#2032)', () => {
       } finally {
         store.getDb().prepare("UPDATE sessions SET status = 'active' WHERE id = ?").run(session.id);
       }
+    });
+
+    it('replaying the byte-identical checkpoint of an active or abandoned rotation is replay-only: no fence, no generation (N3)', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      assert.equal((await rotation.resume({ access: access(), threadId: NEXT, body }, deps())).status, 200);
+      const rows = () => store.getDb().prepare('SELECT COUNT(*) n FROM coordinator_rotations').get().n;
+      const before = rows();
+      const again = await rotation.prepare({ access: access(), body: { attemptKey: rot.attemptKey, checkpoint: checkpoint() } }, deps());
+      assert.equal(again.status, 200);
+      assert.equal(again.body.replayOnly, true);
+      assert.equal(again.body.rotation.state, 'active');
+      assert.equal(again.body.rotation.fenced, false);
+      assert.match(again.body.note, /nothing was reopened/);
+      assert.equal(rows(), before, 'no new rotation');
+      assert.equal(rotation.openRotation(project.id), null, 'no fence');
+      assert.equal(store.coordinatorRotations.maxGeneration(project.id), rot.generation, 'no generation assigned');
+
+      rotation.abandon({ caller: { kind: 'operator' }, body: { rotationId: rot.rotationId, reason: 'released' } });
+      const afterAbandon = await rotation.prepare({ access: access(), body: { attemptKey: rot.attemptKey, checkpoint: checkpoint() } }, deps());
+      assert.equal(afterAbandon.body.rotation.state, 'abandoned');
+      assert.equal(afterAbandon.body.replayOnly, true);
+      assert.equal(rotation.openRotation(project.id), null);
+      assert.equal(rotation.gate({ projectId: project.id, access: { kind: 'unbound' }, threadId: null, action: 'medusa-send' }), null,
+        'the abandoned rotation regains no authority');
+    });
+
+    it('an abandon that lands while a rebind is in flight leaves no authority and no wrong binding (N2)', async () => {
+      await serve();
+      channel();
+      const id = (await prepare()).body.rotation.rotationId;
+      await rotation.advance(id, deps());
+      const real = codex.rebindThread;
+      const racing = { ...deps(), adapter: () => ({
+        ...codex,
+        rebindThread: (ch, ids) => {
+          const out = real(ch, ids);
+          // The operator abandons between the channel move and the rotation's record.
+          rotation.abandon({ caller: { kind: 'operator' }, body: { rotationId: id, reason: 'operator stepped in' } });
+          return out;
+        }
+      }) };
+      const r = await rotation.advance(id, racing);
+      assert.equal(r.state, 'abandoned');
+      assert.equal(r.replacementThreadId, null, 'the abandoned rotation recorded no replacement');
+      assert.equal(server.calls('turn/start').length, 0, 'no re-entry turn and no nonce for an abandoned rotation');
+      assert.equal(store.coordinatorRotations.get(id).resumeNonceHash, null);
+      assert.equal(threadOf(), NEXT, 'the channel names the thread actually running, never a wrong one');
+      assert.equal(rotation.gate({ projectId: project.id, access: { kind: 'unbound' }, threadId: null, action: 'wrap' }), null,
+        'abandoned: no authority is held');
+      const again = await rotation.advance(id, deps());
+      assert.equal(again.state, 'abandoned', 'a later pass cannot revive it');
     });
 
     it('an abandoned latest rotation releases the binding: the project is judged as before', async () => {
@@ -907,7 +1048,7 @@ describe('coordinator context rotation (#2032)', () => {
      * @param {number} [offsetMs=1000] - Received this far from now.
      */
     const receiptOf = (state, clearance, offsetMs = 1000) => {
-      const nowMs = Date.now() + offsetMs;
+      const nowMs = clockMs + offsetMs;
       store.workloadReceipts.append({
         project_id: project.id, session_id: session.id, launch_id: launchId, assignment_id: null, state, clearance,
         summary: 'reconciling', wait_kind: state === 'waiting-external' ? 'peer' : null, wait_detail: null, refs_json: '[]',
@@ -1036,7 +1177,7 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(rotation.gate({ projectId: project.id, access: access(), threadId: PRIOR, action: 'workload-set' }).body.code, 'COORDINATOR_EPOCH_MISMATCH');
       assert.equal(rotation.gate({ projectId: project.id, access: successorAccess, threadId: SUCCESSOR_THREAD, action: 'workload-set' }), null);
 
-      const nowMs = Date.now() + 1000;
+      const nowMs = clockMs + 60000;
       store.workloadReceipts.append({
         project_id: project.id, session_id: successor.id, launch_id: r.launchId, assignment_id: null, state: 'working', clearance: 'do-not-clear',
         summary: 'reconciling', wait_kind: null, wait_detail: null, refs_json: '[]', branch: null, head_sha: null, source: 'tc-cli',

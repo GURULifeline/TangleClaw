@@ -19,7 +19,8 @@ All notable changes to TangleClaw are documented in this file.
     - A change to the coordinator's role or to its checkout's content is different: no receipt can accept it. The rotation stays held until the operator recovers it.
   - **Bound to the new thread.** Once a coordinator has rotated, its mutations are accepted only from the thread, session and launch the rotation bound. That covers Medusa sends, acknowledgements, exchange closes, loops and the listener toggle, workload, session-rule writes, control commands, and wrap and handoff.
     - `tc` forwards the Codex thread id automatically, so there is nothing to carry by hand.
-    - The old thread, another pane, or an unbound caller is refused.
+    - The old thread, another pane, or an unbound caller is refused. The same applies to Medusa loops, the listener toggle, typing into the coordinator's pane, and firing its startup prompt.
+    - The thread id attributes the request; it is not authentication. A verified operator is never held.
     - While reconciling, only workload, the control ack, and answers within the checkpoint's own messages go through.
     - Resume also needs a one-time nonce that only the re-entry instruction carries and that the server stores hashed.
   - **Relaunch instead of clear.** `prepare` with `mode: "relaunch"` keeps the hold across the coordinator's session ending.

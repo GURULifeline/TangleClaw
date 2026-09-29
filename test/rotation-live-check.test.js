@@ -46,7 +46,7 @@ async function run(phase, env, answer) {
 
 describe('scripts/rotation-live-check.js (#2032)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-live-check-'));
-  afterEach(() => { for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f)); });
+  afterEach(() => { for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f), { recursive: true, force: true }); });
 
   it('pre passes when the forwarded thread is the channel\'s, and fails when it is not or is missing', async () => {
     const ok = await run('pre', { TMPDIR: tmp, CODEX_THREAD_ID: 'old' }, { rotation: null, binding: { channelThread: 'old' } });
@@ -56,6 +56,16 @@ describe('scripts/rotation-live-check.js (#2032)', () => {
     const missing = await run('pre', { TMPDIR: tmp }, { rotation: null, binding: { channelThread: 'old' } });
     assert.equal(missing.code, 1);
     assert.match(missing.stdout, /FAIL {2}CODEX_THREAD_ID is exported/);
+  });
+
+  it('keeps its state in a private directory, and refuses one another user could have planted', async () => {
+    await run('pre', { TMPDIR: tmp, CODEX_THREAD_ID: 'old' }, { rotation: null, binding: { channelThread: 'old' } });
+    const dirs = fs.readdirSync(tmp).filter((f) => f.startsWith('tc-rotation-live-check-'));
+    assert.equal(dirs.length, 1);
+    assert.equal(fs.statSync(path.join(tmp, dirs[0])).mode & 0o077, 0, 'owner-only');
+    fs.chmodSync(path.join(tmp, dirs[0]), 0o777);
+    const r = await run('pre', { TMPDIR: tmp, CODEX_THREAD_ID: 'old' }, { rotation: null, binding: { channelThread: 'old' } });
+    assert.equal(r.code, 2, 'a loosened directory is refused');
   });
 
   it('post passes only for a new thread that the reconciling rotation bound', async () => {

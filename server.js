@@ -4835,9 +4835,13 @@ function _engineThread(req) {
  * @returns {boolean} True when refused.
  */
 function coordinatorGateRefused(req, res, projectId, action, extra = {}) {
-  const refusal = coordinatorRotation.gate({
-    projectId, access: sharedDocsAccess.resolveAccess(req), threadId: _engineThread(req), action, ...extra
-  });
+  // Only a VERIFIED operator is exempt, by control's proof tiers: an
+  // operator-shaped request that control would not accept is judged as an
+  // unbound caller, never waved through.
+  const access = sharedDocsAccess.resolveAccess(req);
+  const operator = resolveControlCaller(req).kind === 'operator';
+  const judged = operator ? { kind: 'operator' } : (access.kind === 'operator' ? { kind: 'unbound' } : access);
+  const refusal = coordinatorRotation.gate({ projectId, access: judged, threadId: _engineThread(req), action, ...extra });
   if (!refusal) return false;
   log.info('Coordinator epoch gate refused a mutation', { projectId, action, code: refusal.body.code, rotationId: refusal.body.rotationId });
   jsonResponse(res, refusal.status, refusal.body);
@@ -7387,8 +7391,10 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'toggle Medusa for')) return;
     // #2032: a stale coordinator context must not switch its switchboard off
-    // or on; the bound replacement may, since resuming needs a listener.
-    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-listener')) return;
+    // or on. While reconciling, the bound replacement may only turn it ON, and
+    // only by saying so (`enabled: true`): resuming needs a listener, but
+    // turning one off is an authority change that waits for the resume.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-listener', { enable: body && body.enabled === true })) return;
     const { target } = r;
     const isOn = medusa.getStatus(target.sessionId).state !== 'off';
     const desired = (body && typeof body.enabled === 'boolean') ? body.enabled : !isOn;
@@ -8061,6 +8067,10 @@ route('PUT', '/api/startup-prompt', (req, res, _params, body) => {
 // engine with no supported startupControl channel gets a typed 409, with no
 // fallback.
 route('POST', '/api/sessions/:project/startup-prompt/fire', async (req, res, params, body) => {
+  // #2032: firing a startup prompt starts a turn in the coordinator's thread,
+  // so it is judged by the epoch gate like a typed command.
+  const gatedProject = store.projects.getByName(params.project);
+  if (gatedProject && coordinatorGateRefused(req, res, gatedProject.id, 'session-command')) return;
   const access = sharedDocsAccess.resolveAccess(req);
   let clearance = 'project-binding';
   if (access.kind === 'operator') {
@@ -8102,6 +8112,12 @@ route('POST', '/api/sessions/:project/wrap-sentinel/ack', (_req, res, params) =>
 
 // POST /api/sessions/:project/command — Inject command
 route('POST', '/api/sessions/:project/command', (_req, res, params, body) => {
+  // #2032: typing into a coordinator's pane can hand it new work, so a
+  // coordinator bound to a rotation epoch is typed into only from its bound
+  // replacement (or by the operator), and not at all while it reconciles. The
+  // rotation's own /clear does not come through here.
+  const commandProject = store.projects.getByName(params.project);
+  if (commandProject && coordinatorGateRefused(_req, res, commandProject.id, 'session-command')) return;
   if (!body || !body.command) {
     return errorResponse(res, 400, 'command is required', 'BAD_REQUEST');
   }

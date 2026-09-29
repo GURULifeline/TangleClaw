@@ -97,6 +97,18 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 - **Fix.** They are now gated: loops are new dispatch, fenced until active; the toggle is allowed from the bound replacement while reconciling.
 - **Why the table test missed them.** It was a hand-kept list, the Critic's O-1 observation. The route test now also walks every registered mutating route in the gated families through `server._routePatterns()`, so a new route is covered by existing. Its one exemption is named with its reason.
 
+**Architect ruling A18 (after RM03's review).** `8b160286` was not a candidate. A18 required:
+- **Listener toggle.** While reconciling, only an explicit enable.
+- **Serialized passes (W1).** Passes are serialized per rotation, so there is one re-entry turn and one live nonce.
+- **Driver-error evidence (W2).** A first-pass throw is recorded as `driver-error`.
+- **Verified operator (W3).** The operator exemption uses control's proof tiers.
+- **The header's meaning (W4).** The docs now say the thread header is attribution, not authentication.
+- **Clear pacing (W5).** Only admitted `/clear` attempts count, refusals retry after 15 s, and an admitted clear gets a 20 s settle window.
+- **Fingerprint bounds (W6).** The fingerprint runs off the event loop under a 30 s total deadline, with each git call raced against it. Important-ignored paths are capped at 50 and checked in one batch, and hashing is capped at 256 MB in total.
+- **N5–N7.** Repo segments made only of dots are refused. GitHub reads run 4 at a time under a 60 s deadline. JSON depth is capped at 32. The live script keeps its state in an owner-only directory it checks.
+- **N8.** `POST /command` and startup-prompt fire are gated. The route sweep now covers the whole `/api/sessions/:project` family, with each exemption named and checked to still exist.
+- **Item 10.** The search for DBs stamped v52 found none outside the system temp directory. The live install is at v50. The v51/v52 test stores left in temp were reported, not deleted.
+
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
