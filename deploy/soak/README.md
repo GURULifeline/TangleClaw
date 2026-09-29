@@ -113,7 +113,8 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     `<log>.lock.reclaim` mutex and replaces the lock in one atomic rename. The reclaim is logged.
   - An unreadable lock, a live holder, a holder on another host, or a reclaim already in progress
     is refused, naming the file to remove if you are sure no driver is running. An unreadable
-    lock in front of an open segment whose owner is dead is refused for good (see below).
+    lock in front of an open segment whose owner is dead is refused for good (see below, including
+    the one exception).
   - Each record is flushed to disk before the next event.
   - **Ownership is re-checked before every log write and before every event**, so the check just
     before `end` is exact. The moment the lock is found removed or taken over:
@@ -167,6 +168,13 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
       sidecar, so no lock restored later, even one naming the exact owner, resumes the log. Start a
       new log. If the sidecar cannot be written, the refusal says so (`details.condemnError`), and
       the log must be checked by hand before any use.
+    - **Exception: "for good" holds only once the refusal is recorded.** When the log's whole
+      directory is unreadable at recovery, nothing in it can be read or written. The run is refused
+      (`LOG_LOCK_LOST_INVALID`, naming the unreadable directory in `details.directoryUnreadable`), but
+      nothing can record that refusal. The same holds when the sidecar write fails
+      (`condemnError`). Once the directory is readable again and the lock names the exact dead
+      owner, the log resumes through the ordinary exact-owner reclaim. That resume is still recorded
+      as ownership-unverified, so the log is never a clean result or an automatic pass.
     - **A marker whose owner may still be running, or is on another host**, is refused without
       recording anything (`details.condemned: null`). It may be a run finishing right now, between
       releasing its lock and closing its segment.

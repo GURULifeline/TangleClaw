@@ -1673,6 +1673,36 @@ describe('soak driver — ownership that cannot be verified', () => {
       await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST');
     });
 
+    it('is permanent only once recorded: a directory unreadable at recovery refuses, names the directory, and a later resume is still marked', { skip: asRoot }, async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(owner));
+      fs.chmodSync(dir, 0o000);
+      try {
+        await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST_INVALID'
+          && err.details.directoryUnreadable === path.dirname(path.resolve(logPath))
+          && /directory .* cannot be read \(EACCES\)/.test(err.message)
+          && /whether it has a lock-lost sidecar is unknown/.test(err.message)
+          && !/has a lock-lost sidecar that cannot be read/.test(err.message));
+      } finally {
+        fs.chmodSync(dir, 0o700);
+      }
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'nothing could be recorded in an unreadable directory');
+      const result = await run();
+      assert.deepEqual([result.status, result.ownershipUnverified], ['completed-ownership-unverified', true], 'the documented exception: it resumes, but never clean');
+    });
+
+    it('still says the sidecar itself cannot be read when only the sidecar is unreadable', { skip: asRoot }, async () => {
+      fs.writeFileSync(logPath, '');
+      fs.writeFileSync(driver.lockLostPath(logPath), '{}');
+      fs.chmodSync(driver.lockLostPath(logPath), 0o000);
+      try {
+        assert.throws(() => driver.checkLockLost(logPath), (err) => err.code === 'LOG_LOCK_LOST_INVALID' && err.details.directoryUnreadable === null
+          && /has a lock-lost sidecar that cannot be read \(EACCES\)/.test(err.message));
+      } finally {
+        fs.chmodSync(driver.lockLostPath(logPath), 0o600);
+      }
+    });
+
     it('never condemns a segment whose owner may still be running', async () => {
       await crashed({ pid: process.pid, host: os.hostname() }, null);
       await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.condemned === null);
