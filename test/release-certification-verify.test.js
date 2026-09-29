@@ -151,7 +151,7 @@ describe('verifyChange: a certification that skips review or its targets cannot 
     assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: bad, [P.events]: d.events1 }).includes(RULES.SCORECARD_MISMATCH));
   });
 
-  for (const [field, value] of [['version', '9.9.9'], ['canonicalThresholds', false], ['requiredChecksSource', 'operator']]) {
+  for (const [field, value] of [['version', '9.9.9'], ['canonicalThresholds', false], ['requiredChecksSource', 'operator'], ['checksSource', 'host-attested']]) {
     it(`refuses a scorecard whose ${field} disagrees with its admission`, () => {
       const bad = sc.serialize({ ...JSON.parse(d.card1), [field]: value });
       assert.ok(judge({ [P.admission]: d.admission }, { [P.admission]: d.admission, [P.scorecard]: bad, [P.events]: d.events1 }).includes(RULES.SCORECARD_MISMATCH));

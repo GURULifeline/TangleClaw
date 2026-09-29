@@ -209,6 +209,7 @@ describe('validators refuse what the builder would never emit', () => {
     ['a publish sequence of zero', (d) => { d.publishSeq = 0; }, 'FIELD:publishSeq'],
     ['a passed state under non-canonical thresholds', (d) => { d.state = 'passed'; d.acceptance = { actor: 'op', at: 1 }; d.canonicalThresholds = false; }, 'FIELD:canonicalThresholds'],
     ['an unknown required-checks source', (d) => { d.requiredChecksSource = 'guess'; }, 'FIELD:requiredChecksSource'],
+    ['an unknown checks source', (d) => { d.checksSource = 'github'; }, 'FIELD:checksSource'],
     ['failure reasons, which the builder drops', (d) => { d.state = 'failed'; d.failure = { code: 'LEAK_FIRED', at: 1, reasons: [{ probe: 'ttyd' }] }; }, 'FIELD:failure'],
     ['a PTY server instance id, which holds a pid', (d) => { d.pty.instance = '4242-1-ab'; }, 'FIELD:pty'],
     ['an extra field in the PTY target', (d) => { d.pty.target.host = HOST; }, 'FIELD:pty'],

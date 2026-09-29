@@ -394,3 +394,32 @@ describe('rc-cert host-checks --watch survives a failed pass', () => {
     assert.ok(fs.existsSync(path.join(exchange, 'verdicts', '1.json')), 'the next pass answered');
   });
 });
+
+describe('host checks: nothing in the exchange can stall the responder', () => {
+  const request = (seq) => JSON.stringify({ schema: hc.REQUEST_SCHEMA, candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: DIGEST, sampleSeq: seq, requestedAt: T0 });
+
+  it('removes a rejected request it cannot move aside, and answers the next one', async () => {
+    mint();
+    const req = path.join(exchange, 'requests');
+    fs.mkdirSync(req, { recursive: true });
+    fs.writeFileSync(path.join(req, '1.json'), '{broken');
+    fs.writeFileSync(path.join(req, '2.json'), request(2));
+    const acrossVolumes = () => { const e = new Error('cross-device link'); e.code = 'EXDEV'; throw e; };
+    const r = await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: observer().observe, now: () => T0, rename: acrossVolumes });
+    assert.deepEqual(r.answered, [2], 'the bad request never stalled the good one');
+    assert.deepEqual(fs.readdirSync(req), ['2.json'], 'the bad request was removed when it could not be moved');
+  });
+
+  it('answers a request whose verdict slot holds something that is not a plain file', async () => {
+    mint();
+    fs.mkdirSync(path.join(exchange, 'requests'), { recursive: true });
+    fs.mkdirSync(path.join(exchange, 'verdicts'), { recursive: true });
+    fs.writeFileSync(path.join(exchange, 'requests', '1.json'), request(1));
+    fs.writeFileSync(path.join(tmp, 'elsewhere.json'), '{}');
+    fs.symlinkSync(path.join(tmp, 'elsewhere.json'), path.join(exchange, 'verdicts', '1.json'));
+    const r = await hc.answerRequests({ hostBase, exchangeDir: exchange, candidateSha: SHA, observe: observer().observe, now: () => T0 });
+    assert.deepEqual(r.answered, [1]);
+    assert.equal(fs.lstatSync(path.join(exchange, 'verdicts', '1.json')).isSymbolicLink(), false, 'the answer replaced the link rather than writing through it');
+    assert.equal(fs.readFileSync(path.join(tmp, 'elsewhere.json'), 'utf8'), '{}');
+  });
+});
