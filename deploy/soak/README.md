@@ -115,6 +115,23 @@ The guest is offline and the engine is a stub, so:
 - bound switchboard replies and exchange closes: the message needs no reply, and the recipient's
   kill retires the exchange.
 
+**These are certification gates, not waivers** (Architect ruling A32). Each of them must be
+exercised, or explicitly gated, by the exact-head acceptance and preflight of the guest dry run
+before any soak time counts. A certifying run does not start while any of them is unmet: real
+AI-content capture, the push-and-PR path, and the governed switchboard lifecycle (bound replies
+and closes). This load keeps the rest of those paths under stress; it does not stand in for them.
+
+### Certifying in a guest: host-attested checks and the relay
+
+The guest has no route to GitHub, so a certifying run in it uses the judge's host-attested mode
+(ADR 0021 points 10 to 12): the host mints the run id (`rc-cert host-mint`), answers every
+sample's required checks (`rc-cert host-checks --watch`), finalizes the run against its own ledger
+(`rc-cert host-finalize`), and relays the guest's local `metrics` branch to the public remote
+(`rc-cert host-publish`). The guest runs `rc-cert start --checks-source host-attested --run-id
+<id> --exchange <dir> --metrics-remote <local bare repo> …`, and the transport between host and
+guest (Chunk 1) mirrors the exchange directory and brings the guest's `metrics` repository to
+the host. Certification of record exists only as the host's record.
+
 ## Run it
 
 ```sh
