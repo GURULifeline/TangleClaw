@@ -8,19 +8,14 @@ It judges nothing. Whether the release candidate passes is decided by the releas
 judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces the conditions and
 records what happened.
 
-> **Status: Chunk 2A (the core).** This directory has the schedule, the runner for the `api` and `engine`
-> load classes, and the stub engine. Not built yet:
+> **Status: Chunk 2 (the core, plus plans, switchboard and wrap load).** This directory has the
+> schedule, the runner for the `api` and `engine` load classes, and the stub engine. Not built yet:
 > - the guest itself;
 > - the executors for the `browser` and `fault` classes;
 > - integrity sampling, the evidence bundle and the operator runbook;
 > - the certification judge (Chunks 3 and 4 of #2020, with the link to rc-cert). Until it exists,
 >   nothing but `run`'s exit 5 acts on a log's ownership-unverified disposition;
-> - **Chunk 2B, mandatory before the first guest dry run** (Architect ruling):
->   - API load against plans and the switchboard (this chunk, 2A, covers health, server-info,
->     projects and ports);
->   - stub-engine sessions that exercise wrap and the switchboard (2A's engine cycle covers launch,
->     commands and kill);
-> - **Chunk 1, also mandatory before the dry run:** deterministic, idempotent creation of the
+> - **Chunk 1, mandatory before the dry run:** deterministic, idempotent creation of the
 >   exact-owned synthetic `soak-*` repos with local bare origins. Until then they must already exist
 >   on the target.
 >
@@ -58,6 +53,68 @@ node scripts/soak.js validate --schedule soak-certifying.json
     faults (the default is ten);
   - a schedule holds at most 300,000 events. A 72-hour run at the one-second floor is 259,200.
 - **`plan` never overwrites** an existing schedule file.
+- **A schedule names its catalogue** (`tc.soak-schedule/v2`). Adding a kind changes what a seed
+  draws, so a schedule from an earlier catalogue is refused (`SCHEMA`), never read as the same run.
+
+## What the load does
+
+| Kind | Class | Weight | What it proves |
+|---|---|---|---|
+| `api.health`, `api.server-info`, `api.projects.list`, `api.ports.list` | api | 6, 3, 4, 3 | The read routes keep answering. |
+| `api.ports.lease-release` | api | 2 | A port lease and its release both succeed, under `soak-harness`. |
+| `api.plans.read` | api | 1 | `GET /api/projects/<p>/plans` lists `soak-plan.md`, and the page at its `urlPath` answers 200. |
+| `api.medusa.reads` | api | 1 | The fleet-wide switchboard reads, deliveries then escalations, keep answering. |
+| `engine.session.cycle` | engine | 3 | A stub session launches, takes commands, and is killed. |
+| `engine.session.medusa-cycle` | engine | 1 | Two stub sessions on distinct projects both reach `listening`; a message from one is delivered to the other's inbox and marked handled; both are killed. |
+| `engine.session.wrap-cycle` | engine | 1 | A stub session is wrapped with every AI-content step skipped; the run the `202` named finishes, succeeds, and ends the session. |
+
+- **The plans, switchboard and wrap kinds are drawn rarely.** Each makes several requests, and the
+  two engine cycles launch sessions and run the wrap pipeline. At a higher weight they would crowd
+  out the steady light load that shows a slow leak.
+- **The switchboard cycle needs two projects.** A schedule with one project never draws it, and
+  `validate` rejects one added by hand, as it does a cycle whose two projects are the same or not in
+  the schedule.
+- **The plans read fetches only a page on the target.** The page is HTML, so only its status and
+  length are recorded. A listing whose `urlPath` resolves anywhere else is refused (`FOREIGN_LINK`)
+  and never requested, since the request would carry the soak's token.
+- **Every wait is bounded.** Both listeners have a minute to reach `listening` (`NOT_LISTENING`,
+  naming the laggard), the message a minute to arrive (`NOT_DELIVERED`), and the wrap ten minutes to
+  finish (`WRAP_TIMEOUT`). Their states are read once a second.
+- **How a wrap cycle is judged:**
+  - `409 STRANDED_WRAPS` is `WRAP_STRANDED`; any other refusal is `HTTP_STATUS`.
+  - `409 WRAP_IN_PROGRESS` is a failure, and the session is **not** killed: another run owns it.
+  - A status naming a different run is ignored. A run claimed and never settled is `WRAP_STALE`.
+  - Success is the run's `ok` and its pipeline's `ok`, never `result.status`, which reads
+    `wrapping` even on success. Otherwise it is `WRAP_BLOCKED`, with `blockedAt` when known.
+  - A successful run that did not end the session is `WRAP_NOT_ENDED`.
+  - The session is killed afterwards only when the run did not end it.
+- **Every engine cycle kills only what the harness launched.** Both projects of a switchboard cycle
+  pass the same status check as a session cycle (below) before anything launches. Once a launch
+  succeeded, both sessions are killed at the end whatever failed between, and a failed kill is
+  reported (`cleanupFailed`). Killing the recipient retires the exchange, so the message needs no
+  reply and no close.
+- **The message and its request id name the event**, so a resumed event resends under the same
+  request id. The driver does not pass the event index to executors yet, so today every message
+  carries the generic text and no request id.
+
+### Prerequisites on the target
+
+These kinds need a target prepared as Chunk 1 will prepare it:
+- **A Medusa hub** running with `A2A_SECRET`, reachable at the TangleClaw process's
+  `MEDUSA_BRIDGE_HTTP_URL`. Without it no listener reaches `listening`.
+- **Each `soak-*` project's `.tangleclaw/project.json`** has `medusaEnabled: true`,
+  `wrapAutoPrEnabled: false` and `releaseMode: "off"`, and the project has a
+  `.tangleclaw/plans/soak-plan.md`.
+- **The driver runs on the guest's loopback**, so the front-door gate treats it as a machine
+  client.
+
+### What this load does not exercise
+
+The guest is offline and the engine is a stub, so:
+- real AI-content capture in a wrap (every such step is skipped);
+- the wrap's push and pull-request path (`wrapAutoPrEnabled: false`);
+- bound switchboard replies and exchange closes: the message needs no reply, and the recipient's
+  kill retires the exchange.
 
 ## Run it
 
