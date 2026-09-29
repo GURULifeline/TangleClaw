@@ -551,3 +551,101 @@ describe('soak CLI — run', () => {
     assert.ok(JSON.parse(second.out).resumedFrom > 0);
   });
 });
+
+describe('soak CLI — sample and bundle', () => {
+  /**
+   * Plan an api-only schedule into the temp dir.
+   * @returns {Promise<string>} Schedule path
+   */
+  async function planApi() {
+    const out = path.join(dir, 's.json');
+    const r = await run(['plan', '--seed', 'rc', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
+    assert.equal(r.code, 0, r.err);
+    return out;
+  }
+
+  /**
+   * A guest home with a database, and a runner that answers as a VM.
+   * @param {string} [vmm] - What `kern.hv_vmm_present` prints
+   * @returns {{home: string, local: object}} Home and local deps
+   */
+  function guest(vmm = '1') {
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(dir, 'home-')));
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(path.join(home, 'tangleclaw.db'));
+    db.exec('CREATE TABLE t (v INTEGER)');
+    db.close();
+    const run = async (file) => {
+      if (file === 'sysctl') return { code: 0, stdout: `${vmm}\n`, stderr: '', error: null };
+      return { code: 1, stdout: '', stderr: '', error: '1' };
+    };
+    return { home, local: { run } };
+  }
+  const health = async () => ({ status: 200, text: async () => '{"status":"ok"}' });
+
+  it('samples a guest home and exits 0', async () => {
+    const g = guest();
+    const out = path.join(dir, 'samples.ndjson');
+    const r = await run(['sample', '--home', g.home, '--api', 'http://127.0.0.1:3102', '--out', out, '--no-live-install', '--count', '2', '--interval-ms', '1000'],
+      { fetch: health, clock: instantClock(), local: g.local });
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(JSON.parse(r.out), { taken: 2, lastSeq: 1 });
+    assert.equal(fs.readFileSync(out, 'utf8').trim().split('\n').length, 3);
+  });
+
+  it('refuses to sample outside the guest, or beside a live install', async () => {
+    const g = guest('0');
+    const r = await run(['sample', '--home', g.home, '--api', 'http://127.0.0.1:3102', '--out', path.join(dir, 's'), '--no-live-install'], { fetch: health, clock: instantClock(), local: g.local });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err.trim()).code, 'LOCAL_CONTROL_REFUSED');
+    const live = await run(['sample', '--home', g.home, '--api', 'http://127.0.0.1:3102', '--out', path.join(dir, 's'), '--no-live-install'], { fetch: health, clock: instantClock(), local: g.local, env: { TANGLECLAW_API: 'http://localhost:3102' } });
+    assert.equal(live.code, 2);
+    assert.equal(fs.existsSync(path.join(dir, 's')), false);
+  });
+
+  it('refuses a sample interval under a second', async () => {
+    const g = guest();
+    const r = await run(['sample', '--home', g.home, '--api', 'http://127.0.0.1:3102', '--out', path.join(dir, 's'), '--no-live-install', '--interval-ms', '10'], { local: g.local });
+    assert.equal(r.code, 2);
+  });
+
+  it('bundles a run, with the guest database when --home is admitted', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'soak.ndjson');
+    const fetch = async () => ({ status: 200, text: async () => '{}' });
+    assert.equal((await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'], { fetch, clock: instantClock() })).code, 0);
+    const g = guest();
+    const out = path.join(dir, 'evidence');
+    const r = await run(['bundle', '--out', out, '--schedule', schedulePath, '--log', log, '--home', g.home, '--no-live-install'], { clock: instantClock(), local: g.local });
+    assert.equal(r.code, 0, r.err);
+    const res = JSON.parse(r.out);
+    assert.equal(res.manifest, path.join(out, 'manifest.json'));
+    const manifest = JSON.parse(fs.readFileSync(res.manifest, 'utf8'));
+    assert.ok(manifest.files.some((f) => f.path === path.join('db', 'tangleclaw.db')));
+    assert.equal(manifest.summary.log.completed, true);
+  });
+
+  it('bundles without --home anywhere, but snapshots a database only inside the guest', async () => {
+    const schedulePath = await planApi();
+    const log = path.join(dir, 'soak.ndjson');
+    const fetch = async () => ({ status: 200, text: async () => '{}' });
+    await run(['run', '--schedule', schedulePath, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'], { fetch, clock: instantClock() });
+    const plain = await run(['bundle', '--out', path.join(dir, 'e1'), '--schedule', schedulePath, '--log', log], { clock: instantClock() });
+    assert.equal(plain.code, 0, plain.err);
+    const g = guest('0');
+    const refused = await run(['bundle', '--out', path.join(dir, 'e2'), '--schedule', schedulePath, '--log', log, '--home', g.home, '--no-live-install'], { clock: instantClock(), local: g.local });
+    assert.equal(refused.code, 3);
+    assert.equal(fs.existsSync(path.join(dir, 'e2')), false);
+    const stray = await run(['bundle', '--out', path.join(dir, 'e3'), '--schedule', schedulePath, '--log', log, '--no-live-install'], { clock: instantClock() });
+    assert.equal(stray.code, 2);
+  });
+
+  it('refuses to bundle into an existing directory with exit 3', async () => {
+    const schedulePath = await planApi();
+    fs.mkdirSync(path.join(dir, 'exists'));
+    fs.writeFileSync(path.join(dir, 'l'), '');
+    const r = await run(['bundle', '--out', path.join(dir, 'exists'), '--schedule', schedulePath, '--log', path.join(dir, 'l')], { clock: instantClock() });
+    assert.equal(r.code, 3);
+    assert.equal(JSON.parse(r.err.trim()).code, 'BUNDLE_REFUSED');
+  });
+});

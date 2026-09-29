@@ -12,6 +12,16 @@
  *   soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]
  *                 [--home <dir>] [--webdriver <url>]
  *   soak repos    --root <dir> --origins <dir> [--projects a,b,c]
+ *   soak sample   --home <dir> --api <url> --out <file> --no-live-install
+ *                 [--interval-ms <n>] [--count <n>] [--full-every <n>]
+ *   soak bundle   --out <dir> --schedule <file> --log <file> [--samples <file>]
+ *                 [--attestations <file,file>] [--home <dir> --no-live-install]
+ *
+ * `sample` appends integrity and resource samples of the guest TangleClaw
+ * (its database, process and disk) to an ndjson file, and `bundle` gathers a
+ * run's evidence into one directory with a manifest binding every file
+ * (`lib/soak/integrity`, `lib/soak/bundle`). Both read a TangleClaw home
+ * directly, so both run only inside the soak guest.
  *
  * `repos` creates the synthetic `soak-*` repos the load targets, each with a
  * local bare origin, or confirms they already exist exactly as it would create
@@ -56,6 +66,8 @@ const { EXECUTORS } = require('../lib/soak/executors');
 const { FAULT_EXECUTORS } = require('../lib/soak/faults');
 const { BROWSER_EXECUTORS } = require('../lib/soak/browser');
 const localLib = require('../lib/soak/local');
+const integrityLib = require('../lib/soak/integrity');
+const bundleLib = require('../lib/soak/bundle');
 const reposLib = require('../lib/soak/repos');
 
 /** Every executor `run` can use, by event kind. */
@@ -68,7 +80,11 @@ const USAGE = [
   '       soak validate --schedule <file>',
   '       soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]',
   '                     [--home <dir>] [--webdriver <url>]',
-  '       soak repos    --root <dir> --origins <dir> [--projects a,b,c]'
+  '       soak repos    --root <dir> --origins <dir> [--projects a,b,c]',
+  '       soak sample   --home <dir> --api <url> --out <file> --no-live-install',
+  '                     [--interval-ms <n>] [--count <n>] [--full-every <n>]',
+  '       soak bundle   --out <dir> --schedule <file> --log <file> [--samples <file>]',
+  '                     [--attestations <file,file>] [--home <dir> --no-live-install]'
 ].join('\n');
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -305,6 +321,85 @@ function cmdRepos(flags, io) {
 }
 
 /**
+ * `--no-live-install` for a command that reads the guest home: required, and
+ * a contradiction where `TANGLECLAW_API` is set.
+ * @param {Object<string, string|boolean>} flags - Flags
+ * @param {object} deps - `{env}`
+ * @returns {boolean} Whether it was given
+ * @throws {UsageError} When it contradicts `TANGLECLAW_API`
+ */
+function noLiveInstallFlag(flags, deps) {
+  const given = flags['no-live-install'] === true;
+  if (given && deps.env.TANGLECLAW_API) throw new UsageError('--no-live-install contradicts TANGLECLAW_API being set');
+  return given;
+}
+
+/**
+ * `sample`: append integrity and resource samples of the guest TangleClaw.
+ * @param {Object<string, string|boolean>} flags - Flags
+ * @param {object} io - `{stdout, stderr}`
+ * @param {object} deps - `{env, fetch, clock, onStopSignal, local}`
+ * @returns {Promise<number>} Exit code: 0 done or stopped, 3 refused
+ */
+async function cmdSample(flags, io, deps) {
+  expectFlags(flags, ['home', 'api', 'out'], ['no-live-install', 'interval-ms', 'count', 'full-every']);
+  const intervalMs = intFlag('interval-ms', flags['interval-ms']);
+  const count = intFlag('count', flags.count);
+  const fullEvery = intFlag('full-every', flags['full-every']);
+  if (intervalMs !== undefined && intervalMs < 1000) throw new UsageError('--interval-ms must be at least 1000');
+  if (count === 0 || fullEvery === 0) throw new UsageError('--count and --full-every must be at least 1');
+  const admitted = await localLib.admitGuestReader({ noLiveInstall: noLiveInstallFlag(flags, deps), home: flags.home, apiBase: flags.api }, deps.local);
+  let stop = false;
+  deps.onStopSignal(() => { stop = true; });
+  try {
+    const result = await integrityLib.runSampler({
+      file: flags.out,
+      home: admitted.home,
+      apiBase: new URL(flags.api).href,
+      token: deps.env.TANGLECLAW_SERVICE_TOKEN || null,
+      fetch: deps.fetch,
+      intervalMs: intervalMs || integrityLib.INTERVAL_MS,
+      count,
+      fullEvery,
+      clock: deps.clock,
+      shouldStop: () => stop,
+      run: admitted.run
+    });
+    io.stdout.write(`${JSON.stringify(result)}\n`);
+    return 0;
+  } catch (err) {
+    if (!['SAMPLER_LOCKED', 'SAMPLES_MISMATCH', 'SAMPLES_TORN', 'SAMPLES_UNREADABLE'].includes(err.code)) throw err;
+    io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message })}\n`);
+    return 3;
+  }
+}
+
+/**
+ * `bundle`: gather a run's evidence into a new directory with a manifest.
+ * @param {Object<string, string|boolean>} flags - Flags
+ * @param {object} io - `{stdout, stderr}`
+ * @param {object} deps - `{env, clock, local}`
+ * @returns {Promise<number>} Exit code: 0 written, 3 refused
+ */
+async function cmdBundle(flags, io, deps) {
+  expectFlags(flags, ['out', 'schedule', 'log'], ['samples', 'attestations', 'home', 'no-live-install']);
+  const noLiveInstall = noLiveInstallFlag(flags, deps);
+  if (noLiveInstall && flags.home === undefined) throw new UsageError('--no-live-install is only for a bundle with --home');
+  let home;
+  if (flags.home !== undefined) home = (await localLib.admitGuestReader({ noLiveInstall, home: flags.home }, deps.local)).home;
+  const attestations = flags.attestations === undefined ? [] : flags.attestations.split(',').map((x) => x.trim()).filter(Boolean);
+  try {
+    const r = bundleLib.buildBundle({ out: flags.out, schedule: flags.schedule, log: flags.log, samples: flags.samples, home, attestations, now: deps.clock.now });
+    io.stdout.write(`${JSON.stringify({ out: r.out, manifest: r.manifest, manifestSha256: r.manifestSha256 })}\n`);
+    return 0;
+  } catch (err) {
+    if (!(err instanceof bundleLib.BundleRefusal)) throw err;
+    io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message })}\n`);
+    return 3;
+  }
+}
+
+/**
  * Entry point, with every side effect injectable for tests.
  * @param {string[]} argv - Arguments after the script name
  * @param {object} [deps] - `{stdout, stderr, env, fetch, lookup, clock, onStopSignal, local}`; `local` reaches `requireLocalControl` (`{fs, run, uid}`)
@@ -327,6 +422,8 @@ async function main(argv, deps = {}) {
     if (command === 'validate') return cmdValidate(flags, io);
     if (command === 'run') return await cmdRun(flags, io, full);
     if (command === 'repos') return cmdRepos(flags, io);
+    if (command === 'sample') return await cmdSample(flags, io, full);
+    if (command === 'bundle') return await cmdBundle(flags, io, full);
     throw new UsageError(command ? `unknown command: ${command}` : 'a command is required');
   } catch (err) {
     if (err instanceof UsageError) {
