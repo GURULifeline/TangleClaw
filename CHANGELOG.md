@@ -28,6 +28,8 @@ All notable changes to TangleClaw are documented in this file.
     - Any other launch stays held.
   - **Seeing where a rotation stands.** Every open rotation shows its state, blocker, checkpoint digest, receipt verdict and exactly one next command. It appears in `tc rotation show`, on each rotating lane in `tc sessions`, and in the operator's `GET /api/rotations`.
   - **Live check.** `scripts/rotation-live-check.js` is a live check an independent executor runs inside a real Codex pane before merge.
+  - **Codex timing.** Codex keeps the old thread loaded for a moment after `/clear`, and briefly opens an extra thread. For two minutes after an admitted clear, both are waited out (`prior-thread-unloading`, `replacement-settling`). Only if they persist past that does the rotation need the operator.
+  - **Coordinators without the switchboard.** A coordinator that runs without Medusa is not held for a listener unless messages were recorded to drain.
   - **Safety.** Every step can be retried or resumed after a restart without repeating itself. Only the operator can abandon a rotation.
   - **Unchanged.** Ordinary wake observation still never replaces a recorded thread.
   - **Other engines.** A managed rotation is refused for them, with the reason. Claude keeps its SessionStart re-entry.

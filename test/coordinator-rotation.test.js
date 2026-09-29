@@ -578,6 +578,22 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(r.replacementThreadId, NEXT);
     });
 
+    it('a new thread that appears before any admitted /clear is not waited on: it goes to the operator', async () => {
+      await serve();
+      channel();
+      // Every /clear is refused, and the operator opens a thread in the directory meanwhile.
+      const refusing = { ...deps(), inject: (_n, command, opts) => {
+        typed.push({ command, opts });
+        server.state.threads.set('operator-opened', { status: { type: 'idle' } });
+        return { ok: false, error: 'CONTROL_HELD' };
+      } };
+      const id = (await prepare()).body.rotation.rotationId;
+      const r = await rotation.drive(id, { attempts: 5, deps: refusing });
+      assert.equal(r.clearAttempts, 0);
+      assert.equal(r.failureCode, 'prior-thread-still-loaded', 'no admitted clear, so no settle window: never an endless wait');
+      assert.match(rotation.view(r).nextCommand, /abandon/);
+    });
+
     it('LIVE: the old thread still loaded for a moment after /clear is waited out, not handed to the operator', async () => {
       await serve();
       channel();
