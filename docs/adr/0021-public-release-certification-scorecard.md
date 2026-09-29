@@ -148,10 +148,14 @@ to be able to trust it. That creates two problems:
    mints its own run id.
 
 11. **A crash between publishing the admission and committing the run never uses up the
-   candidate, even across a reboot** (B1 review, R-3). The run's ttyd baseline is the generation
-   the admission sample observes, kept in the run's state; the manifest's value records what was
-   seen when it was staged. A retry that reuses the public manifest after the ttyd changed is
-   admitted against what it now observes, and a generation change during the run still fails it.
+   candidate, even across a reboot** (B1 review, R-3; Architect ruling A47). The run's baseline is
+   what the admission sample observes, written once into the run's state with the run itself: the
+   ttyd generation and, in a guest, the boot identity, the packet-filter ruleset digest and the
+   digests of both isolation attestations. The manifest declares `baselineSource: admission`, and the
+   admission record publishes it, so no reader takes the manifest's staging-time values for the
+   baseline. A retry before admission may reuse the public manifest, but never an earlier verdict
+   or sample. After admission, a changed ttyd generation, boot identity or ruleset fails the run
+   irrevocably; the baseline is never rewritten in place.
 
 12. **A guest publishes only to a local repository; the host relays exactly what it published**
    (#2020, Architect rulings Q2 and A31 constraint 4). A host-attested run's manifest must name its
@@ -166,6 +170,33 @@ to be able to trust it. That creates two problems:
    judged by canonical thresholds with an `ok` finalization. Only the host process ever names the
    public remote, so no credential enters the guest, and GitHub's availability decides when a
    result is published, never how much time a run earned.
+
+   The guest is read exactly once, fetched into the host's relay repository and pinned by commit,
+   and every check, the push and the read-back use that one commit: a guest that moves its branch
+   mid-relay cannot get an unchecked commit published. Each public remote has its own relay
+   repository, held under a lock. The record (`record-<runId>-<oid>.json`) is created once and
+   never overwritten (Architect ruling A54): a relay re-run after an interruption returns the
+   identical record, and a different one under that name is refused. It binds the read-back commit
+   and its tree, the sha256 of the admission, the scorecard and the host's finalization file, the
+   run id, the manifest digest, the checks source, the boot identity and the digest of the
+   committed sample set, with a digest over all of them. `verifyRecord` re-derives each of those
+   from the public remote and the host's finalization; C04 promotion must use it and never trust
+   a record's own fields (A51).
+
+13. **A guest's network isolation is attested at admission, at every sample and at
+   finalization** (#2020, Architect rulings A43 and A44). The workload a soak runs as must be
+   refused `pfctl`, so it cannot also read the packet filter: isolation is attested in two joined
+   planes. The admin plane covers the packet filter being enabled, its exact normalized ruleset
+   digest, the interfaces and addresses, the boot identity and a closed management path. The
+   workload plane covers its dedicated non-admin identity, `sudo` and `pfctl` refused, the loopback
+   API reachable, and IPv4, IPv6 and DNS egress denied. A program pinned in the manifest (Chunk 1's
+   `guest-setup.sh --verify-network`) produces both for each sample, echoing that sample's binding
+   (candidate, run id, manifest digest, sample number). Both must agree on the boot identity. A
+   missing, malformed, unbound or split pair earns no time (`ISOLATION_UNATTESTED`); a well-formed
+   pair that shows isolation broken fails the run (`ISOLATION_BREACHED`); so does a boot identity
+   or ruleset other than the admission's (`BOOT_CHANGED`, `ISOLATION_CHANGED`). The digests of
+   both planes travel with each sample, and the host's finalization requires them, from the
+   admitted boot, on the admission sample and on every sample that earned time.
 
 ## Consequences
 

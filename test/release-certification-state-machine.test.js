@@ -79,7 +79,8 @@ describe('buildManifest', () => {
     const m = manifest();
     assert.equal(m.candidateSha, SHA);
     assert.equal(m.schema, 'tc.release-certification/v1');
-    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, checksExchange: null, baseline: { ttydGeneration: GEN } });
+    assert.deepEqual(m.private, { worktreePath: '/tmp/rc-wt', worktreeId: WTID, host: 'test-host', publishRemote: null, checksExchange: null, isolationProducer: null, baseline: { ttydGeneration: GEN } });
+    assert.deepEqual([m.isolation, m.baselineSource], ['none', 'admission'], 'a host run attests no isolation, and its baseline comes from admission');
     assert.equal(m.runId, fx.RUN_ID, 'the host-minted run id is pinned under the digest');
     assert.equal(m.checksSource, 'gh');
     assert.equal(m.publishActor, true);
@@ -106,10 +107,13 @@ describe('buildManifest', () => {
     ['a host-attested run with no exchange directory', { checksSource: 'host-attested' }],
     ['a host-attested run with a relative exchange directory', { checksSource: 'host-attested', checksExchange: 'x' }],
     ['an exchange directory on a gh run', { checksExchange: '/x' }],
-    ['a host-attested run publishing to a URL', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'https://github.com/o/r.git' }],
-    ['a host-attested run publishing to a file:// URL', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'file:///x/metrics.git' }],
-    ['a host-attested run publishing to host:path', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'github.com:o/r.git' }],
-    ['a host-attested run with no publish remote', { checksSource: 'host-attested', checksExchange: '/x' }]
+    ['a host-attested run publishing to a URL', { checksSource: 'host-attested', checksExchange: '/x', isolationProducer: '/x/g', publishRemote: 'https://github.com/o/r.git' }],
+    ['a host-attested run publishing to a file:// URL', { checksSource: 'host-attested', checksExchange: '/x', isolationProducer: '/x/g', publishRemote: 'file:///x/metrics.git' }],
+    ['a host-attested run publishing to host:path', { checksSource: 'host-attested', checksExchange: '/x', isolationProducer: '/x/g', publishRemote: 'github.com:o/r.git' }],
+    ['a host-attested run with no publish remote', { checksSource: 'host-attested', checksExchange: '/x', isolationProducer: '/x/g' }],
+    ['a host-attested run with no isolation producer', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/m.git' }],
+    ['a host-attested run with a relative isolation producer', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/m.git', isolationProducer: 'guest-setup.sh' }],
+    ['an isolation producer on a gh run', { isolationProducer: '/x/g' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({

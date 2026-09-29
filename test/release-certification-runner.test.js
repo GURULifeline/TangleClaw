@@ -587,6 +587,7 @@ describe('rc-cert CLI', () => {
 
 describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () => {
   const hostChecks = require('../lib/release-certification/host-checks');
+  const isolation = require('../lib/release-certification/isolation');
   const SPEC_HA = { ...SPEC, checksSource: 'host-attested' };
 
   /**
@@ -615,8 +616,15 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
             f.advance(ms);
           }
         });
-        const observations = { ...script[Math.min(i++, script.length - 1)], github: checks.observation };
-        return { observations, diagnostics: checks.error ? { github: checks.error } : {}, ...(checks.binding ? { checks: checks.binding } : {}) };
+        // The guest's isolation, attested for the same sample through the real judge.
+        const iso = binding ? await isolation.attest((b) => fx.isolationPair(b), { candidateSha: SHA, runId: fx.RUN_ID, manifestDigest: binding.manifestDigest, sampleSeq: binding.seq }) : { observation: { state: 'unavailable' } };
+        const o = iso.observation;
+        const observations = { ...script[Math.min(i++, script.length - 1)], github: checks.observation, isolation: o };
+        return {
+          observations, diagnostics: checks.error ? { github: checks.error } : {},
+          ...(checks.binding ? { checks: checks.binding } : {}),
+          ...(o.state !== 'unavailable' ? { isolation: { sampleSeq: binding.seq, bootId: o.bootId, adminDigest: o.adminDigest, workloadDigest: o.workloadDigest } } : {})
+        };
       }
     };
     hostChecks.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
@@ -626,7 +634,7 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     const r = runnerLib.createRunner({ publication: opts.pub || fakePub(), base, candidateSha: SHA, probes: probesStub, clock: ticking });
     return { r, f, base, exchange, hostBase, requests };
   }
-  const specFor = (h) => ({ ...SPEC_HA, checksExchange: h.exchange, remoteUrl: path.join(tmp, 'metrics.git') });
+  const specFor = (h) => ({ ...SPEC_HA, checksExchange: h.exchange, remoteUrl: path.join(tmp, 'metrics.git'), isolationProducer: '/x/guest-setup.sh' });
 
   it('admits only on a verdict bound to the staged manifest, then binds every sample to its own number', async () => {
     const h = hostAttested();
@@ -643,7 +651,7 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     assert.ok(h.requests.every((b) => b.manifestDigest === state.manifestDigest));
     const { manifest } = store.readRun(h.base, SHA);
     assert.deepEqual([manifest.runId, manifest.checksSource, manifest.private.checksExchange], [fx.RUN_ID, 'host-attested', h.exchange]);
-    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { state: 'awaiting-review', sampleCount: samples.length }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
+    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { ...store.readRun(h.base, SHA).state, state: 'awaiting-review' }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
     assert.deepEqual(out, { ok: true, reasons: [] }, 'the host can vouch for every earning sample this run took');
   });
 
@@ -770,8 +778,8 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
 
   it('refuses a host-attested start missing anything only the host can supply', async () => {
     const wt = worktree();
-    const full = ['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--metrics-remote', path.join(tmp, 'm.git'), '--run-id', fx.RUN_ID, '--exchange', path.join(tmp, 'x')];
-    for (const drop of ['--repo', '--required-check', '--metrics-remote', '--run-id', '--exchange']) {
+    const full = ['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--metrics-remote', path.join(tmp, 'm.git'), '--isolation-producer', path.join(tmp, 'g'), '--run-id', fx.RUN_ID, '--exchange', path.join(tmp, 'x')];
+    for (const drop of ['--repo', '--required-check', '--metrics-remote', '--isolation-producer', '--run-id', '--exchange']) {
       const i = full.indexOf(drop);
       const argv = [...full.slice(0, i), ...full.slice(i + 2)];
       assert.equal((await run(argv)).code, 2, `missing ${drop}`);
@@ -799,6 +807,7 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
         fetchJson: async () => ({ body: null, error: 'connect-failed' }),
         measure: async () => null,
         ghJson: async () => { throw new Error('the guest must not read GitHub'); },
+        verifyNetwork: async (b) => fx.isolationPair(b),
         attest: (c, b) => hostChecks.attest(c, b, { now: f.clock.wall, sleep: async (ms) => { await run(['host-checks', '--sha', SHA, '--exchange', exchange, '--host-base', hostBase], { deps: { observeGithub: GREEN } }); f.advance(ms); } })
       });
     };
@@ -810,12 +819,12 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
       publication: fakePub(),
       probes: (ctx) => {
         const real = guestProbes(ctx);
-        return { collect: async (now, b) => { const out = await real.collect(now, b); return { ...out, observations: { ...observed(), github: out.observations.github } }; } };
+        return { collect: async (now, b) => { const out = await real.collect(now, b); return { ...out, observations: { ...observed(), github: out.observations.github, isolation: out.observations.isolation } }; } };
       },
       runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: ticking })
     };
     const TH = JSON.stringify({ targetQualifiedMs: 2 * MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 });
-    const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', runId, '--exchange', exchange, '--metrics-remote', path.join(tmp, 'metrics.git'), '--thresholds', TH], { deps });
+    const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', runId, '--exchange', exchange, '--metrics-remote', path.join(tmp, 'metrics.git'), '--isolation-producer', '/x/guest-setup.sh', '--thresholds', TH], { deps });
     assert.equal(started.code, 0, started.err);
     assert.deepEqual([probeCtxs[0].checksSource, probeCtxs[0].runId, probeCtxs[0].exchangeDir], ['host-attested', runId, exchange]);
     const controller = new AbortController();

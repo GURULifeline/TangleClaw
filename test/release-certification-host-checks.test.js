@@ -236,7 +236,7 @@ describe('host checks: the guest accepts only a verdict bound to its own sample'
 });
 
 describe('host checks: finalization trusts only the host\'s own ledger', () => {
-  const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' });
+  const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' });
 
   /**
    * Take samples 1..n through the real exchange, each answered by the host.
@@ -251,12 +251,12 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
       const qualifies = seq > 1 && (opts.qualifies ? opts.qualifies(seq) : true);
       // Taken just after it asked, as the runner does: the guest's clock is
       // the only one either time comes from.
-      out.push({ seq, wallAt: T0 + 1000, ...(r.binding ? { checks: r.binding } : {}), interval: seq === 1 ? null : { qualifies } });
+      out.push({ seq, wallAt: T0 + 1000, isolation: { sampleSeq: seq, bootId: fx.BOOT_ID, adminDigest: 'a'.repeat(64), workloadDigest: 'b'.repeat(64) }, observations: { isolation: fx.ISOLATED }, ...(r.binding ? { checks: r.binding } : {}), interval: seq === 1 ? null : { qualifies } });
     }
     return out;
   }
   const finalize = (s, over = {}) => hc.finalize({
-    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: s.length }, samples: s, observe: observer().observe, now: () => T0, ...over
+    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: s.length, baseline: { bootId: fx.BOOT_ID } }, samples: s, observe: observer().observe, now: () => T0, ...over
   });
 
   it('passes a run whose admission and every earning sample the host vouched for, and records it', async () => {
@@ -292,7 +292,7 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     const s = await samples(2);
     assert.ok((await finalize(s)).reasons.some((r) => r.code === 'RUN_NOT_MINTED'));
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test', 'lint'] }, { random: () => fx.RUN_ID });
-    const out = await finalize(s, { state: { state: 'running', sampleCount: s.length } });
+    const out = await finalize(s, { state: { state: 'running', sampleCount: s.length, baseline: { bootId: fx.BOOT_ID } } });
     assert.deepEqual(out.reasons.map((r) => r.code).filter((c) => ['CHECKS_LIST_DRIFT', 'NOT_REVIEWABLE'].includes(c)), ['CHECKS_LIST_DRIFT', 'NOT_REVIEWABLE']);
   });
 
@@ -347,9 +347,9 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
     const B = 'b2'.repeat(16);
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => A });
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => B });
-    const base = { hostBase, manifestDigest: DIGEST, samples: [], state: { state: 'awaiting-review', sampleCount: 0 }, now: () => T0 };
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' }), observe: observer().observe });
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
+    const base = { hostBase, manifestDigest: DIGEST, samples: [], state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, now: () => T0 };
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' }), observe: observer().observe });
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
     assert.equal(hc.readFinalization(hostBase, SHA, A).ok, true);
     assert.equal(hc.readFinalization(hostBase, SHA, B).ok, false);
     assert.equal(hc.readFinalization(hostBase, SHA, 'c'.repeat(32)), null);
@@ -357,13 +357,13 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
 
   it('fails a run whose evidence is missing a committed sample, or whose verdict came from another request window', async () => {
     mint();
-    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' });
+    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' });
     const out = [];
     for (let seq = 1; seq <= 3; seq++) {
       const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST });
-      out.push({ seq, wallAt: T0 + 1000, checks: r.binding, interval: seq === 1 ? null : { qualifies: true } });
+      out.push({ seq, wallAt: T0 + 1000, isolation: { sampleSeq: seq, bootId: fx.BOOT_ID, adminDigest: 'a'.repeat(64), workloadDigest: 'b'.repeat(64) }, observations: { isolation: fx.ISOLATED }, checks: r.binding, interval: seq === 1 ? null : { qualifies: true } });
     }
-    const fin = (samples, sampleCount) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount }, samples, observe: observer().observe });
+    const fin = (samples, sampleCount) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount, baseline: { bootId: fx.BOOT_ID } }, samples, observe: observer().observe });
     assert.deepEqual((await fin([out[0], out[2]], 3)).reasons, [{ code: 'SAMPLES_INCOMPLETE' }]);
     const late = [out[0], out[1], { ...out[2], wallAt: T0 + 150_001 }];
     assert.deepEqual((await fin(late, 3)).reasons, [{ code: 'VERDICT_NOT_FRESH', sampleSeq: 3 }]);
@@ -451,5 +451,52 @@ describe('host checks: a GitHub failure on the host leaves a trace on both sides
     assert.equal(hc.judgeVerdict(JSON.stringify(v), expected).reason, 'gh-failed');
     assert.deepEqual(hc.judgeVerdict(JSON.stringify({ ...v, reason: null }), expected), { diagnostic: hc.DIAGNOSTIC.MISMATCH });
     assert.deepEqual(hc.judgeVerdict(JSON.stringify({ ...v, reason: 'Not A Code!' }), expected), { diagnostic: hc.DIAGNOSTIC.INVALID });
+  });
+});
+
+describe('host checks: finalization joins the guest\'s isolation too (A43, A44, A51)', () => {
+  const manifest = fx.guestManifest();
+  /**
+   * Committed samples 1..n, each vouched for and attested.
+   * @param {number} n - How many
+   * @returns {Promise<object[]>} Sample records
+   */
+  async function vouched(n) {
+    const out = [];
+    for (let seq = 1; seq <= n; seq++) {
+      const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST });
+      out.push({ seq, wallAt: T0 + 1000, checks: r.binding, isolation: { sampleSeq: seq, bootId: fx.BOOT_ID, adminDigest: 'a'.repeat(64), workloadDigest: 'b'.repeat(64) }, observations: { isolation: fx.ISOLATED }, interval: seq === 1 ? null : { qualifies: true } });
+    }
+    return out;
+  }
+  const fin = (samples, baseline = { bootId: fx.BOOT_ID }) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: samples.length, baseline }, samples, observe: observer().observe, now: () => T0 });
+
+  it('records the boot and a digest of the exact committed sample set', async () => {
+    mint();
+    const s = await vouched(3);
+    assert.deepEqual(await fin(s), { ok: true, reasons: [] });
+    const rec = hc.readFinalization(hostBase, SHA, fx.RUN_ID);
+    assert.equal(rec.bootId, fx.BOOT_ID);
+    assert.match(rec.sampleSetDigest, /^[0-9a-f]{64}$/);
+    const first = rec.sampleSetDigest;
+    await fin([s[0], s[1], { ...s[2], interval: { qualifies: false } }]);
+    assert.notEqual(hc.readFinalization(hostBase, SHA, fx.RUN_ID).sampleSetDigest, first, 'any change to the committed set changes its digest');
+  });
+
+  it('fails an earning sample with no isolation, or one from another boot or sample', async () => {
+    mint();
+    const s = await vouched(4);
+    delete s[1].isolation;
+    s[2].isolation = { ...s[2].isolation, bootId: 'boot-other' };
+    s[3].isolation = { ...s[3].isolation, sampleSeq: 1 };
+    assert.deepEqual((await fin(s)).reasons, [
+      { code: 'ISOLATION_MISSING', sampleSeq: 2 }, { code: 'ISOLATION_MISMATCH', sampleSeq: 3 }, { code: 'ISOLATION_MISMATCH', sampleSeq: 4 }
+    ]);
+  });
+
+  it('fails a guest run whose state carries no admission boot', async () => {
+    mint();
+    const s = await vouched(1);
+    assert.ok((await fin(s, {})).reasons.some((r) => r.code === 'ISOLATION_MISSING'));
   });
 });

@@ -64,21 +64,34 @@ function tip(repo) {
  */
 async function guestRun(opts = {}) {
   const hostAttested = (opts.checksSource || 'host-attested') === 'host-attested';
-  const manifest = fx.manifest(hostAttested ? { checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest } : { publishRemote: guest });
+  const manifest = fx.manifest(hostAttested ? { checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest, isolationProducer: '/x/guest-setup.sh' } : { publishRemote: guest });
   const digest = store.manifestDigest(store.manifestText(manifest));
   const clock = { t: T0 };
   fs.mkdirSync(store.runPaths(base, SHA).dir, { recursive: true, mode: 0o700 });
   const publisher = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: guest, identity: ID }, { sleep: async () => {} });
   const publication = publicationLib.createPublication({ base, candidateSha: SHA, publisher, now: () => clock.t });
   await publication.admit(manifest, digest);
-  const admitted = sm.admit(manifest, fx.sample(0));
+  const admitted = sm.admit(manifest, fx.sample(0, hostAttested ? { ...fx.observations(), isolation: fx.ISOLATED } : fx.observations()));
   const state = { ...admitted.state, manifestDigest: digest };
   await publication.update({ state, manifest, events: admitted.events });
   if (opts.finalize !== false && hostAttested) {
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
-    await hc.finalize({ hostBase, manifest, manifestDigest: opts.finalizeDigest || digest, state: { state: 'awaiting-review', sampleCount: 0 }, samples: [], observe: opts.observe || GREEN });
+    await hc.finalize({ hostBase, manifest, manifestDigest: opts.finalizeDigest || digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: opts.observe || GREEN });
   }
   return { manifest, digest, publication, state, events: admitted.events, clock };
+}
+
+/**
+ * The host's relay records for the fixture candidate.
+ * @returns {string[]} File names
+ */
+function records() {
+  try {
+    return fs.readdirSync(hc.hostPaths(hostBase, SHA).dir).filter((n) => n.startsWith('record-'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
 }
 
 /**
@@ -96,7 +109,7 @@ async function refuses(code, over = {}) {
   } catch (err) { caught = err; }
   assert.ok(caught instanceof CertificationError, `expected ${code}, got ${caught && caught.stack}`);
   assert.equal(caught.code, code);
-  assert.equal(fs.existsSync(hostPublish.recordPath(hostBase, SHA, fx.RUN_ID)), false, 'no record was written');
+  assert.deepEqual(records(), [], 'no record was written');
   if (code !== REFUSAL.PUBLICATION_MISMATCH) assert.equal(tip(pub), before, 'the public branch did not move');
   return caught;
 }
@@ -108,7 +121,7 @@ describe('host relay: the guest\'s exact commit reaches the public branch (#2020
     assert.equal(record.oid, tip(guest));
     assert.equal(tip(pub), tip(guest), 'the public branch names the guest\'s commit, not a copy');
     assert.deepEqual([record.runId, record.state, record.certified], [fx.RUN_ID, 'running', false]);
-    assert.deepEqual(JSON.parse(fs.readFileSync(hostPublish.recordPath(hostBase, SHA, fx.RUN_ID), 'utf8')), record);
+    assert.deepEqual(JSON.parse(fs.readFileSync(hostPublish.recordPath(hostBase, SHA, fx.RUN_ID, record.oid), 'utf8')), record);
   });
 
   it('fast-forwards the public branch as the guest publishes more', async () => {
@@ -187,7 +200,7 @@ describe('host relay: every check fails closed and publishes nothing', () => {
   });
 
   it('refuses before pushing when the guest has no valid scorecard', async () => {
-    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest });
+    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest, isolationProducer: '/x/guest-setup.sh' });
     const digest = store.manifestDigest(store.manifestText(manifest));
     fs.mkdirSync(store.runPaths(base, SHA).dir, { recursive: true, mode: 0o700 });
     const publisher = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: guest, identity: ID }, { sleep: async () => {} });
@@ -232,8 +245,8 @@ describe('rc-cert: the guest publishes locally with no git identity, and the hos
     assert.equal(refused.code, 3);
     assert.equal(JSON.parse(refused.err).error, REFUSAL.NOT_FINALIZED);
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
-    const m = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest });
-    await hc.finalize({ hostBase, manifest: m, manifestDigest: store.manifestDigest(store.manifestText(m)), state: { state: 'awaiting-review', sampleCount: 0 }, samples: [], observe: GREEN });
+    const m = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest, isolationProducer: '/x/guest-setup.sh' });
+    await hc.finalize({ hostBase, manifest: m, manifestDigest: store.manifestDigest(store.manifestText(m)), state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN });
     const relayed = await run(['host-publish', '--sha', SHA, '--guest-metrics', guest, '--remote', pub, '--host-base', hostBase]);
     assert.equal(relayed.code, 0, relayed.err);
     assert.equal(JSON.parse(relayed.out).oid, tip(pub));
@@ -300,5 +313,57 @@ describe('host relay: the guest is read once, and relays to one remote never ove
     }
     const record = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
     assert.equal(record.oid, tip(pub), 'the lock was released, so the next relay runs');
+  });
+});
+
+describe('host relay: the record is created once and proves itself (A51, A54)', () => {
+  it('binds the read-back commit, its tree and the bytes it vouches for', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    assert.equal(r.recordDigest, hostPublish.recordDigest(r));
+    for (const f of ['treeOid', 'admissionSha256', 'scorecardSha256', 'finalizationSha256', 'sampleSetDigest']) assert.match(r[f], /^[0-9a-f]{40,64}$/, f);
+    assert.equal(r.bootId, fx.BOOT_ID);
+    assert.deepEqual(await hostPublish.verifyRecord(r, { hostBase, remoteUrl: pub }), { ok: true, reasons: [] });
+  });
+
+  it('re-runs an interrupted relay to the one record it would have written', async () => {
+    await guestRun();
+    const dying = async (args, o) => {
+      const res = await publisherLib.runGit(args, o);
+      if (args.includes('push')) throw new Error('host lost power after the push');
+      return res;
+    };
+    await assert.rejects(() => hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, git: dying }));
+    assert.equal(tip(pub), tip(guest), 'the push landed');
+    assert.deepEqual(records(), [], 'but no record was written');
+    const first = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, now: () => T0 + 1 });
+    const again = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, now: () => T0 + 2 });
+    assert.deepEqual(again, first, 'a second relay of the same commit returns the record already written');
+    assert.equal(records().length, 1);
+  });
+
+  it('refuses to replace a different record for the same run and commit', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const file = hostPublish.recordPath(hostBase, SHA, fx.RUN_ID, r.oid);
+    const forged = { ...r, certified: true };
+    forged.recordDigest = hostPublish.recordDigest(forged);
+    fs.chmodSync(file, 0o600);
+    fs.writeFileSync(file, JSON.stringify(forged));
+    await assert.rejects(() => hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub }), (e) => e.code === REFUSAL.RECORD_CONFLICT);
+  });
+
+  it('fails a forged, replayed or cross-run record when re-derived', async () => {
+    await guestRun();
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
+    const v = (rec) => hostPublish.verifyRecord(rec, { hostBase, remoteUrl: pub });
+    assert.deepEqual((await v({ ...r, certified: true })).reasons, ['RECORD_DIGEST'], 'an edited field breaks its own digest');
+    const reDigested = (over) => { const x = { ...r, ...over }; x.recordDigest = hostPublish.recordDigest(x); return x; };
+    assert.ok((await v(reDigested({ scorecardSha256: 'f'.repeat(64) }))).reasons.includes('SCORECARD'), 'a forged digest does not match the public bytes');
+    assert.ok((await v(reDigested({ oid: 'f'.repeat(40) }))).reasons.includes('OID_NOT_PUBLIC'), 'a commit the public branch never had');
+    const other = 'c'.repeat(32);
+    hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => other });
+    const res = await v(reDigested({ runId: other }));
+    assert.ok(res.reasons.includes('FINALIZATION') && res.reasons.includes('RUN_BINDING'), 'a record replayed onto another run');
   });
 });

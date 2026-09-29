@@ -56,6 +56,17 @@ All notable changes to TangleClaw are documented in this file.
   - **The guest publishes only to a local repository.** A host-attested run's `--metrics-remote` must be an absolute path; a URL, `file://` or `host:path` is refused.
   - **`rc-cert host-publish` relays exactly what the guest published.** It pushes the guest's exact commit to the public remote, fast-forward only and never forced. It relays only after the host's `ok` finalization of that run, and only when the guest's whole history passes the branch verifier. It then reads the remote back, and the result counts as certification of record only in the host's record: a `passed`, canonical run with an `ok` finalization. No credential enters the guest.
   - **A run that withholds the operator id no longer needs any git configuration** when its remote is pinned, since a guest has none.
+  - **The guest's network isolation is attested at admission and at every sample** (Architect rulings A43, A44 and A47).
+    - Two joined planes are required: the admin plane (packet filter on, with an exact ruleset digest; boot identity; closed management path) and the workload plane (non-admin identity; `sudo` and `pfctl` refused; IPv4, IPv6 and DNS egress denied).
+    - They come from a program pinned with `start --isolation-producer`, and must be bound to that sample.
+    - An unattested sample earns nothing. A breach, a reboot or a changed ruleset fails the run.
+    - The run's baseline is written once, at admission. The admission record now publishes `isolation` and `baselineSource`.
+  - **The relay reads the guest once, and its record proves itself.**
+    - It pins the guest's commit, so a guest moving its branch mid-relay cannot publish an unchecked commit.
+    - Each remote has its own relay repository, held under a lock.
+    - The record is created once, binding the commit, its tree and the digests of the admission, the scorecard and the finalization.
+    - `verifyRecord` re-derives every binding from the public branch.
+    - A host GitHub failure now leaves a recorded reason in each sample it affects.
 
 - **Release-candidate certification is hardened for the soak** (#2020 integration of #1962 and #1975).
   - **A failed publish is always recorded and reported, never thrown.** This covers a publisher that could not even be built, and a status file that cannot be written.

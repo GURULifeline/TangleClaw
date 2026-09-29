@@ -70,6 +70,14 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
     - R-1, a real time-of-check/time-of-use hole: the relay read the untrusted guest's branch several times, so a guest moving it after the history check could get an unverified commit published. The guest is now fetched once, pinned by OID, and only that commit is verified, compared and pushed. The regression test fails on the old relay.
     - R-3: one relay repo per remote, held under a lock for the whole relay.
     - R-5: a verdict the host could not read GitHub for carries a closed `reason`, covered by its digest. It is reported on the host (`host-github-unavailable`) and surfaced as the guest sample's diagnostic.
+- **B7: Architect rulings A43, A44, A47, A51 and A54** (received late; order confirmed by PM `e0a8330f` and Architect A57).
+  - `lib/release-certification/isolation.js` judges joined admin and workload attestations, per sample and bound to it, from the pinned `--isolation-producer`.
+  - The state machine extends on an unattested sample (`ISOLATION_UNATTESTED`), and hard-fails on `ISOLATION_BREACHED`, `BOOT_CHANGED` or `ISOLATION_CHANGED` against a write-once admission baseline (ttyd generation, boot identity, ruleset digest, both attestation digests).
+  - The admission record publishes `isolation` and `baselineSource: admission`.
+  - Finalization joins each earning sample's isolation binding and records `bootId` and `sampleSetDigest`.
+  - The relay's record is create-once (`record-<runId>-<oid>.json`) and binds the commit, its tree, the admission, scorecard and finalization digests, the boot identity and the sample-set digest. `verifyRecord` re-derives all of them.
+  - A test caught a real gap here: a root workload read as malformed (unattested) instead of as a breach, because the validator rejected uid 0. Fixed.
+  - **Process incident:** a full suite ran at `44e768f1` without the PM's quiet-window lease (A40), because the inbox was not read between chunks. It is quarantined as non-evidence. A learning now requires reading the inbox before any gated action.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
   - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).

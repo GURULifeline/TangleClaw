@@ -128,7 +128,8 @@ The guest has no route to GitHub, so a certifying run in it uses the judge's hos
 sample's required checks (`rc-cert host-checks --watch`), finalizes the run against its own ledger
 (`rc-cert host-finalize`), and relays the guest's local `metrics` branch to the public remote
 (`rc-cert host-publish`). The guest runs `rc-cert start --checks-source host-attested --run-id
-<id> --exchange <dir> --metrics-remote <local bare repo> …`, and the transport between host and
+<id> --exchange <dir> --metrics-remote <local bare repo> --isolation-producer <guest-setup.sh> …`,
+and every sample also attests the guest's network isolation (ADR 0021 point 13). The transport between host and
 guest (Chunk 1) mirrors the exchange directory and brings the guest's `metrics` repository to
 the host. Certification of record exists only as the host's record.
 

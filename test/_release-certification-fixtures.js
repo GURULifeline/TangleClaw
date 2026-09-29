@@ -13,6 +13,7 @@
  */
 
 const sm = require('../lib/release-certification/state-machine');
+const isolation = require('../lib/release-certification/isolation');
 
 const SHA = 'a'.repeat(40);
 const WTID = 'c'.repeat(64);
@@ -43,6 +44,37 @@ function manifest(over = {}) {
     ...over
   });
 }
+
+/** The guest's boot identity and packet-filter ruleset digest in the fixture run. */
+const BOOT_ID = 'boot-4f1c';
+const RULESET = 'd'.repeat(64);
+
+/**
+ * A manifest for a run in a guest: host-attested checks, a local metrics
+ * repository, and attested network isolation.
+ * @param {object} [over] - Fields to set or replace
+ * @returns {object} Manifest
+ */
+function guestManifest(over = {}) {
+  return manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh', ...over });
+}
+
+/**
+ * The two isolation attestations a healthy guest produces for one sample.
+ * @param {object} binding - `{candidateSha, runId, manifestDigest, sampleSeq}`
+ * @param {object} [over] - `{admin, workload}` field overrides
+ * @returns {{admin: object, workload: object}} The pair
+ */
+function isolationPair(binding, over = {}) {
+  const b = { candidateSha: binding.candidateSha, runId: binding.runId, manifestDigest: binding.manifestDigest, sampleSeq: binding.sampleSeq };
+  return {
+    admin: { schema: isolation.ADMIN_SCHEMA, ...b, bootId: BOOT_ID, pfEnabled: true, rulesetSha256: RULESET, interfaces: ['lo0=127.0.0.1'], managementPath: 'closed', observedAt: T0, ...over.admin },
+    workload: { schema: isolation.WORKLOAD_SCHEMA, ...b, bootId: BOOT_ID, uid: 501, groups: [20], sudoRefused: true, pfctlRefused: true, loopbackApi: true, egressDenied: { ipv4: true, ipv6: true, dns: true }, observedAt: T0, ...over.workload }
+  };
+}
+
+/** An attested, healthy isolation observation, as the probe reports it. */
+const ISOLATED = Object.freeze({ state: 'ok', bootId: BOOT_ID, rulesetSha256: RULESET, adminDigest: 'a'.repeat(64), workloadDigest: 'b'.repeat(64) });
 
 /**
  * Observations of a healthy candidate, with every field the probes emit.
@@ -76,4 +108,4 @@ function sample(t, obs = observations(), extra = {}) {
   return { wallAt: T0 + t, monoAt: t, runnerInstance: 'r1', observations: obs, ...extra };
 }
 
-module.exports = { SHA, WTID, GEN, MIN, T0, RUN_ID, manifest, observations, sample };
+module.exports = { SHA, WTID, GEN, MIN, T0, RUN_ID, BOOT_ID, RULESET, ISOLATED, manifest, guestManifest, isolationPair, observations, sample };

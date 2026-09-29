@@ -40,12 +40,13 @@ const publisherLib = require('../lib/release-certification/publisher');
 const publicationLib = require('../lib/release-certification/publication');
 const hostChecks = require('../lib/release-certification/host-checks');
 const hostPublish = require('../lib/release-certification/host-publish');
+const isolationLib = require('../lib/release-certification/isolation');
 const { RUN_ID_RE } = require('../lib/release-certification/formats');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
 const USAGE = [
   'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>] [--no-publish-actor]',
-  '                      [--metrics-remote <abs>] [--checks-source host-attested --run-id <32 hex> --exchange <abs>]   (host-attested needs --repo, --required-check and --metrics-remote)',
+  '                      [--metrics-remote <abs>] [--checks-source host-attested --run-id <32 hex> --exchange <abs> --isolation-producer <abs>]   (host-attested needs --repo, --required-check and --metrics-remote)',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
   '       rc-cert accept --sha <40> --actor <id>',
@@ -190,7 +191,9 @@ function _probeCtx(flags, env, spec) {
     maxReadingAgeMs: spec.maxReadingAgeMs,
     checksSource: spec.checksSource || 'gh',
     runId: spec.runId ?? null,
-    exchangeDir: spec.exchangeDir ?? null
+    exchangeDir: spec.exchangeDir ?? null,
+    isolation: spec.isolationProducer ? 'attested' : 'none',
+    verifyNetwork: spec.isolationProducer ? isolationLib.producer(spec.isolationProducer) : null
   };
 }
 
@@ -358,9 +361,10 @@ async function cmdStart(c) {
   const hostAttested = checksSource === 'host-attested';
   // A host-attested runner has no route to GitHub, so everything it would
   // otherwise look up there comes from the host that minted its run id.
-  if (hostAttested && (!c.flags.repo || !c.flags['required-check'] || !c.flags['run-id'] || !c.flags.exchange)) {
-    throw new UsageError('--checks-source host-attested needs --repo, --required-check, --run-id and --exchange from the host');
+  if (hostAttested && (!c.flags.repo || !c.flags['required-check'] || !c.flags['run-id'] || !c.flags.exchange || !c.flags['isolation-producer'])) {
+    throw new UsageError('--checks-source host-attested needs --repo, --required-check, --run-id and --exchange from the host, and --isolation-producer');
   }
+  const isolationProducer = hostAttested ? _absolute(c.flags['isolation-producer'], '--isolation-producer') : null;
   if (c.flags['run-id'] !== undefined && !RUN_ID_RE.test(c.flags['run-id'])) throw new UsageError('--run-id must be 32 lowercase hex characters');
   // With `gh` checks this process is the host, so it mints the run id itself.
   const runId = c.flags['run-id'] || crypto.randomBytes(16).toString('hex');
@@ -371,7 +375,7 @@ async function cmdStart(c) {
   const version = runnerLib.worktreeVersion(worktreePath);
   if (!version) throw new UsageError('the worktree has no readable version.json');
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
-  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs, checksSource, runId, exchangeDir }));
+  const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs, checksSource, runId, exchangeDir, isolationProducer }));
   const publishActor = !c.flags['no-publish-actor'];
   // A guest publishes only to the local bare repository the host relays from.
   if (hostAttested && !c.flags['metrics-remote']) throw new UsageError('--checks-source host-attested needs --metrics-remote <abs>, the local bare repository the host relays from');
@@ -382,7 +386,7 @@ async function cmdStart(c) {
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const state = await runner.start({
     version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
-    publishActor, remoteUrl, runId, checksSource, checksExchange: exchangeDir
+    publishActor, remoteUrl, runId, checksSource, checksExchange: exchangeDir, isolationProducer
   });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
   return 0;
@@ -408,7 +412,8 @@ async function cmdRun(c) {
   const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, {
     sha, worktreePath: manifest.private.worktreePath, repo: manifest.repository,
     requiredChecks: manifest.requiredChecks, maxReadingAgeMs: manifest.thresholds.maxIntervalMs,
-    checksSource: manifest.checksSource, runId: manifest.runId, exchangeDir: manifest.private.checksExchange
+    checksSource: manifest.checksSource, runId: manifest.runId, exchangeDir: manifest.private.checksExchange,
+    isolationProducer: manifest.private.isolationProducer
   }));
   const publication = c.deps.publication || _runPublication(c, sha, manifest);
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
