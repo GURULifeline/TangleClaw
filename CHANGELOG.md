@@ -24,7 +24,7 @@ All notable changes to TangleClaw are documented in this file.
     - While reconciling, only workload, the control ack, and answers within the checkpoint's own messages go through.
     - Resume also needs a one-time nonce that only the re-entry instruction carries and that the server stores hashed.
   - **Relaunch instead of clear.** `prepare` with `mode: "relaunch"` keeps the hold across the coordinator's session ending.
-    - Once the old session has ended, the operator's relaunch claim (`POST /api/tc/rotation/relaunch`) starts the successor and binds exactly that session to the rotation.
+    - Once the old session is recorded as ended, the operator's relaunch claim (`POST /api/tc/rotation/relaunch`) starts the successor and binds exactly that session to the rotation. The successor gets no coordinator authority until its own launch sequence is attested READY (`tc start ready`).
     - Any other launch stays held.
   - **Seeing where a rotation stands.** Every open rotation shows its state, blocker, checkpoint digest, receipt verdict and exactly one next command. It appears in `tc rotation show`, on each rotating lane in `tc sessions`, and in the operator's `GET /api/rotations`.
   - **Live check.** `scripts/rotation-live-check.js` is a live check an independent executor runs inside a real Codex pane before merge.
