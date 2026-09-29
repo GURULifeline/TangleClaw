@@ -53,6 +53,9 @@ All notable changes to TangleClaw are documented in this file.
   - **No time before a green admission.** Admission stages the manifest first, so no run and no time exist before a green answer for that exact manifest.
   - **The host has the last word.** `rc-cert host-finalize` joins the run's exported samples against the ledger and reads the checks once more. It fails on any gap, mismatch, stale answer, non-green check or drift, and records the outcome for that run alone.
   - **The published admission record now carries `checksSource` and `runId`**, and every scorecard carries `checksSource`, so anyone reading the `metrics` branch can tell which runs still owe the host's finalization.
+  - **The guest publishes only to a local repository.** A host-attested run's `--metrics-remote` must be an absolute path; a URL, `file://` or `host:path` is refused.
+  - **`rc-cert host-publish` relays exactly what the guest published.** It pushes the guest's exact commit to the public remote, fast-forward only and never forced. It relays only after the host's `ok` finalization of that run, and only when the guest's whole history passes the branch verifier. It then reads the remote back, and the result counts as certification of record only in the host's record: a `passed`, canonical run with an `ok` finalization. No credential enters the guest.
+  - **A run that withholds the operator id no longer needs any git configuration** when its remote is pinned, since a guest has none.
 
 - **Release-candidate certification is hardened for the soak** (#2020 integration of #1962 and #1975).
   - **A failed publish is always recorded and reported, never thrown.** This covers a publisher that could not even be built, and a status file that cannot be written.

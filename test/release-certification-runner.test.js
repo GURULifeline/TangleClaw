@@ -626,7 +626,7 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     const r = runnerLib.createRunner({ publication: opts.pub || fakePub(), base, candidateSha: SHA, probes: probesStub, clock: ticking });
     return { r, f, base, exchange, hostBase, requests };
   }
-  const specFor = (h) => ({ ...SPEC_HA, checksExchange: h.exchange });
+  const specFor = (h) => ({ ...SPEC_HA, checksExchange: h.exchange, remoteUrl: path.join(tmp, 'metrics.git') });
 
   it('admits only on a verdict bound to the staged manifest, then binds every sample to its own number', async () => {
     const h = hostAttested();
@@ -770,8 +770,8 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
 
   it('refuses a host-attested start missing anything only the host can supply', async () => {
     const wt = worktree();
-    const full = ['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', fx.RUN_ID, '--exchange', path.join(tmp, 'x')];
-    for (const drop of ['--repo', '--required-check', '--run-id', '--exchange']) {
+    const full = ['start', '--sha', SHA, '--worktree', wt, '--api', 'http://x', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--metrics-remote', path.join(tmp, 'm.git'), '--run-id', fx.RUN_ID, '--exchange', path.join(tmp, 'x')];
+    for (const drop of ['--repo', '--required-check', '--metrics-remote', '--run-id', '--exchange']) {
       const i = full.indexOf(drop);
       const argv = [...full.slice(0, i), ...full.slice(i + 2)];
       assert.equal((await run(argv)).code, 2, `missing ${drop}`);
@@ -815,7 +815,7 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
       runner: (ctx) => runnerLib.createRunner({ ...ctx, publication: fakePub(), clock: ticking })
     };
     const TH = JSON.stringify({ targetQualifiedMs: 2 * MIN, ptyMinAttaches: 1, ptyMinDetaches: 1, ptyMinSpanMs: 1 });
-    const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', runId, '--exchange', exchange, '--thresholds', TH], { deps });
+    const started = await run(['start', '--sha', SHA, '--worktree', wt, '--base', base, '--api', 'http://127.0.0.1:1', '--checks-source', 'host-attested', '--repo', 'o/r', '--required-check', 'test', '--run-id', runId, '--exchange', exchange, '--metrics-remote', path.join(tmp, 'metrics.git'), '--thresholds', TH], { deps });
     assert.equal(started.code, 0, started.err);
     assert.deepEqual([probeCtxs[0].checksSource, probeCtxs[0].runId, probeCtxs[0].exchangeDir], ['host-attested', runId, exchange]);
     const controller = new AbortController();

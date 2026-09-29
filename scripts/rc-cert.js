@@ -39,12 +39,13 @@ const runnerLib = require('../lib/release-certification/runner');
 const publisherLib = require('../lib/release-certification/publisher');
 const publicationLib = require('../lib/release-certification/publication');
 const hostChecks = require('../lib/release-certification/host-checks');
+const hostPublish = require('../lib/release-certification/host-publish');
 const { RUN_ID_RE } = require('../lib/release-certification/formats');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
 
 const USAGE = [
   'usage: rc-cert start  --sha <40> --worktree <abs> [--repo owner/name] [--required-check <name>]... [--thresholds <json>] [--no-publish-actor]',
-  '                      [--checks-source host-attested --run-id <32 hex> --exchange <abs>]   (host-attested needs --repo and --required-check)',
+  '                      [--metrics-remote <abs>] [--checks-source host-attested --run-id <32 hex> --exchange <abs>]   (host-attested needs --repo, --required-check and --metrics-remote)',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
   '       rc-cert accept --sha <40> --actor <id>',
@@ -54,6 +55,7 @@ const USAGE = [
   'host:  rc-cert host-mint     --sha <40> --repo owner/name --required-check <name>... --host-base <abs>',
   '       rc-cert host-checks   --sha <40> --exchange <abs> --host-base <abs> [--watch --interval <ms>]',
   '       rc-cert host-finalize --sha <40> --host-base <abs> [--base <abs>]',
+  '       rc-cert host-publish  --sha <40> --guest-metrics <abs> --remote <url> --host-base <abs>',
   'common: [--base <abs>] [--api <url>] [--ca <file>]; a gated API reads its token from TANGLECLAW_SERVICE_TOKEN'
 ].join('\n');
 const REPEATABLE = new Set(['required-check']);
@@ -209,17 +211,38 @@ const NEUTRAL_IDENTITY = Object.freeze({ name: 'TangleClaw release certification
  */
 async function _publication(c, sha, where) {
   if (c.deps.publication) return c.deps.publication;
-  // Git facts are read only when needed: a pinned remote with the actor
-  // withheld needs none, so a runner without git config can still publish.
-  const needFacts = !where.remoteUrl || where.publishActor;
-  const facts = needFacts ? await (c.deps.repoFacts || publisherLib.repoFacts)(where.worktreePath) : null;
+  // Each git fact is read only when needed: the origin when no remote is
+  // pinned, the identity only when the operator's id is published. A pinned
+  // remote with the actor withheld needs no git config at all, as a guest may
+  // have none.
+  const remoteUrl = where.remoteUrl || await _repoRemote(c, where.worktreePath);
   const publisher = publisherLib.createPublisher({
     dir: path.join(c.base, '_metrics'),
-    remoteUrl: where.remoteUrl || facts.remoteUrl,
-    identity: where.publishActor ? facts.identity : NEUTRAL_IDENTITY,
+    remoteUrl,
+    identity: where.publishActor ? await _repoIdentity(c, where.worktreePath) : NEUTRAL_IDENTITY,
     onRecover: (fact) => c.emit({ event: 'recovered', ...fact })
   });
   return publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher });
+}
+
+/**
+ * The worktree's origin (`deps.repoFacts` stands in for both facts in tests).
+ * @param {object} c - Command context
+ * @param {string} worktreePath - Worktree
+ * @returns {Promise<string>} Remote URL
+ */
+async function _repoRemote(c, worktreePath) {
+  return c.deps.repoFacts ? (await c.deps.repoFacts(worktreePath)).remoteUrl : publisherLib.repoRemote(worktreePath);
+}
+
+/**
+ * The operator's git identity (`deps.repoFacts` stands in for both facts in tests).
+ * @param {object} c - Command context
+ * @param {string} worktreePath - Worktree
+ * @returns {Promise<{name: string, email: string}>} Identity
+ */
+async function _repoIdentity(c, worktreePath) {
+  return c.deps.repoFacts ? (await c.deps.repoFacts(worktreePath)).identity : publisherLib.repoIdentity(worktreePath);
 }
 
 /**
@@ -350,12 +373,16 @@ async function cmdStart(c) {
   const maxReadingAgeMs = { ...sm.DEFAULT_THRESHOLDS, ...thresholds }.maxIntervalMs;
   const probes = (c.deps.probes || probesLib.createProbes)(_probeCtx(c.flags, c.env, { sha, worktreePath, repo, requiredChecks, maxReadingAgeMs, checksSource, runId, exchangeDir }));
   const publishActor = !c.flags['no-publish-actor'];
-  const facts = c.deps.publication ? { remoteUrl: null } : await (c.deps.repoFacts || publisherLib.repoFacts)(worktreePath);
-  const publication = await _publication(c, sha, { worktreePath, remoteUrl: facts.remoteUrl, publishActor });
+  // A guest publishes only to the local bare repository the host relays from.
+  if (hostAttested && !c.flags['metrics-remote']) throw new UsageError('--checks-source host-attested needs --metrics-remote <abs>, the local bare repository the host relays from');
+  let remoteUrl = null;
+  if (c.flags['metrics-remote']) remoteUrl = _absolute(c.flags['metrics-remote'], '--metrics-remote');
+  else if (!c.deps.publication) remoteUrl = await _repoRemote(c, worktreePath);
+  const publication = await _publication(c, sha, { worktreePath, remoteUrl, publishActor });
   const runner = (c.deps.runner || runnerLib.createRunner)({ base: c.base, candidateSha: sha, probes, publication, log: c.emit });
   const state = await runner.start({
     version, repository: repo, worktreePath, requiredChecks, requiredChecksSource, thresholds,
-    publishActor, remoteUrl: facts.remoteUrl, runId, checksSource, checksExchange: exchangeDir
+    publishActor, remoteUrl, runId, checksSource, checksExchange: exchangeDir
   });
   c.out.write(`${JSON.stringify({ state: state.state, candidateSha: sha })}\n`);
   return 0;
@@ -472,6 +499,24 @@ async function cmdHostFinalize(c) {
   return outcome.ok ? 0 : 3;
 }
 
+/**
+ * `host-publish`: relay a finalized host-attested run's `metrics` branch from
+ * the guest's local repository to the public remote, read it back, and record
+ * whether it is a certification of record. Exit 0 relayed, 3 refused.
+ * @param {object} c - Command context
+ * @returns {Promise<number>} Exit code
+ */
+async function cmdHostPublish(c) {
+  const record = await hostPublish.relay({
+    hostBase: _absolute(_need(c.flags, 'host-base'), '--host-base'),
+    candidateSha: _need(c.flags, 'sha'),
+    guestMetrics: _absolute(_need(c.flags, 'guest-metrics'), '--guest-metrics'),
+    remoteUrl: _need(c.flags, 'remote')
+  });
+  c.out.write(`${JSON.stringify(record)}\n`);
+  return 0;
+}
+
 /** Each command's handler. */
 const COMMANDS = Object.freeze({
   list: cmdList,
@@ -483,7 +528,8 @@ const COMMANDS = Object.freeze({
   publish: cmdPublish,
   'host-mint': cmdHostMint,
   'host-checks': cmdHostChecks,
-  'host-finalize': cmdHostFinalize
+  'host-finalize': cmdHostFinalize,
+  'host-publish': cmdHostPublish
 });
 
 /**

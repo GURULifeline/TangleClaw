@@ -236,7 +236,7 @@ describe('host checks: the guest accepts only a verdict bound to its own sample'
 });
 
 describe('host checks: finalization trusts only the host\'s own ledger', () => {
-  const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x' });
+  const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' });
 
   /**
    * Take samples 1..n through the real exchange, each answered by the host.
@@ -348,8 +348,8 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => A });
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => B });
     const base = { hostBase, manifestDigest: DIGEST, samples: [], state: { state: 'awaiting-review', sampleCount: 0 }, now: () => T0 };
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x' }), observe: observer().observe });
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' }), observe: observer().observe });
+    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
     assert.equal(hc.readFinalization(hostBase, SHA, A).ok, true);
     assert.equal(hc.readFinalization(hostBase, SHA, B).ok, false);
     assert.equal(hc.readFinalization(hostBase, SHA, 'c'.repeat(32)), null);
@@ -357,7 +357,7 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
 
   it('fails a run whose evidence is missing a committed sample, or whose verdict came from another request window', async () => {
     mint();
-    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x' });
+    const manifest = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git' });
     const out = [];
     for (let seq = 1; seq <= 3; seq++) {
       const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST });

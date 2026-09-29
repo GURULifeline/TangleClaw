@@ -61,6 +61,11 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
   - R-4 and R-13: finalization requires every committed sample, each taken within one interval of its own request.
   - R-9: the seq-moved diagnostic joins the closed set.
   - **Tests replaced, not weakened:** the two `STALE` rows in `test/release-certification-host-checks.test.js` encoded a cross-clock freshness rule the review showed was wrong (a guest clock ahead of the host's made every verdict stale). They are replaced by tests that a far-behind or far-ahead host clock still validates and is answered once. Freshness is now pinned by the guest-clock checks in finalization.
+- **B4: split-plane publication (Q2).**
+  - A host-attested manifest must publish to an absolute local path.
+  - `rc-cert host-publish` relays the guest's exact tip to the public remote, fast-forward only. It first requires the host's `ok` finalization of that run and manifest digest, and a clean verifier run over the guest's whole history. It then reads the remote back (the OID, plus the admission and scorecard bytes), and only then writes `record-<runId>.json`. That record is the only certification of record: `certified` means `passed`, canonical and finalized.
+  - R-4 (B1 review): the origin and the identity are read separately, so a pinned remote with a withheld actor needs no git config.
+  - Tests: `test/release-certification-host-publish.test.js`, against two local bare repos, mutation-checked on each fail-closed step.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.
   - The planned `HOST_FINALIZATION_FAILED` refusal was built as `host-finalize` exit 3 with closed reasons (`host-checks.js#FINALIZATION`).

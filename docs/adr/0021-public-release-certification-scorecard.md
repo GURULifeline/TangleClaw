@@ -153,12 +153,28 @@ to be able to trust it. That creates two problems:
    seen when it was staged. A retry that reuses the public manifest after the ttyd changed is
    admitted against what it now observes, and a generation change during the run still fails it.
 
+12. **A guest publishes only to a local repository; the host relays exactly what it published**
+   (#2020, Architect rulings Q2 and A31 constraint 4). A host-attested run's manifest must name its
+   publish remote by an absolute path, so git cannot turn it into a network transport; a URL,
+   `file://` or `host:path` is refused. The guest's publisher, preflight and verifier are the same
+   as on a host, pointed at a local bare `metrics`. `rc-cert host-publish` then relays it: the
+   host's own `ok` finalization of that run and manifest digest must exist; the guest's whole
+   history must pass the branch verifier; the guest's tip is pushed to the public remote as that
+   exact commit, fast-forward only and never forced; and the remote is read back, which must name
+   that commit and hold the candidate's admission and scorecard byte for byte. Only then does the
+   host write its record, and the record says a run is certified only for a `passed` scorecard
+   judged by canonical thresholds with an `ok` finalization. Only the host process ever names the
+   public remote, so no credential enters the guest, and GitHub's availability decides when a
+   result is published, never how much time a run earned.
+
 ## Consequences
 
 - Until the owner creates the `metrics` ruleset, the digest is published but not tamper-proof. The
   C02 PR says so, and C04 must not treat the branch as binding before then.
-- Admission now depends on GitHub being reachable. A GitHub outage delays a start but never
-  shortens or lengthens a run in progress.
+- On a host (`gh` checks), admission depends on GitHub being reachable. A GitHub outage delays a
+  start but never shortens or lengthens a run in progress. In a guest (host-attested), admission
+  depends on the host answering its checks and on the local `metrics` repository; GitHub matters
+  only when the host relays the result.
 - There are three validators (the host before pushing, the branch check, and promotion) but one
   definition. A change to a published shape happens in `scorecard.js`, and all three follow.
 - Times are published as epoch milliseconds in UTC. Human formatting, including the registry

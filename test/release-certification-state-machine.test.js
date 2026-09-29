@@ -105,7 +105,11 @@ describe('buildManifest', () => {
     ['an unknown checks source', { checksSource: 'github' }],
     ['a host-attested run with no exchange directory', { checksSource: 'host-attested' }],
     ['a host-attested run with a relative exchange directory', { checksSource: 'host-attested', checksExchange: 'x' }],
-    ['an exchange directory on a gh run', { checksExchange: '/x' }]
+    ['an exchange directory on a gh run', { checksExchange: '/x' }],
+    ['a host-attested run publishing to a URL', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'https://github.com/o/r.git' }],
+    ['a host-attested run publishing to a file:// URL', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'file:///x/metrics.git' }],
+    ['a host-attested run publishing to host:path', { checksSource: 'host-attested', checksExchange: '/x', publishRemote: 'github.com:o/r.git' }],
+    ['a host-attested run with no publish remote', { checksSource: 'host-attested', checksExchange: '/x' }]
   ]) {
     it(`refuses ${name}`, () => {
       refuses(() => sm.buildManifest({
