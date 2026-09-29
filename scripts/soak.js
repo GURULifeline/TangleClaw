@@ -289,7 +289,7 @@ async function main(argv, deps = {}) {
     if (err instanceof driver.DriverRefusal) {
       // A lock lost during a run that also failed rides along as a secondary
       // fact; the primary refusal stays the headline.
-      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details, ...(err.lockLost ? { lockLost: err.lockLost } : {}), ...(err.ownershipUnverified ? { ownershipUnverified: err.ownershipUnverified } : {}), ...(err.lockReleaseFailed ? { lockReleaseFailed: err.lockReleaseFailed } : {}), ...(err.segmentCloseFailed ? { segmentCloseFailed: err.segmentCloseFailed } : {}), ...(err.lockRelease ? { lockRelease: err.lockRelease } : {}) })}\n`);
+      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details, ...(err.lockLost ? { lockLost: err.lockLost } : {}), ...(err.ownershipUnverified ? { ownershipUnverified: err.ownershipUnverified } : {}), ...(err.recoveryPending ? { recoveryPending: err.recoveryPending } : {}), ...(err.lockReleaseFailed ? { lockReleaseFailed: err.lockReleaseFailed } : {}), ...(err.segmentCloseFailed ? { segmentCloseFailed: err.segmentCloseFailed } : {}), ...(err.lockRelease ? { lockRelease: err.lockRelease } : {}) })}\n`);
       return 3;
     }
     throw err;

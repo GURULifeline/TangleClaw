@@ -13,6 +13,8 @@ records what happened.
 > - the guest itself;
 > - the executors for the `browser` and `fault` classes;
 > - integrity sampling, the evidence bundle and the operator runbook;
+> - the certification judge (Chunks 3 and 4 of #2020, with the link to rc-cert). Until it exists,
+>   nothing but `run`'s exit 5 acts on a log's ownership-unverified disposition;
 > - **Chunk 2B, mandatory before the first guest dry run** (Architect ruling):
 >   - API load against plans and the switchboard (this chunk, 2A, covers health, server-info,
 >     projects and ports);
@@ -175,7 +177,12 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
       `certification` disposition: `automaticPassAllowed: false`, `defaultDisposition: "fail-reset"`.
       The Operator may accept the log instead, but only its exact evidence: the disposition names
       the log's path, size and sha256, and `acceptanceMatches` holds only for an acceptance of
-      exactly those. A certification judge enforces the disposition through these fields.
+      exactly those. These fields are what the certification judge will read, and nothing reads
+      them yet: the judge is not built (see the status note at the top).
+    - A resume that fails before its `resume` record is durable (a wrong `--schedule`, a damaged
+      log, a failed write) releases nothing and closes nothing. It reports `recoveryPending`, and
+      leaves the lock and segment as a crash would, so the next run can only resume through the same
+      exact-owner reclaim, which records the mark again. A failure never erases the mark.
   - A marker that was altered, or no longer matches the log, is refused (`LOG_SEGMENT_INVALID`). That
     includes a `stopped-clean` marker whose log has changed since the stop.
   - **A marker that cannot be removed at the end fails the run with `SEGMENT_CLOSE_FAILED`.** The

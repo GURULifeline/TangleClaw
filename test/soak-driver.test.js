@@ -1517,6 +1517,70 @@ describe('soak driver — ownership that cannot be verified', () => {
     assert.equal(driver.acceptanceMatches(driver.readLog(logPath).certification, exact), false, 'an acceptance does not follow the log once it changes');
   });
 
+  describe('a recovery that fails before it is recorded', () => {
+    /**
+     * Resume an exact-owner crash under a (dead) identity that `fail` makes
+     * fail before the resume record, then resume it correctly.
+     * @param {object} over - What makes the first resume fail
+     * @param {Function} [after] - Undo the failure before the correct rerun
+     * @returns {Promise<object>} The correct rerun's result
+     */
+    async function failThenResume(over, after) {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(owner));
+      const before = fs.readFileSync(logPath);
+      const second = { pid: deadPid(), host: os.hostname() };
+      let caught = null;
+      try {
+        await run({ lockDeps: { pid: second.pid }, ...over });
+      } catch (err) { // the failure under test
+        caught = err;
+      } finally {
+        if (after) after();
+      }
+      assert.ok(caught, 'the first resume failed');
+      assert.deepEqual(caught.recoveryPending.owner, second, 'the failure says the recovery is still pending');
+      assert.equal(fs.readFileSync(`${logPath}.lock`, 'utf8'), JSON.stringify(second), 'the lock is left as a crash would leave it');
+      assert.deepEqual([driver.readSegment(logPath).state, driver.readSegment(logPath).owner], ['active', second], 'and so is the segment');
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false);
+      assert.ok(fs.readFileSync(logPath).subarray(0, before.length).equals(before));
+      const result = await run();
+      assert.equal(result.ownershipUnverified, true);
+      assert.equal(driver.readLog(logPath).certification.automaticPassAllowed, false);
+      return result;
+    }
+
+    it('keeps the mark through a resume with the wrong schedule', async () => {
+      const result = await failThenResume({ schedule: apiSchedule({ seed: 'other' }) });
+      assert.equal(result.status, 'completed-ownership-unverified');
+    });
+
+    it('never lets a resume that finds the log damaged end clean, repaired or not', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(owner));
+      const original = fs.readFileSync(logPath);
+      fs.appendFileSync(logPath, 'garbage\n{"type":"note"}\n'); // damage in the middle, after the marker's bound prefix
+      const second = { pid: deadPid(), host: os.hostname() };
+      await assert.rejects(run({ lockDeps: { pid: second.pid } }), (err) => err.code === 'LOG_UNREADABLE' && err.recoveryPending.owner.pid === second.pid);
+      assert.equal(fs.readFileSync(`${logPath}.lock`, 'utf8'), JSON.stringify(second), 'left as a crash would leave it');
+      await assert.rejects(run({ lockDeps: { pid: deadPid() } }), (err) => err.code === 'LOG_UNREADABLE' && !!err.recoveryPending, 'still pending, not laundered');
+      fs.writeFileSync(logPath, original);
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_INVALID', 'a repair under an open segment is a rewrite, and refused');
+    });
+
+    it('keeps the mark through a resume whose record could not be written', { skip: asRoot }, async () => {
+      let restore;
+      const result = await failThenResume({
+        clock: (() => {
+          const c = fakeClock(T0);
+          let done = false;
+          return { ...c, now: () => { if (!done) { done = true; fs.chmodSync(logPath, 0o400); restore = () => fs.chmodSync(logPath, 0o600); } return c.now(); } };
+        })()
+      }, () => restore());
+      assert.equal(result.status, 'completed-ownership-unverified');
+    });
+  });
+
   describe('exact owner and exact bindings', () => {
     it('never resumes when the lock names the marker\'s pid on another host', async () => {
       const owner = { pid: deadPid(), host: os.hostname() };
