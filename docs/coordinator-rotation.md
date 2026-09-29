@@ -297,7 +297,7 @@ reason. Claude keeps its own re-entry path: the SessionStart hook's re-entry pre
   are the emergency operator surface.
 
 Implementation: `lib/coordinator-rotation.js`, `lib/startup-control-codex.js` (`rotationThreads`,
-`rebindThread`, `deliverTurn`) and the `coordinator_rotations` and `coordinator_roles` tables (schema v52). Tests:
+`rebindThread`, `deliverTurn`) and the `coordinator_rotations` and `coordinator_roles` tables (schema v51). Tests:
 `test/coordinator-rotation.test.js`, `test/api-coordinator-rotation.test.js` and
 `test/tc-rotation-verb.test.js` and `test/checkout-fingerprint.test.js`. The checkout fingerprint is
 `lib/checkout-fingerprint.js`.

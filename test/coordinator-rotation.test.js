@@ -1178,8 +1178,8 @@ describe('coordinator context rotation (#2032)', () => {
     });
   });
 
-  describe('schema v52 migration', () => {
-    it('upgrades an older store: the tables and their one-open indexes appear, and the version advances', () => {
+  describe('schema v51 migration', () => {
+    it('upgrades a v50 store directly to v51: the tables and their one-open indexes appear', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-mig-'));
       const saved = store._getBasePath();
       store.close();
@@ -1191,7 +1191,7 @@ describe('coordinator context rotation (#2032)', () => {
         const db = new DatabaseSync(dbPath);
         db.exec('DROP TABLE coordinator_rotations');
         db.exec('DROP TABLE coordinator_roles');
-        db.exec('DELETE FROM schema_version WHERE version >= 52');
+        db.exec('DELETE FROM schema_version WHERE version >= 51');
         db.exec('INSERT INTO schema_version (version) VALUES (50)');
         db.close();
 
@@ -1200,7 +1200,8 @@ describe('coordinator context rotation (#2032)', () => {
         store.close();
         const after = new DatabaseSync(dbPath);
         try {
-          assert.equal(after.prepare('SELECT MAX(version) v FROM schema_version').get().v, store.CURRENT_SCHEMA_VERSION);
+          assert.equal(after.prepare('SELECT MAX(version) v FROM schema_version').get().v, 51);
+          assert.equal(store.CURRENT_SCHEMA_VERSION, 51, 'v51 is this migration: #2032 lands first (ruling A17)');
           const index = after.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_coordinator_rotations_open'").get();
           assert.match(index.sql, /UNIQUE/);
           assert.match(index.sql, /WHERE state IN/);
@@ -1208,6 +1209,30 @@ describe('coordinator context rotation (#2032)', () => {
           assert.match(roles.sql, /UNIQUE/);
         } finally {
           after.close();
+        }
+      } finally {
+        store._setBasePath(saved);
+        store.init();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a fresh install is stamped v51 with both tables and their indexes, and no migration ran', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-fresh-'));
+      const saved = store._getBasePath();
+      store.close();
+      try {
+        store._setBasePath(dir);
+        store.init();
+        store.close();
+        const db = new DatabaseSync(path.join(dir, 'tangleclaw.db'));
+        try {
+          assert.deepEqual(db.prepare('SELECT version FROM schema_version').all().map((r) => r.version), [51]);
+          for (const name of ['coordinator_rotations', 'coordinator_roles', 'idx_coordinator_rotations_open', 'idx_coordinator_roles_active']) {
+            assert.ok(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name), name);
+          }
+        } finally {
+          db.close();
         }
       } finally {
         store._setBasePath(saved);

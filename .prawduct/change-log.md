@@ -64,7 +64,7 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 **Reproduction first.** `test/coordinator-rotation.test.js` opens with the incident against the fake app-server: the recorded thread unloads, a replacement loads, observation answers `thread-not-loaded` and keeps the old binding. It still does after this change, with or without an open rotation, so the #1628/D8 invariant (observation never replaces a recorded thread) holds.
 
 **The change.**
-- **Record and fence.** A `coordinator_rotations` record (schema v52 after the A1 renumber; v51 is claimed by #1971 and #1966) is created by `prepare` together with a validated, canonical-JSON-digested checkpoint and the inbox ids at that moment, in one insert, so the checkpoint never exists without the fence. A partial unique index allows one open rotation per project.
+- **Record and fence.** A `coordinator_rotations` record (schema v51) is created by `prepare` together with a validated, canonical-JSON-digested checkpoint and the inbox ids at that moment, in one insert, so the checkpoint never exists without the fence. A partial unique index allows one open rotation per project.
 - **Clear and rebind.** The server's driver types `/clear` when the prior thread is idle, then binds the one provable replacement through `startup-control-codex#rebindThread`: new since the clear, root, same directory, prior gone. That function is a compare-and-set on the channel and the only writer allowed to move a recorded thread.
 - **Re-entry.** The re-entry turn is delivered by `deliverTurn`, which reads the thread back for the rotation's client-id digest before sending.
 - **Resume.** It is accepted only on the server's own checks, detailed below, and acceptance is the compare-and-set that lifts the fence.
@@ -72,7 +72,7 @@ The Architect dispatched this as an emergency (message e2f2d7c2, the plan at Tan
 - **Wiring.** `tc rotation prepare|show|advance|resume`, launch-bound routes under `/api/tc/rotation`, operator-only abandon, and driver recovery at boot. Engines without a rebindable channel are refused at prepare.
 
 **Decisions.**
-- **Schema.** Per ruling A1 the migration took the next number past the open claims (#1971 and #1966 both hold v51), so it is v52.
+- **Schema.** v51, per ruling A17. Open PRs do not reserve migration numbers, and a v52 merged first would stamp past an absent v51. #2032 lands first; #1971 and then #1966 rebase onto it and take the following versions.
 - **The first cut's readings are superseded.** "Dispatch" as outbound sends only, and "generation only at resume", were replaced by rulings A2, A11 and A12: the epoch gate covers every listed mutation.
 - **Inbox high-water mark.** It stays the set of message ids present at prepare.
 
