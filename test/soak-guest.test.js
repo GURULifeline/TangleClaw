@@ -965,7 +965,6 @@ describe('soak guest: --verify-network, one bound sample (Architect ruling 2baea
   // Anything the guest could not MEASURE is unavailable: no pair, no breach.
   for (const [label, over] of [
     ['an egress probe hangs past the timeout', { nc: 'sleep 30' }],
-    ['the DNS tool is missing', { dig: null }],
     ['the SSH management path cannot be seen', { netstat: 'echo "tcp4 0 0 127.0.0.1.3102 *.* LISTEN"' }],
     ['pfctl cannot report pf\'s status', { pfctl: '[ "${FAKE_USER:-admin}" = admin ] || exit 1\ncase "$*" in "-s info") echo "garbled";; esac' }]
   ]) {
@@ -976,6 +975,17 @@ describe('soak guest: --verify-network, one bound sample (Architect ruling 2baea
       assert.equal(r.stdout, '', 'the runner records unattested, never a breach');
     });
   }
+
+  // A fake that times out at once: the host's own dig is never reached, so
+  // no query leaves this machine and nothing waits on a real timeout.
+  it('prints nothing and exits 3 when the DNS probe times out', () => {
+    const f = guestFakes(tmp, { dig: 'exit 124' });
+    const r = setup(ARGS, f, tmp);
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.stdout, '', 'the runner records unattested, never a breach');
+    assert.match(r.stderr, /DNS query .* hung past/);
+    assert.ok(f.calls().some((c) => /^\[soakrun\] dig @\S+ \+time=2 \+tries=1 \+short tangleclaw\.invalid$/.test(c)), f.calls().join('\n'));
+  });
 
   it('reports a measured breach in the raw verifier as code BREACH with its fact, and a failure to measure as REFUSED', () => {
     const breached = setup(['--verify-workload'], guestFakes(tmp, { nc: 'exit 0' }), tmp, { FAKE_USER: 'soakrun' });
