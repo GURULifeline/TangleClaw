@@ -213,34 +213,17 @@ async function _publication(c, sha, where) {
 }
 
 /**
- * The publication for a committed run, built on first use. Building needs
- * the operator's git identity and the worktree's origin, which a runner under
- * launchd or cron may not have. A publish that cannot even build its
- * publisher is recorded and backed off like any other publishing failure, and
- * never stops sampling (ADR 0021 point 4).
+ * The publication for a committed run, built on first use from the settings
+ * its manifest pinned. The library owns the guarantee that a publisher which
+ * cannot be built (no git identity or origin under launchd or cron) is
+ * recorded and backed off, never stopping sampling (ADR 0021 point 4).
  * @param {object} c - Command context
  * @param {string} sha - Candidate SHA
  * @param {object} manifest - The run's manifest
  * @returns {object} `{publishCurrent, due, recordFailure, readStatus}`
  */
 function _runPublication(c, sha, manifest) {
-  let built = null;
-  const statusOnly = publicationLib.createPublication({ base: c.base, candidateSha: sha, publisher: null });
-  return {
-    async publishCurrent(log = () => {}) {
-      try {
-        built = built || await _publication(c, sha, _pinned(manifest));
-      } catch (e) {
-        const status = publicationLib.recordFailureFor(c.base, sha, e);
-        log({ event: 'publish-failed', code: e.code || 'PUBLISH_FAILED', message: String(e.message || '').slice(0, 300), nextAttemptAt: status.nextAttemptAt });
-        return { published: false, code: e.code || 'PUBLISH_FAILED' };
-      }
-      return built.publishCurrent(log);
-    },
-    due: (hint) => statusOnly.due(hint),
-    recordFailure: (err) => publicationLib.recordFailureFor(c.base, sha, err),
-    readStatus: () => statusOnly.readStatus()
-  };
+  return publicationLib.createDeferredPublication({ base: c.base, candidateSha: sha, build: () => _publication(c, sha, _pinned(manifest)) });
 }
 
 /**

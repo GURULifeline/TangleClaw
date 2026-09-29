@@ -444,6 +444,58 @@ describe('verifyHistory: a real metrics branch', () => {
     assert.deepEqual(rules, [RULES.DELETED, RULES.PATH_NOT_ALLOWED].sort());
   });
 
+  it('refuses a symlink, an executable file or a symlinked directory pushed to metrics', async () => {
+    await publishHonestly();
+    const outside = path.join(tmp, 'outside.json');
+    fs.writeFileSync(outside, '{}');
+    tamper((wc) => {
+      fs.rmSync(path.join(wc, P.scorecard));
+      fs.symlinkSync(outside, path.join(wc, P.scorecard));
+    });
+    tamper((wc) => fs.chmodSync(path.join(wc, sc.INDEX_PATH), 0o755));
+    const outsideDir = path.join(tmp, 'outside-dir');
+    fs.mkdirSync(outsideDir);
+    tamper((wc) => {
+      const eventsDir = path.dirname(path.join(wc, P.events));
+      fs.rmSync(eventsDir, { recursive: true });
+      fs.symlinkSync(outsideDir, eventsDir);
+    });
+    const violations = (await verify.verifyHistory({ repoDir: remote, ref: 'metrics' })).violations.filter((v) => v.rule === RULES.NOT_REGULAR_FILE);
+    assert.deepEqual(violations.map((v) => v.path).sort(), [P.scorecard, sc.INDEX_PATH, path.posix.dirname(P.events)].sort());
+    assert.equal(new Set(violations.map((v) => v.commit)).size, 3, 'each tampering commit is named');
+  });
+
+  it('never lets a publish or a read-back follow an entry that is not a regular file', async () => {
+    await publishHonestly();
+    const victim = path.join(tmp, 'victim.txt');
+    fs.writeFileSync(victim, 'untouched');
+    tamper((wc) => {
+      fs.rmSync(path.join(wc, P.scorecard));
+      fs.symlinkSync(victim, path.join(wc, P.scorecard));
+    });
+    const publisher = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: remote, identity: { name: 'T', email: 't@example.invalid' } }, { sleep: async () => {} });
+    const refusal = async (fn) => {
+      let caught = null;
+      try { await fn(); } catch (err) { caught = err; }
+      assert.equal(caught && caught.code, 'METRICS_TREE_UNSAFE', caught && caught.stack);
+    };
+    await refusal(() => publisher.publish(() => ({ [P.scorecard]: 'overwritten' }), 'x'));
+    await refusal(() => publisher.read(P.scorecard));
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'untouched');
+  });
+
+  it('keeps what it writes in the clone private: files 0600, directories 0700', async () => {
+    await publishHonestly();
+    const clone = publisherLib.createPublisher({ dir: path.join(tmp, '_metrics'), remoteUrl: remote, identity: { name: 'T', email: 't@example.invalid' } }).cloneDir;
+    const dirs = [];
+    for (let d = path.dirname(path.join(clone, P.admission)); d !== clone; d = path.dirname(d)) dirs.push(d);
+    assert.ok(dirs.length > 0);
+    for (const d of dirs) assert.equal(fs.statSync(d).mode & 0o777, 0o700, d);
+    for (const f of [P.admission, P.scorecard, P.events, sc.INDEX_PATH]) {
+      assert.equal(fs.lstatSync(path.join(clone, f)).mode & 0o777, 0o600, f);
+    }
+  });
+
   it('refuses a merge commit', async () => {
     await publishHonestly();
     const wc = path.join(tmp, 'wc-merge');

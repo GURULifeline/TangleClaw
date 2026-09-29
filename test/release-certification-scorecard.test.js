@@ -118,16 +118,19 @@ describe('published documents (#1949 C02)', () => {
     assert.deepEqual(sc.validateScorecard(c), []);
   });
 
-  it('publishes the accepting operator, or withholds the id when asked', () => {
+  it('publishes the accepting operator, or withholds the id when the manifest does, whatever the caller passes', () => {
     const m = manifest(FAST);
     const reviewing = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(2, 2 * MIN))]).state;
     assert.equal(reviewing.state, STATES.AWAITING_REVIEW);
     const passed = sm.accept(reviewing, 'jason', T0 + 3 * MIN, manifest()).state;
     const canonical = manifest();
     assert.deepEqual(sc.scorecard(passed, canonical, T0 + 3 * MIN, 1).acceptance, { actor: 'jason', at: T0 + 3 * MIN });
-    const quiet = sc.scorecard(passed, canonical, T0 + 3 * MIN, 1, { publishActor: false });
+    const withheld = { ...canonical, publishActor: false };
+    const quiet = sc.scorecard(passed, withheld, T0 + 3 * MIN, 1);
     assert.deepEqual(quiet.acceptance, { at: T0 + 3 * MIN });
     assert.deepEqual(sc.validateScorecard(quiet), []);
+    const overridden = sc.scorecard(passed, withheld, T0 + 3 * MIN, 1, { publishActor: true });
+    assert.deepEqual(overridden.acceptance, { at: T0 + 3 * MIN }, 'no caller option can publish an id the manifest withheld');
   });
 
   it('never publishes the worktree path, host, ttyd generation or diagnostics', () => {
