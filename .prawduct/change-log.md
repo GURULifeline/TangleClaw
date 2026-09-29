@@ -55,6 +55,86 @@ The PM dispatched this over Medusa as a v5.30 release blocker, under RULE #120 (
 **Tests.** `test/rule-label.test.js`, `test/rule-label-drift.test.js` (server and browser agree) and `test/rule-id-display.test.js` (every surface × every state, plus a source guard that every approval-outcome line names the rule). Existing assertions on the old wording were updated to the labelled form, and each still checks the same thing. Mutation checks confirmed four new guards go red when their subject breaks.
 
 **Review.** The cumulative Critic found 0 blocking and 2 warnings: the wrap prompt and the Master's instructions were still unlabelled. Both were fixed in `c4d70c75`, and verify-resolutions was clean. The independent exact-head review (TC-RM03) certified `c4d70c75` green. This also resolves #1695.
+## 2026-09-29 — A Codex coordinator's context rotation is a governed transition (#2032)
+
+<!-- prawduct: type=bugfix | scope=2032-coordinator-rotation -->
+
+The Architect dispatched this as an emergency (message e2f2d7c2, the plan at TangleClaw-Architect/.tangleclaw/plans/2032-coordinator-context-rotation-emergency.md), and the PM confirmed it. The scope was E1–E3 first, then the replacement Architect's rulings A1–A16, which made E4 (relaunch parity and the operator surface) part of the certifying scope. The incident: Architect session 1199 survived `/clear`, but its startup-control channel stayed on the pre-clear Codex thread, so every wake answered `thread-not-loaded` and the replacement context resumed with no fence and no proof it had reconciled.
+
+**Reproduction first.** `test/coordinator-rotation.test.js` opens with the incident against the fake app-server: the recorded thread unloads, a replacement loads, observation answers `thread-not-loaded` and keeps the old binding. It still does after this change, with or without an open rotation, so the #1628/D8 invariant (observation never replaces a recorded thread) holds.
+
+**The change.**
+- **Record and fence.** A `coordinator_rotations` record (schema v51) is created by `prepare` together with a validated, canonical-JSON-digested checkpoint and the inbox ids at that moment, in one insert, so the checkpoint never exists without the fence. A partial unique index allows one open rotation per project.
+- **Clear and rebind.** The server's driver types `/clear` when the prior thread is idle, then binds the one provable replacement through `startup-control-codex#rebindThread`: new since the clear, root, same directory, prior gone. That function is a compare-and-set on the channel and the only writer allowed to move a recorded thread.
+- **Re-entry.** The re-entry turn is delivered by `deliverTurn`, which reads the thread back for the rotation's client-id digest before sending.
+- **Resume.** It is accepted only on the server's own checks, detailed below, and acceptance is the compare-and-set that lifts the fence.
+- **What the fence holds.** Every coordinator-authority mutation, through the epoch gate below, plus the wake (`coordinator-rotating`).
+- **Wiring.** `tc rotation prepare|show|advance|resume`, launch-bound routes under `/api/tc/rotation`, operator-only abandon, and driver recovery at boot. Engines without a rebindable channel are refused at prepare.
+
+**Decisions.**
+- **Schema.** v51, per ruling A17. Open PRs do not reserve migration numbers, and a v52 merged first would stamp past an absent v51. #2032 lands first; #1971 and then #1966 rebase onto it and take the following versions.
+- **The first cut's readings are superseded.** "Dispatch" as outbound sends only, and "generation only at resume", were replaced by rulings A2, A11 and A12: the epoch gate covers every listed mutation.
+- **Inbox high-water mark.** It stays the set of message ids present at prepare.
+
+**Architect rulings A1–A16 (after the E1–E3 checkpoint).** The replacement Architect ruled most of the first cut insufficient, and each ruling is built:
+- **A6a.** An operator-granted, versioned `coordinator_roles` contract is now the only authority to prepare. A role or version change during absence is non-acceptable authority drift.
+- **A7a.** A content fingerprint of the checkout is taken at prepare, which refuses undeclared dirt. It is re-observed at resume, where any difference is non-acceptable integrity drift. The old receipt-asserted `git.head` and `github.checkedAt` fields were removed.
+- **A11/A12.** The epoch gate now judges every listed coordinator-authority mutation, including control, session-rule, wrap and workload routes and the Medusa send, ack and close routes. It accepts them only from the bound replacement thread, session and launch. `tc` forwards `CODEX_THREAD_ID` as `x-tangleclaw-engine-thread`. Reconciling allows only workload, the control ack and interval-scoped replies, acks and closes. Resume needs a one-time nonce, minted lazily when the re-entry turn is actually sent and stored hashed. The adapter's `deliverTurn` now decides "already sent" by client id alone, because each send's text carries a fresh secret.
+- **A10.** The checkpoint enumerates GitHub facts, which `lib/github-facts.js` reads through `gh` at prepare (unreadable or wrongly declared facts refuse the prepare) and at resume. There are two drift classes:
+  - Trusted GitHub drift (key plus before/after digests) must be disposed of in `receipt.drift` (`accepted`/`superseded`/`follow-up`).
+  - Authority and checkout-integrity drift can never be accepted.
+
+  Unavailable evidence blocks. Observations and dispositions are persisted on every resume attempt.
+- **A8.** A readiness verdict: a workload receipt published after the re-entry turn, current, `working`/`waiting-external` and `do-not-clear`. It is persisted either way. Prepare and resume are now async.
+- **A13/E4.** Relaunch parity:
+  - A `relaunch`-mode rotation stays fenced across the session's end. The ending session may only wrap itself, from its prior thread.
+  - An operator-only relaunch claim launches the successor and binds exactly its session, launch and channel in one compare-and-set.
+  - The rebind takes only the thread the successor's own channel records. Per ruling A16 it never infers one from a visible thread, and waits with `successor-thread-unrecorded` instead. Unclaimed launches stay fenced, and an unbindable successor is recorded for operator recovery.
+- **Operator surface.** `nextStep` gives exactly one next command per state. Every view shows the binding (session, thread, generation) and never a launch id or nonce. It surfaces in `tc rotation show`, the fleet lane (`tc sessions` shows `ROTATING …`) and the operator's `GET /api/rotations`.
+- **A14 live-Codex check.** `scripts/rotation-live-check.js` (pre / prepare / post) is for an independent executor at the exact head. `GET /api/tc/rotation` reports the forwarded-vs-channel thread binding it reads. The script's own verdicts are tested against a stub.
+
+**Independent review (TC-RM03) on 8192fa1a: NOT GREEN, 1 blocking.** The Medusa loop routes (open, continue, force-done, closeout) and the listener toggle bypassed the gate, so a prior context could dispatch during rebinding.
+- **Fix.** They are now gated: loops are new dispatch, fenced until active; the toggle is allowed from the bound replacement while reconciling.
+- **Why the table test missed them.** It was a hand-kept list, the Critic's O-1 observation. The route test now also walks every registered mutating route in the gated families through `server._routePatterns()`, so a new route is covered by existing. Its one exemption is named with its reason.
+
+**Architect ruling A18 (after RM03's review).** `8b160286` was not a candidate. A18 required:
+- **Listener toggle.** While reconciling, only an explicit enable.
+- **Serialized passes (W1).** Passes are serialized per rotation, so there is one re-entry turn and one live nonce.
+- **Driver-error evidence (W2).** A first-pass throw is recorded as `driver-error`.
+- **Verified operator (W3).** The operator exemption uses control's proof tiers.
+- **The header's meaning (W4).** The docs now say the thread header is attribution, not authentication.
+- **Clear pacing (W5).** Only admitted `/clear` attempts count, refusals retry after 15 s, and an admitted clear gets a 20 s settle window.
+- **Fingerprint bounds (W6).** The fingerprint runs off the event loop under a 30 s total deadline, with each git call raced against it. Important-ignored paths are capped at 50 and checked in one batch, and hashing is capped at 256 MB in total.
+- **N5–N7.** Repo segments made only of dots are refused. GitHub reads run 4 at a time under a 60 s deadline. JSON depth is capped at 32. The live script keeps its state in an owner-only directory it checks.
+- **N8.** `POST /command` and startup-prompt fire are gated. The route sweep now covers the whole `/api/sessions/:project` family, with each exemption named and checked to still exist.
+- **Item 10.** The search for DBs stamped v52 found none outside the system temp directory. The live install is at v50. The v51/v52 test stores left in temp were reported, not deleted.
+
+**Cumulative Critic on 17a1d4be: 0 blocking.** Three of its warnings broke normal use, so they were fixed rather than accepted:
+- **Own checkout check.** A rotation tripped its own checkout check. Now `tc` refuses checkpoint and receipt files inside the checkout, and a relaunch re-takes its baseline at the claim, after the wrap commit and the successor's config rewrite, keeping the earlier changes as `drift.relaunch`.
+- **Epoch lapse.** An active epoch never released. Now it lapses when its bound session ends, so an ordinary relaunch needs no operator, and a completed rotation stays `active`, never `abandoned`.
+- **Re-entry turn.** It sent the coordinator to raw routes it could no longer use. Now it names `tc message read|ack` and says why raw HTTP is refused.
+
+**Architect ruling on the epoch lapse (message 704a075b): confirmed, fail-closed.** An epoch lapses only on persisted evidence that its bound session ended, meaning a terminal session status. A missing or unreadable row keeps the fence, and no successor inherits the epoch. A completed rotation stays completed. **Architect ruling on the relaunch baseline (message 3a04dd8d): confirmed.** The baseline is retaken exactly once, at the governed claim, after authoritative proof that the old session ended and after the successor has launched and its launch id and channel are bound. Pre-claim differences are kept as `drift.relaunch`, and nothing after the claim is forgiven. The claim now requires the old session's own row to record a terminal status: a missing or unreadable row refuses with `ROTATION_PRIOR_SESSION_NOT_ENDED` and stays fenced. Per the clarification in message 085f4f3c, READY need not come before the retake, but the successor gets no authority until its launch sequence is attested READY. Resume now refuses a relaunch whose successor sequence has no `readyAt`.
+
+Also fixed:
+- the dirty-path cap (1000) and the column sizes (1 MB) now agree;
+- the live check requires a 201;
+- the driver stops polling on failures that need the operator;
+- failures are logged;
+- the `GET /api/tc/rotation` comment is corrected.
+
+**Live-Codex check (RM08) at 394aaab4: FAILED, 2 defects, plus a third found in its logs.** Real Codex keeps the old thread loaded about 2 s after `/clear` beside the new one, and opens a short-lived auxiliary thread beside a thread's first turn. The driver treated both as terminal operator failures.
+- **Settle window.** Now, for 2 minutes after an admitted clear, they are retryable waits (`prior-thread-unloading`, `replacement-settling`), and only become `prior-thread-still-loaded` or `replacement-ambiguous` after that. No thread is ever inferred: binding still needs exactly one candidate.
+- **Listener requirement.** RM08's resume was also refused, because its project runs without Medusa and the resume required a listener regardless. A listener is now required only when the prepare recorded messages to drain.
+- **Tests.** Each live sequence is replayed in a test, and those tests fail with the window removed.
+
+**8a9ceab6 NOT GREEN: two defects.**
+- **RM03 W1.** Skipping the listener check when nothing was recorded also skipped it for a switchboard coordinator whose listener had died.
+  - **Fix.** The listener requirement now follows the project's `medusaEnabled`, and an unreadable config counts as enabled. Prepare refuses a switchboard coordinator whose listener is down (`ROTATION_LISTENER_DOWN`).
+- **RM08 procedural.** The live rotation itself passed, but the script's `post` phase expected `reconciling` after the coordinator had already resumed, as the re-entry turn tells it to.
+  - **Fix.** `GET /api/tc/rotation` now also returns `latest`, and `post` accepts a rotation that is already active and bound to this thread.
+
+**Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
 

@@ -271,6 +271,7 @@ const ciStatus = require('./lib/ci-status');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
+const coordinatorRotation = require('./lib/coordinator-rotation');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
 // The one live fleet activity observer (#1912, ADR 0020 §5): started with the
@@ -906,6 +907,7 @@ function route(method, pattern, handler, options) {
   });
   routes.push({
     method: method.toUpperCase(),
+    pattern,
     regex: new RegExp(`^${regexStr}$`),
     paramNames,
     handler,
@@ -4768,6 +4770,7 @@ route('POST', '/api/tc/start/ready', (req, res, _params, body) => {
 // that launch (`lib/workload.js`). An assertion, never evidence, and it grants
 // nothing.
 route('POST', '/api/tc/workload', (req, res, _params, body) => {
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'workload-set')) return;
   const result = workload.record({ req, body });
   return jsonResponse(res, result.status, result.body);
 });
@@ -4784,6 +4787,181 @@ route('GET', '/api/tc/workload', (req, res) => {
   const project = session ? store.projects.get(session.projectId) : null;
   const lane = session ? _composedLane(session, project ? project.name : null) : null;
   return jsonResponse(res, 200, { ...result.body, ...(lane || {}) });
+});
+
+// Governed coordinator context rotation (#2032). A coordinator prepares its
+// own rotation with a structured checkpoint; the server fences its new
+// dispatch, types /clear, binds the one replacement thread it can prove and
+// delivers a re-entry turn; the replacement context resumes with a receipt the
+// server cross-checks before lifting the fence. Prepare, show, advance and
+// resume are bound to the caller's own verified launch, like workload; the
+// relaunch claim, abandon and the operator reads are the operator's alone.
+
+/**
+ * The caller's verified launch for a rotation route, or a refusal written to
+ * `res`.
+ * @param {object} req - The request.
+ * @param {object} res - The response.
+ * @returns {object|null} The access, or null when refused.
+ */
+function _rotationAccess(req, res) {
+  const access = sharedDocsAccess.resolveAccess(req);
+  if (access.kind === sharedDocsAccess.KINDS.PROJECT) return access;
+  const why = access.kind === sharedDocsAccess.KINDS.INVALID ? access.reason : access.kind;
+  errorResponse(res, 403, 'A coordinator rotation is prepared, read and resumed only by the session\'s own verified launch '
+    + `(x-tangleclaw-project-id and x-tangleclaw-launch-id). This caller is ${why}.`, 'ROTATION_BINDING_REQUIRED', { reason: why });
+  return null;
+}
+
+/**
+ * The engine thread a request says it came from — the header `tc` forwards
+ * from `CODEX_THREAD_ID` — or null.
+ * @param {object} req - The request.
+ * @returns {string|null}
+ */
+function _engineThread(req) {
+  const v = req.headers && req.headers['x-tangleclaw-engine-thread'];
+  return typeof v === 'string' && v ? v : null;
+}
+
+/**
+ * Apply the coordinator epoch gate (#2032, rulings A2/A11/A12) to a
+ * coordinator-authority mutation, writing the refusal to `res`.
+ * @param {object} req - The request.
+ * @param {object} res - The response.
+ * @param {number|null} projectId - The coordinator project the mutation acts for.
+ * @param {string} action - The gated action.
+ * @param {object} [extra] - `inReplyTo`, `messageIds` or `exchangeId`.
+ * @returns {boolean} True when refused.
+ */
+function coordinatorGateRefused(req, res, projectId, action, extra = {}) {
+  // Only a VERIFIED operator is exempt, by control's proof tiers: an
+  // operator-shaped request that control would not accept is judged as an
+  // unbound caller, never waved through.
+  const access = sharedDocsAccess.resolveAccess(req);
+  const operator = resolveControlCaller(req).kind === 'operator';
+  const judged = operator ? { kind: 'operator' } : (access.kind === 'operator' ? { kind: 'unbound' } : access);
+  const refusal = coordinatorRotation.gate({ projectId, access: judged, threadId: _engineThread(req), action, ...extra });
+  if (!refusal) return false;
+  log.info('Coordinator epoch gate refused a mutation', { projectId, action, code: refusal.body.code, rotationId: refusal.body.rotationId });
+  jsonResponse(res, refusal.status, refusal.body);
+  return true;
+}
+
+/**
+ * The project a caller acts for, when it is a verified project launch.
+ * @param {object} req - The request.
+ * @returns {number|null}
+ */
+function _callerProjectId(req) {
+  const access = sharedDocsAccess.resolveAccess(req);
+  return access.kind === sharedDocsAccess.KINDS.PROJECT ? access.projectId : null;
+}
+
+// POST /api/tc/rotation/prepare — `{attemptKey, checkpoint}`: begin a rotation
+// of the caller's own session and start the server's side of it.
+route('POST', '/api/tc/rotation/prepare', async (req, res, _params, body) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const result = await coordinatorRotation.prepare({ access, body });
+  if (result.status === 201 || result.status === 200) coordinatorRotation.drive(result.body.rotation.rotationId);
+  return jsonResponse(res, result.status, result.body);
+}, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
+
+// GET /api/tc/rotation — the caller's open rotation, checkpoint included (what
+// the replacement context reconciles against), or `rotation: null` when none
+// is open; `latest` is the most recent one in any state, and `generation` the
+// project's current generation.
+route('GET', '/api/tc/rotation', (req, res) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const open = coordinatorRotation.openRotation(access.projectId);
+  const channel = store.startupControlChannels.getOpenBySession(access.sessionId);
+  const channelThread = channel && channel.adapterState ? channel.adapterState.threadId || null : null;
+  const forwardedThread = _engineThread(req);
+  return jsonResponse(res, 200, {
+    rotation: coordinatorRotation.view(open, { checkpoint: true }),
+    // The most recent rotation whatever its state, so a caller that has just
+    // resumed (or lost a response) can still see where it stands.
+    latest: coordinatorRotation.view(store.coordinatorRotations.latestForProject(access.projectId)),
+    generation: store.coordinatorRotations.currentGeneration(access.projectId),
+    // Read-only binding evidence for the caller's own launch: the thread tc
+    // forwarded beside the one its control channel records. The live-Codex
+    // integration check reads it (scripts/rotation-live-check.js).
+    binding: { forwardedThread, channelThread, matches: !!forwardedThread && forwardedThread === channelThread }
+  });
+});
+
+// POST /api/tc/rotation/advance — retry the server's side of the caller's open
+// rotation after a failure it has since fixed (a busy thread, a refused clear).
+route('POST', '/api/tc/rotation/advance', async (req, res) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const open = coordinatorRotation.openRotation(access.projectId);
+  if (!open) return errorResponse(res, 404, 'This project has no rotation in progress.', 'ROTATION_NOT_FOUND');
+  const r = await coordinatorRotation.advance(open.rotationId);
+  if (r && (r.state === 'fenced' || r.state === 'rebinding')) coordinatorRotation.drive(r.rotationId);
+  return jsonResponse(res, 200, { rotation: coordinatorRotation.view(r) });
+});
+
+// POST /api/tc/rotation/resume — `{rotationId, attemptKey, generation, receipt}`:
+// the replacement context's proof. Accepted only when every fact the server can
+// observe agrees; that acceptance is what lifts the fence.
+route('POST', '/api/tc/rotation/resume', async (req, res, _params, body) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const result = await coordinatorRotation.resume({ access, body, threadId: _engineThread(req) });
+  return jsonResponse(res, result.status, result.body);
+}, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
+
+// POST /api/tc/rotation/relaunch — `{rotationId}`: the operator's explicit
+// relaunch transition for a `relaunch` rotation. Launches the successor and
+// binds exactly that session and launch to the rotation; nothing else is ever
+// claimed. Operator only.
+route('POST', '/api/tc/rotation/relaunch', async (req, res, _params, body) => {
+  const result = await coordinatorRotation.claimRelaunch({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+// GET /api/rotations — the operator's read surface for coordinator rotations
+// (ruling A13): each recent rotation's state, blocker, checkpoint digest,
+// receipt verdict and the one command that moves it. Operator only.
+route('GET', '/api/rotations', (req, res) => {
+  const caller = resolveControlCaller(req);
+  if (caller.kind !== 'operator') return errorResponse(res, 403, 'Only the operator reads every coordinator rotation.', 'OPERATOR_ONLY');
+  const rows = store.coordinatorRotations.listRecent(50);
+  return jsonResponse(res, 200, {
+    rotations: rows.map((r) => {
+      const project = store.projects.get(r.projectId);
+      return { project: project ? project.name : null, ...coordinatorRotation.view(r) };
+    })
+  });
+});
+
+// POST /api/tc/rotation/abandon — `{rotationId, reason}`: the operator ends a
+// rotation that cannot finish, lifting the fence. Operator only.
+route('POST', '/api/tc/rotation/abandon', (req, res, _params, body) => {
+  const result = coordinatorRotation.abandon({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+// Coordinator-role contracts (#2032, ruling A6a): the operator's durable
+// statement that a project is a coordinator, which a rotation's prepare
+// requires and its resume re-checks. Operator only.
+route('GET', '/api/coordinator-roles', (req, res) => {
+  const caller = resolveControlCaller(req);
+  if (caller.kind !== 'operator') return errorResponse(res, 403, 'Only the operator lists coordinator roles.', 'OPERATOR_ONLY');
+  return jsonResponse(res, 200, { roles: store.coordinatorRoles.list() });
+});
+
+route('POST', '/api/coordinator-roles', (req, res, _params, body) => {
+  const result = coordinatorRotation.grantRole({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+route('POST', '/api/coordinator-roles/revoke', (req, res, _params, body) => {
+  const result = coordinatorRotation.revokeRole({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
 });
 
 // POST /api/tc/workload/narrowing — the operator narrows (or clears a
@@ -5218,7 +5396,7 @@ route('GET', '/api/tc/sessions', (_req, res) => {
  */
 function _composedLane(session, projectName) {
   try {
-    return workloadFleet.laneFor(session, { observer: activityObserver, projectName });
+    return { ...workloadFleet.laneFor(session, { observer: activityObserver, projectName }), ..._laneRotation(session) };
   } catch (err) { // prawduct:allow prawduct/broad-except -- one lane's store failure must not take the fleet roster down; it composes UNKNOWN, fail-closed, and is logged
     log.warn('workload composition failed for a lane', { sessionId: session.id, error: err.message });
     return {
@@ -5227,6 +5405,26 @@ function _composedLane(session, projectName) {
       composed: { availability: 'UNKNOWN', clearance: 'unknown', reasons: ['compose-failed'] }
     };
   }
+}
+
+/**
+ * A lane's coordinator rotation, for the fleet read (#2032, ruling A13):
+ * present while one is open, with its state, blocker, digest, receipt verdict
+ * and the one next command, so a coordinator reading `tc sessions` sees a
+ * rotating peer as exactly that.
+ * @param {object} session - The session row.
+ * @returns {{rotation?: object}}
+ */
+function _laneRotation(session) {
+  const open = coordinatorRotation.openRotation(session.projectId);
+  if (!open) return {};
+  const v = coordinatorRotation.view(open);
+  return {
+    rotation: {
+      rotationId: v.rotationId, state: v.state, mode: v.mode, generation: v.generation, checkpointDigest: v.checkpointDigest,
+      binding: v.binding, receiptVerdict: v.receiptVerdict, blocker: v.blocker, nextCommand: v.nextCommand
+    }
+  };
 }
 
 // GET /api/checkouts — the fleet's checkouts in one answer (#1678, #993): one
@@ -5413,6 +5611,9 @@ function sessionRuleCaller(req, res, target) {
 
 // POST /api/session-rules — create { content, projectId, createdBy?, kind? }
 route('POST', '/api/session-rules', (req, res, _params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   const caller = sessionRuleCaller(req, res, {
     projectId: body ? body.projectId : undefined,
     kind: body ? body.kind : undefined,
@@ -5467,6 +5668,9 @@ function refuseUnconfirmedBaselineEdit(rule, confirmed) {
 
 // PUT /api/session-rules/:id — update { content?, enabled?, confirmBaselineEdit? }
 route('PUT', '/api/session-rules/:id', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || typeof body !== 'object') {
     return errorResponse(res, 400, 'Request body must be a JSON object', 'BAD_REQUEST');
   }
@@ -5503,6 +5707,9 @@ route('PUT', '/api/session-rules/:id', (req, res, params, body) => {
 // DELETE /api/session-rules/:id — ?confirm=true required for shipped Master
 // baseline rules (see refuseUnconfirmedBaselineEdit)
 route('DELETE', '/api/session-rules/:id', (req, res, params) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   // A bound session may withdraw an AI proposal in its project, and nothing else.
   const caller = sessionRuleCaller(req, res, {
     ruleId: Number(params.id),
@@ -5536,6 +5743,9 @@ route('DELETE', '/api/session-rules/:id', (req, res, params) => {
 
 // POST /api/session-rules/promote — promote a learning into a rule (operator-confirmed)
 route('POST', '/api/session-rules/promote', (req, res, _params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   // This route mints a LIVE rule from AI-authored text, so it is the
   // operator's, exactly as approval is: the operator as the caller, then the
   // password. The password alone is no gate on an install that has none set.
@@ -5583,6 +5793,9 @@ route('POST', '/api/session-rules/promote', (req, res, _params, body) => {
 // rejection is RECORDED rather than deleted: the wrap proposes from recurring
 // learnings, so a deleted decision would simply be re-proposed at the next wrap.
 route('PUT', '/api/session-rules/:id/status', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || typeof body.status !== 'string') {
     return errorResponse(res, 400, 'status is required', 'BAD_REQUEST');
   }
@@ -5692,6 +5905,9 @@ route('GET', '/api/session-rules/:id/versions', (_req, res, params) => {
 // or restoring a disabled snapshot) — the gate predicates must stay symmetric
 // across every path that can alter a rule, or the confirm is bypassable.
 route('POST', '/api/session-rules/:id/restore', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || body.versionNo === undefined) {
     return errorResponse(res, 400, 'versionNo is required', 'BAD_REQUEST');
   }
@@ -7179,6 +7395,11 @@ function registerMedusaRoutes(prefix, resolve) {
   route('POST', `${prefix}/toggle`, async (_req, res, params, body) => {
     const r = resolve(params);
     if (refused(res, r, 'toggle Medusa for')) return;
+    // #2032: a stale coordinator context must not switch its switchboard off
+    // or on. While reconciling, the bound replacement may only turn it ON, and
+    // only by saying so (`enabled: true`): resuming needs a listener, but
+    // turning one off is an authority change that waits for the resume.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-listener', { enable: body && body.enabled === true })) return;
     const { target } = r;
     const isOn = medusa.getStatus(target.sessionId).state !== 'off';
     const desired = (body && typeof body.enabled === 'boolean') ? body.enabled : !isOn;
@@ -7260,6 +7481,8 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
     const sessionId = r.target ? r.target.sessionId : null;
+    if (coordinatorGateRefused(req, res, targetProjectId(r.target), 'medusa-ack',
+      { messageIds: body && Array.isArray(body.ids) ? body.ids : null })) return;
     if (sessionId != null) {
       const ids = body && Array.isArray(body.ids) ? body.ids : null;
       if (ids) medusa.markHandled(sessionId, ids);
@@ -7367,6 +7590,10 @@ function registerMedusaRoutes(prefix, resolve) {
     if (refused(res, r, 'send from')) return;
     if (outboundRefused(res, r.target)) return;
     const senderProjectId = targetProjectId(r.target);
+    // #2032: a coordinator bound to a rotation epoch sends only from its bound
+    // replacement thread, and while reconciling only replies within its
+    // checkpoint's interval.
+    if (coordinatorGateRefused(req, res, senderProjectId, 'medusa-send', { inReplyTo: body && body.inReplyTo })) return;
     const out = await medusaSend.sendTracked({
       sessionId: r.target.sessionId, senderProjectId, caller: exchangeCaller(req, senderProjectId), body
     });
@@ -7398,6 +7625,7 @@ function registerMedusaRoutes(prefix, resolve) {
   route('POST', `${prefix}/exchanges/:exchangeId/close`, (req, res, params) => {
     const r = resolve(params);
     if (refused(res, r, 'close an exchange for')) return;
+    if (coordinatorGateRefused(req, res, targetProjectId(r.target), 'exchange-close', { exchangeId: params.exchangeId })) return;
     const row = store.medusaExchanges.get(params.exchangeId);
     if (!row) return errorResponse(res, 404, 'No exchange has that id', 'EXCHANGE_NOT_FOUND');
     const caller = exchangeCaller(req, targetProjectId(r.target));
@@ -7420,6 +7648,8 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'open a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    // #2032: opening a loop is new dispatch, gated like a send.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.openLoop({
         sessionId: r.target.sessionId,
@@ -7447,6 +7677,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'end a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.forceDoneLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -7465,6 +7696,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'continue a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.continueLoop({ sessionId: r.target.sessionId, loopId: params.loopId, message: body && body.message });
       jsonResponse(res, 200, result);
@@ -7483,6 +7715,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'close a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.closeoutLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -7520,10 +7753,14 @@ medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
  * @param {string} method - HTTP method
  * @param {string} pattern - Route pattern
  * @param {(req: object, params: object, body: object) => {status: number, body: object, notify: (object|null)}} fn - Handler
+ * @param {string|null} [gatedAction] - The coordinator epoch gate action this route is (#2032), or null
  * @returns {void}
  */
-function controlRoute(method, pattern, fn) {
+function controlRoute(method, pattern, fn, gatedAction = null) {
   route(method, pattern, (req, res, params, body) => {
+    // #2032: a coordinator bound to a rotation epoch issues control only from
+    // its bound replacement thread; while reconciling, only the ack.
+    if (gatedAction && coordinatorGateRefused(req, res, _callerProjectId(req), gatedAction)) return;
     let out;
     try {
       out = fn(req, params, body);
@@ -7540,14 +7777,14 @@ function controlRoute(method, pattern, fn) {
 }
 
 controlRoute('GET', '/api/control/assignments', (req) => controlApi.listOpen(req));
-controlRoute('POST', '/api/control/assignments', (req, _params, body) => controlApi.createAssignment(req, body));
+controlRoute('POST', '/api/control/assignments', (req, _params, body) => controlApi.createAssignment(req, body), 'control-mutate');
 controlRoute('GET', '/api/control/assignments/:id', (req, params) => controlApi.getStatus(req, params));
-controlRoute('POST', '/api/control/assignments/:id/hold', (req, params, body) => controlApi.holdAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/release', (req, params, body) => controlApi.releaseAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/stop', (req, params, body) => controlApi.stopAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/close', (req, params, body) => controlApi.closeAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/ack', (req, params, body) => controlApi.ackAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/exchange-closed', (req, params, body) => controlApi.closeExchange(req, params, body));
+controlRoute('POST', '/api/control/assignments/:id/hold', (req, params, body) => controlApi.holdAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/release', (req, params, body) => controlApi.releaseAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/stop', (req, params, body) => controlApi.stopAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/close', (req, params, body) => controlApi.closeAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/ack', (req, params, body) => controlApi.ackAssignment(req, params, body), 'control-ack');
+controlRoute('POST', '/api/control/assignments/:id/exchange-closed', (req, params, body) => controlApi.closeExchange(req, params, body), 'control-mutate');
 controlRoute('GET', '/api/control/mine', (req) => controlApi.mine(req));
 controlRoute('GET', '/api/control/check', (req) => controlApi.check(parseQuery(reqUrl(req).search)));
 // The Master's mount (#996). Deliberately the SAME family rather than a subset:
@@ -7835,6 +8072,10 @@ route('PUT', '/api/startup-prompt', (req, res, _params, body) => {
 // engine with no supported startupControl channel gets a typed 409, with no
 // fallback.
 route('POST', '/api/sessions/:project/startup-prompt/fire', async (req, res, params, body) => {
+  // #2032: firing a startup prompt starts a turn in the coordinator's thread,
+  // so it is judged by the epoch gate like a typed command.
+  const gatedProject = store.projects.getByName(params.project);
+  if (gatedProject && coordinatorGateRefused(req, res, gatedProject.id, 'session-command')) return;
   const access = sharedDocsAccess.resolveAccess(req);
   let clearance = 'project-binding';
   if (access.kind === 'operator') {
@@ -7876,6 +8117,12 @@ route('POST', '/api/sessions/:project/wrap-sentinel/ack', (_req, res, params) =>
 
 // POST /api/sessions/:project/command — Inject command
 route('POST', '/api/sessions/:project/command', (_req, res, params, body) => {
+  // #2032: typing into a coordinator's pane can hand it new work, so a
+  // coordinator bound to a rotation epoch is typed into only from its bound
+  // replacement (or by the operator), and not at all while it reconciles. The
+  // rotation's own /clear does not come through here.
+  const commandProject = store.projects.getByName(params.project);
+  if (commandProject && coordinatorGateRefused(_req, res, commandProject.id, 'session-command')) return;
   if (!body || !body.command) {
     return errorResponse(res, 400, 'command is required', 'BAD_REQUEST');
   }
@@ -7918,6 +8165,10 @@ route('POST', '/api/sessions/:project/command', (_req, res, params, body) => {
 // the retry's response finally came back. Every refusal below is still
 // synchronous and claims nothing.
 route('POST', '/api/sessions/:project/wrap', async (_req, res, params, body) => {
+  // #2032: starting a wrap publishes a handoff and finalizes the session — a
+  // coordinator-authority action the rotation epoch binds.
+  const wrapProject = store.projects.getByName(params.project);
+  if (wrapProject && coordinatorGateRefused(_req, res, wrapProject.id, 'wrap')) return;
   // Operator kill switch (incident 2026-07-16: wrap content steps re-fired
   // repeatedly into the session). Checked before anything else — while set,
   // no wrap can start regardless of caller. Re-enable via
@@ -8287,6 +8538,8 @@ route('GET', '/api/sessions/:project/wrap/stream/:runId', (req, res, params) => 
 // were noticed. A 3800-character handback of multibyte text is ~11 KB, which the
 // 10 KB default refused before the handler's own cap could answer.
 route('POST', '/api/sessions/:project/wrap/handback', (_req, res, params, body) => {
+  const handbackProject = store.projects.getByName(params.project);
+  if (handbackProject && coordinatorGateRefused(_req, res, handbackProject.id, 'wrap')) return;
   const started = wrapHandback.start(params.project, body);
   if (!started.ok) return errorResponse(res, started.status, started.error, started.code);
   const project = encodeURIComponent(params.project);
@@ -8383,6 +8636,8 @@ route('GET', '/api/sessions/:project/wrap/pr-status', async (req, res, params) =
 
 // POST /api/sessions/:project/wrap/complete — Manual wrap completion
 route('POST', '/api/sessions/:project/wrap/complete', (_req, res, params, body) => {
+  const completeProject = store.projects.getByName(params.project);
+  if (completeProject && coordinatorGateRefused(_req, res, completeProject.id, 'wrap')) return;
   const result = sessions.completeWrap(params.project, body ? body.summary : undefined, body ? body.sessionId : undefined);
   if (result.error) {
     if (result.error.includes('not found') || result.error.includes('No active')) {
@@ -11913,6 +12168,10 @@ if (require.main === module) {
     // listeners are in-memory, so without this a server restart silently
     // deregistered every running session from the switchboard.
     sessions.resyncMedusaListeners();
+    // Resume the server's side of any coordinator rotation a restart
+    // interrupted (#2032); each step is a compare-and-set, so a pass that had
+    // already landed is not repeated.
+    coordinatorRotation.recover();
     // The Master's half of that re-sync (#996): a Master left running across
     // a TangleClaw restart would otherwise drop off the switchboard until its
     // next ensure. Probes tmux and starts nothing when tmux does not answer.
@@ -11981,4 +12240,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
+/**
+ * Every registered route's method and pattern, for tests that must cover a
+ * family of routes as registered rather than as a list someone remembered to
+ * update (#2032: the gated-route test enumerates the Medusa routes this way).
+ * @returns {Array<{method: string, pattern: string}>}
+ */
+function _routePatterns() {
+  return routes.map((r) => ({ method: r.method, pattern: r.pattern }));
+}
+
+module.exports = { _routePatterns, createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
