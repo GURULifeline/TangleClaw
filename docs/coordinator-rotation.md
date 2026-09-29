@@ -90,6 +90,12 @@ authority. The database allows one open rotation per project, enforced by a part
 - **Retry spacing.** A refused attempt is retried no sooner than 15 seconds later.
 - **Settle window.** After an admitted clear, the old thread gets 20 seconds to unload
   (`clear-settling`). No second `/clear` is typed over it inside that window.
+- **Rebind settle window.** Real Codex keeps the old thread loaded for a few seconds after `/clear`,
+  beside the new one. It also opens a short-lived auxiliary thread beside a thread's first turn. For 2
+  minutes after an admitted clear, both are waits (`prior-thread-unloading`, `replacement-settling`)
+  whose next command is `tc rotation advance`. Only if either persists past the window does it become
+  `prior-thread-still-loaded` or `replacement-ambiguous`, which need the operator. The window never
+  binds a thread by guessing: it waits for exactly one candidate.
 - **One pass at a time.** Passes over one rotation are serialized in the server, so two passes can
   never type twice or send two re-entry turns.
 - **Recorded failures.** A pass that throws leaves `driver-error` on the rotation.
@@ -266,7 +272,8 @@ checks are:
 
 - the digest matches the recorded checkpoint;
 - none of the prepare-time inbox messages are still unhandled (mail that arrived later stays queued
-  and does not block);
+  and does not block). A Medusa listener is required only when the prepare recorded messages; a
+  coordinator that runs without the switchboard is not held for one;
 - `control.stateGeneration` is the lane's current control generation, or `null` when there is no
   assignment;
 - for a relaunch, the successor's own launch sequence has been attested READY. Until then the

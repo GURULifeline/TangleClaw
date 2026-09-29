@@ -551,11 +551,45 @@ describe('coordinator context rotation (#2032)', () => {
         server.state.threads.set(NEXT, { status: { type: 'idle' } });
         server.state.threads.set('another-new', { status: { type: 'idle' } });
       };
-      const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 3, deps: deps() });
+      const id = (await prepare()).body.rotation.rotationId;
+      let r = await rotation.drive(id, { attempts: 3, deps: deps() });
+      assert.equal(r.failureCode, 'replacement-settling', 'inside the settle window two threads are a wait, not a verdict');
+      r = await rotation.drive(id, { attempts: 300, deps: deps() });
       assert.equal(r.state, 'rebinding');
-      assert.equal(r.failureCode, 'replacement-ambiguous');
+      assert.equal(r.failureCode, 'replacement-ambiguous', 'still two after the window: the operator decides');
       assert.equal(threadOf(), PRIOR);
       assert.equal(server.calls('turn/start').length, 0);
+    });
+
+    it('LIVE: a short-lived auxiliary thread beside the replacement is waited out, then the one replacement binds', async () => {
+      await serve();
+      channel();
+      onClear = () => {
+        server.state.threads.delete(PRIOR);
+        server.state.threads.set(NEXT, { status: { type: 'idle' } });
+        server.state.threads.set('codex-aux-namer', { status: { type: 'idle' } });
+      };
+      const id = (await prepare()).body.rotation.rotationId;
+      let r = await rotation.drive(id, { attempts: 3, deps: deps() });
+      assert.equal(r.failureCode, 'replacement-settling');
+      server.state.threads.delete('codex-aux-namer');
+      r = await rotation.drive(id, { attempts: 5, deps: deps() });
+      assert.equal(r.state, 'reconciling');
+      assert.equal(r.replacementThreadId, NEXT);
+    });
+
+    it('LIVE: the old thread still loaded for a moment after /clear is waited out, not handed to the operator', async () => {
+      await serve();
+      channel();
+      onClear = () => { server.state.threads.set(NEXT, { status: { type: 'idle' } }); };
+      const id = (await prepare()).body.rotation.rotationId;
+      let r = await rotation.drive(id, { attempts: 3, deps: deps() });
+      assert.equal(r.failureCode, 'prior-thread-unloading');
+      assert.equal(rotation.view(r).nextCommand, 'tc rotation advance', 'not the operator\'s abandon');
+      server.state.threads.delete(PRIOR);
+      r = await rotation.drive(id, { attempts: 5, deps: deps() });
+      assert.equal(r.state, 'reconciling');
+      assert.equal(r.replacementThreadId, NEXT);
     });
 
     it('a failure only the operator can clear stops the driver at once, not after its budget (B2)', async () => {
@@ -570,7 +604,9 @@ describe('coordinator context rotation (#2032)', () => {
       const counting = { ...deps(), sleep: (ms) => { pauses += 1; clockMs += ms; return Promise.resolve(); } };
       const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 500, deps: counting });
       assert.equal(r.failureCode, 'replacement-ambiguous');
-      assert.ok(pauses <= 2, `the driver paused ${pauses} times; it should stop on the first operator-only failure`);
+      const windowPasses = rotation.REBIND_WINDOW_MS / 1000;
+      assert.ok(pauses <= windowPasses + 3, `the driver paused ${pauses} times; it should stop once the settle window has passed`);
+      assert.ok(pauses >= windowPasses - 3, 'and it waited out the window first');
     });
 
     it('no new thread binds nothing', async () => {
@@ -586,8 +622,8 @@ describe('coordinator context rotation (#2032)', () => {
       await serve();
       channel();
       onClear = () => { server.state.threads.set(NEXT, { status: { type: 'idle' } }); };
-      const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 3, deps: deps() });
-      assert.equal(r.failureCode, 'prior-thread-still-loaded');
+      const r = await rotation.drive((await prepare()).body.rotation.rotationId, { attempts: 300, deps: deps() });
+      assert.equal(r.failureCode, 'prior-thread-still-loaded', 'only once the settle window has passed');
       assert.equal(threadOf(), PRIOR);
     });
 
@@ -716,7 +752,16 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(rotation.gate({ projectId: project.id, access: access(), threadId: NEXT, action: 'medusa-send' }).status, 409);
     });
 
+    it('a coordinator without the switchboard, and nothing recorded to drain, is not held for a listener (LIVE)', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      listening = false;
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      assert.equal((await rotation.resume({ access: access(), threadId: NEXT, body }, deps())).status, 200);
+    });
+
     it('a session with no Medusa listener cannot show a drained inbox, so it cannot resume', async () => {
+      inbox = [{ id: 'm-recorded' }];
       const rot = await toReconciling();
       workloadReceipt();
       listening = false;

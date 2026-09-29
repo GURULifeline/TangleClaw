@@ -123,6 +123,11 @@ Also fixed:
 - failures are logged;
 - the `GET /api/tc/rotation` comment is corrected.
 
+**Live-Codex check (RM08) at 394aaab4: FAILED, 2 defects, plus a third found in its logs.** Real Codex keeps the old thread loaded about 2 s after `/clear` beside the new one, and opens a short-lived auxiliary thread beside a thread's first turn. The driver treated both as terminal operator failures.
+- **Settle window.** Now, for 2 minutes after an admitted clear, they are retryable waits (`prior-thread-unloading`, `replacement-settling`), and only become `prior-thread-still-loaded` or `replacement-ambiguous` after that. No thread is ever inferred: binding still needs exactly one candidate.
+- **Listener requirement.** RM08's resume was also refused, because its project runs without Medusa and the resume required a listener regardless. A listener is now required only when the prepare recorded messages to drain.
+- **Tests.** Each live sequence is replayed in a test, and those tests fail with the window removed.
+
 **Tests.** Rotation tests cover prepare, the fence, the rebind and resume, including every rejection, crash-retry at the rebind and the re-entry send, concurrent passes and old-thread reappearance. They also cover the epoch gate per state and caller, the nonce, the role contract, integrity and GitHub drift, readiness, the relaunch claim and the next command. Separate tests cover the checkout fingerprint against real git repos, the GitHub reader, route binding, the verb and `bin/tc` header forwarding, the send-fence route, the wake gate and the live-check script's own verdicts. The v50 migration test compared against a literal `50`; it now reads `CURRENT_SCHEMA_VERSION`, as the store asks, so it still means "advances to HEAD". The four prime golden fixtures changed only by the new `rotation` verb in the generated verb list, regenerated with `UPDATE_PRIME_GOLDEN=1`. The other wake and watchdog tests now stub the new seam so none reads an ambient store.
 
 ## 2026-09-28 — Session-rule mutations are gated on a verified caller (#2013)
