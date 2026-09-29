@@ -1465,6 +1465,32 @@ describe('soak driver — ownership that cannot be verified', () => {
     });
   });
 
+  // V1, variant 3: the directory alone becomes unreadable (the
+  // lock file itself is never touched) at the third event, then is restored.
+  // Nothing about the lock file differs afterwards, so no lock metadata could
+  // tell this apart from an ordinary crash.
+  it('V1 with only the directory unreadable: stops, leaves everything in place, and the resume is marked', { skip: asRoot }, async () => {
+    const owner = { pid: deadPid(), host: os.hostname() };
+    const executors = {};
+    let calls = 0;
+    for (const [kind, fn] of Object.entries(recordingExecutors([]))) {
+      executors[kind] = async (...a) => { if (++calls === 3) fs.chmodSync(dir, 0o000); return fn(...a); };
+    }
+    try {
+      await assert.rejects(run({ executors, lockDeps: { pid: owner.pid } }), (err) => err.code === 'OWNERSHIP_UNVERIFIED' && /EACCES/.test(err.details.why));
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+    assert.deepEqual(logLines().filter((r) => r.type === 'event').map((r) => r.index), [0, 1]);
+    assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false);
+    assert.equal(fs.readFileSync(lockFile(), 'utf8'), JSON.stringify(owner));
+    assert.equal(driver.readSegment(logPath).state, 'active');
+    const result = await run();
+    assert.deepEqual([result.status, result.ownershipUnverified], ['completed-ownership-unverified', true]);
+    assert.equal(logLines().find((r) => r.type === 'resume').recoveredFrom.state, 'ownership-unverified');
+    assert.equal(driver.readLog(logPath).certification.automaticPassAllowed, false);
+  });
+
   // V1, variant 2: every event and `end` were written under verified
   // ownership, then the lock could not be read at release. It used to resume
   // straight to already-complete, leaving no trace in the log.
