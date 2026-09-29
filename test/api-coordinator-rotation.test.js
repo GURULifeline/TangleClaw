@@ -279,3 +279,62 @@ describe('API — every gated route answers the epoch gate (#2032)', () => {
     }
   });
 });
+
+describe('API — GET /api/tc/rotation answers a resumed coordinator with `latest` (#2032)', () => {
+  let tempDir;
+  let server;
+  let port;
+  let project;
+  const LAUNCH = 'launch-latest-route-1';
+
+  before(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-latest-'));
+    store._setBasePath(tempDir);
+    store.init();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-latest-proj-'));
+    project = store.projects.create({ name: 'latest-coordinator', path: dir, engine: 'codex' });
+    const sess = store.sessions.start({
+      projectId: project.id, engineId: 'codex', tmuxSession: 'tc-latest', primePrompt: '',
+      launchSequence: { launchId: LAUNCH, pageBudget: 10000, applicability: 'not-applicable', notApplicableReason: 'test',
+        preflight: {}, sourceManifest: {}, steps: [] }
+    });
+    const now = new Date().toISOString();
+    store.coordinatorRotations.insert({
+      rotationId: 'rot_latest_route', attemptKey: 'latest-route-0001', projectId: project.id, sessionId: sess.id,
+      launchId: LAUNCH, engineId: 'codex', channelId: 1, sequenceId: 1, generation: 1, priorThreadId: 'old-thread',
+      checkpointSchema: 1, checkpointDigest: 'd'.repeat(64), checkpoint: { exchanges: [] }, inboxIds: [],
+      roleId: 'role_x', authorityVersion: 1, checkout: {}, github: [], now
+    });
+    store.coordinatorRotations.updateIf('rot_latest_route', 'fenced', { state: 'active', replacementThreadId: 'new-thread', completedAt: now }, { now });
+    server = createServer();
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', () => { port = server.address().port; resolve(); }));
+  });
+
+  after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('returns no open rotation, and the resumed one as latest with its bound thread, from the real route', async () => {
+    const data = await new Promise((resolve, reject) => {
+      const r = http.request({ hostname: '127.0.0.1', port, path: '/api/tc/rotation', method: 'GET', headers: {
+        'x-tangleclaw-cli': 'tc', 'x-tangleclaw-verb': 'rotation.show',
+        'x-tangleclaw-project-id': String(project.id), 'x-tangleclaw-launch-id': LAUNCH, 'x-tangleclaw-engine-thread': 'new-thread'
+      } }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+      });
+      r.on('error', reject);
+      r.end();
+    });
+    assert.equal(data.status, 200, JSON.stringify(data.body));
+    assert.equal(data.body.rotation, null, 'nothing is open');
+    assert.equal(data.body.latest.state, 'active');
+    assert.equal(data.body.latest.replacementThreadId, 'new-thread');
+    assert.equal(data.body.latest.priorThreadId, 'old-thread');
+    assert.equal(data.body.generation, 1);
+    assert.equal(data.body.binding.forwardedThread, 'new-thread');
+  });
+});
