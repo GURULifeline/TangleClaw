@@ -203,6 +203,26 @@ describe('soak CLI — a lost lock', () => {
   });
 });
 
+describe('soak CLI — ownership that cannot be verified', () => {
+  it('exits 5, never 0, when the log was resumed by an exact-owner reclaim', async () => {
+    const driver = require('../lib/soak/driver');
+    const out = path.join(dir, 's.json');
+    await run(['plan', '--seed', 'ou', '--phase', 'certifying', '--duration-hours', '0.25', '--out', out, '--classes', 'api', '--load-mean-ms', '60000']);
+    const log = path.join(dir, 'l');
+    const argv = ['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'];
+    const deps = { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() };
+    const clean = await run(argv, deps);
+    assert.deepEqual([clean.code, JSON.parse(clean.out).status], [0, 'completed'], clean.err);
+    // What a crash between the end record and the lock release leaves behind.
+    const owner = { pid: require('node:child_process').spawnSync(process.execPath, ['-e', '0']).pid, host: os.hostname() };
+    driver.openSegment(log, owner, 1);
+    fs.writeFileSync(`${log}.lock`, JSON.stringify(owner));
+    const r = await run(argv, deps);
+    assert.equal(r.code, 5, r.err);
+    assert.deepEqual([JSON.parse(r.out).status, JSON.parse(r.out).ownershipUnverified], ['already-complete-ownership-unverified', true]);
+  });
+});
+
 describe('soak CLI — every soak fetch refuses redirects', () => {
   it('passes redirect: manual at every fetch call site in the soak modules', () => {
     const files = ['lib/soak/executors.js', 'lib/soak/driver.js', 'scripts/soak.js'].map((f) => path.join(__dirname, '..', f));

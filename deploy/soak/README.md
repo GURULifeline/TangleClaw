@@ -110,10 +110,11 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - A lock left by a dead process on this host is reclaimed by exactly one contender, which holds the
     `<log>.lock.reclaim` mutex and replaces the lock in one atomic rename. The reclaim is logged.
   - An unreadable lock, a live holder, a holder on another host, or a reclaim already in progress
-    is refused, naming the file to remove if you are sure no driver is running.
+    is refused, naming the file to remove if you are sure no driver is running. An unreadable
+    lock in front of an open segment whose owner is dead is refused for good (see below).
   - Each record is flushed to disk before the next event.
   - **Ownership is re-checked before every log write and before every event**, so the check just
-    before `end` is exact. The moment the lock is found removed, taken over or unreadable:
+    before `end` is exact. The moment the lock is found removed or taken over:
     - nothing more is written to the log, not even a note about the loss, because writing without
       the lock is what the lock forbids;
     - the loss is recorded beside it in a fail-only sidecar, `<log>.lock-lost`. The sidecar is
@@ -125,6 +126,14 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     it, or judging it (`LOG_LOCK_LOST`). A sidecar that does not bind the log, was altered, or cannot
     be read is refused too (`LOG_LOCK_LOST_INVALID`), so tampering never turns a refusal into
     acceptance. Start a new log.
+  - **A lock that cannot be read at all is a third case, `OWNERSHIP_UNVERIFIED`.** Nothing shows
+    another writer, but ownership cannot be shown either, so:
+    - the run stops before any further event or append, as for a loss;
+    - no sidecar is written, the lock is left exactly as it is (a lock that cannot be read is not
+      the run's to remove), and the segment stays open;
+    - the log resumes only through an exact-owner reclaim: the lock must again name the marker's
+      exact owner, that owner must be dead, and every marker/log binding must still hold. The
+      resumed segment is recorded as ownership-unverified (below). Otherwise the log stays refused.
   - A lock the run still owns but cannot remove is a different failure, `LOCK_RELEASE_FAILED`. The
     log is intact; only the lock file is left behind.
 - **Every run segment is bracketed by a durable marker, `<log>.segment`.**
@@ -144,15 +153,36 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
     neither the stop record nor the transition is written.
   - While it exists, in either state, the log is not evidence: `readLog` refuses it
     (`LOG_SEGMENT_OPEN`). A stopped run is never a completed certification.
-  - A later run tells the two ways a segment can be left open apart by the lock:
-    - **An ordinary crash** leaves the marker and the old lock naming the same dead owner on this
-      host. It is reconciled and resumed, and the recovery is recorded (`recoveredFrom`) in the new
-      segment's first record.
-    - **A marker whose lock is gone, replaced or unreadable** may be a lock loss whose sidecar could
-      not be written. It is never resumed (`LOG_SEGMENT_UNRECONCILED`): start a new log, or reset by
-      hand after checking the log.
+  - A later run tells the ways a segment can be left open apart by the lock:
+    - **The old lock names exactly the marker's owner, a dead process on this host.** An ordinary
+      crash leaves this. So does a run stopped by `OWNERSHIP_UNVERIFIED` whose lock later read back,
+      and the two cannot be told apart. The segment is resumed, and **every such resume is recorded
+      as `recoveredFrom.state: "ownership-unverified"`** in the new segment's first record. That
+      includes a log that was already complete: its `resume` record is still appended.
+    - **A marker whose owner is dead, and whose lock is gone, names someone else, holds no identity,
+      or cannot be read**, may be a lock loss whose sidecar could not be written. It is refused for
+      good (`LOG_SEGMENT_UNRECONCILED`): the refusal is recorded in the bound `<log>.lock-lost`
+      sidecar, so no lock restored later, even one naming the exact owner, resumes the log. Start a
+      new log. If the sidecar cannot be written, the refusal says so (`details.condemnError`), and
+      the log must be checked by hand before any use.
+    - **A marker whose owner may still be running, or is on another host**, is refused without
+      recording anything (`details.condemned: null`). It may be a run finishing right now, between
+      releasing its lock and closing its segment.
+  - **An ownership-unverified segment is never a clean result.**
+    - `run` reports `completed-ownership-unverified` or `already-complete-ownership-unverified`,
+      never `completed`, with `ownershipUnverified: true`, and exits 5.
+    - `readLog` returns `ownership.verified: false` with each `unverifiedSegments` entry, and a
+      `certification` disposition: `automaticPassAllowed: false`, `defaultDisposition: "fail-reset"`.
+      The Operator may accept the log instead, but only its exact evidence: the disposition names
+      the log's path, size and sha256, and `acceptanceMatches` holds only for an acceptance of
+      exactly those. A certification judge enforces the disposition through these fields.
   - A marker that was altered, or no longer matches the log, is refused (`LOG_SEGMENT_INVALID`). That
     includes a `stopped-clean` marker whose log has changed since the stop.
+  - **A marker that cannot be removed at the end fails the run with `SEGMENT_CLOSE_FAILED`.** The
+    log is intact, but nothing reconciles the leftover marker automatically: start a new log, or
+    reset it by hand after checking the log. If the marker was removed but the directory fsync
+    failed, whether it survives a crash is unknown, and the failure says so (`cleanup: "unknown"`)
+    rather than claiming the marker remains (`cleanup: "marker-remains"`).
   - An error the run hit for another reason is always reported first, with any lock outcome
     attached.
 - **The log is evidence, so nothing rewrites it.** Reading it changes nothing. A final line torn by
@@ -168,7 +198,9 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - A log that survived several crashes, each sealed, still resumes, whichever byte a crash cut.
   - **Known limit: a check-then-write window.** Ownership is checked immediately before each append,
     not atomically with it. A process that took a live holder's lock by hand in that instant could
-    precede one append. Release still detects the takeover and condemns the log. Closing the window
+    precede one append. Release still detects the takeover and condemns the log. Nor can a lock that
+    was unreadable for a while and then read back be told from one that never changed: that is why
+    every exact-owner resume is recorded as ownership-unverified. Closing the window
     would need `flock`, a native module this zero-dependency project does not use. Accepted by the
     Architect.
   - **Known limit: the log is not signed.** Seals detect accidental damage, not forgery. Someone
@@ -192,7 +224,7 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
   - A deferred fault delays the load queued behind it, and load that goes stale during that wait is
     skipped and recorded like any other stale load. That is intended: faults take priority over load.
 
-Exit codes: 0 done, 2 usage, 3 refused (the code is printed as JSON on stderr), 4 stopped.
+Exit codes: 0 done, 2 usage, 3 refused (the code is printed as JSON on stderr), 4 stopped, 5 done but with an ownership-unverified segment (not an automatic pass).
 
 ```sh
 node scripts/soak.js run --schedule s.json --api http://<guest-ip>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install]

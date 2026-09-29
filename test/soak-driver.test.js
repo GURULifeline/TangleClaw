@@ -87,7 +87,7 @@ describe('soak driver — a complete run', () => {
     const clock = fakeClock(1_000_000);
     const ran = [];
     const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors(ran), ctx: {}, logPath, clock });
-    assert.deepEqual(result, { status: 'completed', ran: s.events.length, resumedFrom: 0, tornTail: false, skipped: 0 });
+    assert.deepEqual(result, { status: 'completed', ran: s.events.length, resumedFrom: 0, tornTail: false, skipped: 0, ownershipUnverified: false });
     assert.deepEqual(ran, s.events.map((e) => e.kind));
 
     const recs = records(logPath);
@@ -947,7 +947,9 @@ describe('soak driver — the log lock and header', () => {
       rmSync: (p, o) => { if (what === 'rm') { const e = new Error('perm'); e.code = 'EPERM'; throw e; } return fs.rmSync(p, o); }
     });
     const unreadable = driver.acquireLogLock(logPath, { releaseFs: io('read') });
-    assert.equal(unreadable.release().lost.why, 'lock unreadable (EIO)', 'ownership that cannot be verified is lost');
+    const u = unreadable.release();
+    assert.deepEqual([u.lost, u.unverified.why, u.releaseFailed], [null, 'lock unreadable (EIO)', null], 'ownership that cannot be read is unverified, not lost');
+    assert.ok(fs.existsSync(`${logPath}.lock`), 'a lock that cannot be read is never removed');
     fs.rmSync(`${logPath}.lock`);
     const stuck = driver.acquireLogLock(logPath, { releaseFs: io('rm') });
     const r = stuck.release();
@@ -1104,8 +1106,10 @@ describe('soak driver — the log lock and header', () => {
           schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), lockDeps: { releaseFs: ioFail },
           shouldStop: () => { if (++calls === 3) throw boom; return false; }
         }),
-        (err) => err === boom && /lock unreadable \(EIO\)/.test(err.lockLost.why)
+        (err) => err === boom && /lock unreadable \(EIO\)/.test(err.ownershipUnverified.why) && err.lockLost === undefined
       );
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'an unverified lock condemns nothing');
+      assert.equal(driver.readSegment(logPath).state, 'active', 'the segment stays open');
     });
   });
 
@@ -1176,9 +1180,9 @@ describe('soak driver — the log lock and header', () => {
       const owner = { pid: deadPid(), host: os.hostname() };
       await crashedRun(s, owner);
       const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
-      assert.equal(result.status, 'completed');
+      assert.equal(result.status, 'completed-ownership-unverified', 'an exact-owner reclaim is never a clean completion');
       const resume = logLines().find((r) => r.type === 'resume');
-      assert.deepEqual(resume.recoveredFrom, { owner, segmentStartedAt: T0 + 1, state: 'active' }, 'the recovery is on record, written under the new lock');
+      assert.deepEqual(resume.recoveredFrom, { owner, segmentStartedAt: T0 + 1, state: 'ownership-unverified' }, 'the recovery is on record, written under the new lock');
       assert.equal(driver.readSegment(logPath), null);
       assert.equal(fs.existsSync(`${logPath}.lock`), false);
       assert.equal(driver.readLog(logPath).ended, true);
@@ -1189,7 +1193,8 @@ describe('soak driver — the log lock and header', () => {
       const owner = { pid: deadPid(), host: os.hostname() };
       await crashedRun(s, owner, { complete: true });
       const result = await driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) });
-      assert.deepEqual([result.status, result.recoveredFrom.owner], ['already-complete', owner]);
+      assert.deepEqual([result.status, result.recoveredFrom.owner], ['already-complete-ownership-unverified', owner]);
+      assert.equal(logLines().filter((r) => r.type === 'resume').at(-1).recoveredFrom.state, 'ownership-unverified', 'the recovery is recorded even though the log was complete');
       assert.equal(driver.readSegment(logPath), null);
       assert.equal(driver.readLog(logPath).ended, true);
     });
@@ -1198,8 +1203,8 @@ describe('soak driver — the log lock and header', () => {
       const s = apiSchedule();
       const owner = { pid: deadPid(), host: os.hostname() };
       await crashedRun(s, owner, { complete: true, lock: false });
-      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED');
-      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+      await assert.rejects(driver.runSchedule({ schedule: s, executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0) }), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.condemned === driver.lockLostPath(logPath));
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST', 'the refusal is recorded, so it is permanent');
       assert.equal(fs.existsSync(`${logPath}.lock`), false, 'the refused run released the lock it took');
     });
 
@@ -1386,5 +1391,231 @@ describe('soak driver — the log lock and header', () => {
         String(startEpochMs)
       );
     }
+  });
+});
+
+describe('soak driver — ownership that cannot be verified', () => {
+  const asRoot = process.getuid && process.getuid() === 0 ? 'running as root: chmod does not deny root' : false;
+  const lockFile = () => `${logPath}.lock`;
+  const logLines = () => records(logPath);
+  const deadPid = () => require('node:child_process').spawnSync(process.execPath, ['-e', '0']).pid;
+  const sha = (buf) => require('node:crypto').createHash('sha256').update(buf).digest('hex');
+  const run = (over = {}) => driver.runSchedule({ schedule: apiSchedule(), executors: recordingExecutors([]), ctx: {}, logPath, clock: fakeClock(T0), ...over });
+
+  /**
+   * Executors that call `hook` once, inside the second event.
+   * @param {Function} hook - Called once
+   * @returns {object} Executors
+   */
+  function secondEventDoes(hook) {
+    const out = {};
+    let calls = 0;
+    for (const [kind, fn] of Object.entries(recordingExecutors([]))) {
+      out[kind] = async (...a) => { if (++calls === 2) hook(); return fn(...a); };
+    }
+    return out;
+  }
+
+  /**
+   * Leave the log as a crashed run would: part-written, with an open
+   * segment naming `owner`, and the lock as `lock` says.
+   * @param {{pid: number, host: string}} owner - The crashed run's owner
+   * @param {string|null} lock - Lock file content, or null for none
+   */
+  async function crashed(owner, lock) {
+    await run({ shouldStop: afterEvents(2) });
+    driver.openSegment(logPath, owner, T0 + 1);
+    if (lock !== null) fs.writeFileSync(lockFile(), lock);
+  }
+
+  // V1, variant 1: the lock became unreadable mid-run, and the sidecar could
+  // not have been written either. It used to fail LOCK_LOST_UNRECORDED and,
+  // once the lock read back, resume as an ordinary crash to ended=true.
+  it('V1 mid-run: stops at an unreadable lock with nothing more written, and a later resume is recorded and never clean', { skip: asRoot }, async () => {
+    const owner = { pid: deadPid(), host: os.hostname() };
+    const executors = secondEventDoes(() => { fs.chmodSync(lockFile(), 0o000); fs.chmodSync(dir, 0o500); });
+    try {
+      await assert.rejects(run({ executors, lockDeps: { pid: owner.pid } }),
+        (err) => err.code === 'OWNERSHIP_UNVERIFIED' && /EACCES/.test(err.details.why) && err.details.expected.pid === owner.pid);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+      fs.chmodSync(lockFile(), 0o600);
+    }
+    assert.deepEqual(logLines().filter((r) => r.type === 'event').map((r) => r.index), [0], 'the event in flight and everything after it were never written');
+    assert.ok(!logLines().some((r) => r.type === 'end'));
+    assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'no sidecar: nothing shows another writer');
+    assert.equal(fs.readFileSync(lockFile(), 'utf8'), JSON.stringify(owner), 'the unreadable lock was left exactly as it was');
+    assert.deepEqual([driver.readSegment(logPath).state, driver.readSegment(logPath).owner], ['active', owner]);
+    assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN', 'not evidence in the meantime');
+
+    // The lock reads back naming the exact dead owner: resumable, but marked.
+    const result = await run();
+    assert.deepEqual([result.status, result.ownershipUnverified], ['completed-ownership-unverified', true]);
+    const resume = logLines().find((r) => r.type === 'resume');
+    assert.deepEqual(resume.recoveredFrom, { owner, segmentStartedAt: resume.recoveredFrom.segmentStartedAt, state: 'ownership-unverified' });
+    const log = driver.readLog(logPath);
+    assert.equal(log.ended, true);
+    assert.deepEqual([log.ownership.verified, log.ownership.unverifiedSegments.map((u) => u.owner)], [false, [owner]]);
+    const bytes = fs.readFileSync(logPath);
+    assert.deepEqual(log.certification, {
+      automaticPassAllowed: false,
+      defaultDisposition: 'fail-reset',
+      reason: 'OWNERSHIP_UNVERIFIED',
+      operatorAcceptance: { required: true, evidence: { logPath: path.resolve(logPath), logBytes: bytes.length, logSha256: sha(bytes) } }
+    });
+  });
+
+  // V1, variant 2: every event and `end` were written under verified
+  // ownership, then the lock could not be read at release. It used to resume
+  // straight to already-complete, leaving no trace in the log.
+  it('V1 at release: leaves the lock and segment in place, and the already-complete resume is recorded and never clean', async () => {
+    const owner = { pid: deadPid(), host: os.hostname() };
+    const eio = { readFileSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; }, rmSync: () => assert.fail('an unverified lock is never removed') };
+    await assert.rejects(run({ lockDeps: { pid: owner.pid, releaseFs: eio } }),
+      (err) => err.code === 'OWNERSHIP_UNVERIFIED' && err.details.result.status === 'completed' && /EIO/.test(err.details.why));
+    assert.ok(logLines().some((r) => r.type === 'end'));
+    assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false);
+    assert.equal(fs.readFileSync(lockFile(), 'utf8'), JSON.stringify(owner));
+    assert.equal(driver.readSegment(logPath).state, 'active');
+    assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_SEGMENT_OPEN');
+
+    const before = logLines().length;
+    const result = await run();
+    assert.deepEqual([result.status, result.ran, result.ownershipUnverified], ['already-complete-ownership-unverified', 0, true]);
+    const added = logLines().slice(before);
+    assert.deepEqual(added.map((r) => r.type), ['resume', 'lock-reclaimed'], 'the recovery is persisted in the log');
+    assert.equal(added[0].recoveredFrom.state, 'ownership-unverified');
+    assert.equal(driver.readLog(logPath).certification.automaticPassAllowed, false);
+    // Asking again changes nothing: the log stays marked.
+    const again = await run();
+    assert.deepEqual([again.status, again.ownershipUnverified], ['already-complete-ownership-unverified', true]);
+  });
+
+  it('keeps a clean run clean: verified ownership, an automatic pass allowed, exit-worthy completed', async () => {
+    const result = await run();
+    assert.deepEqual([result.status, result.ownershipUnverified], ['completed', false]);
+    const log = driver.readLog(logPath);
+    assert.deepEqual([log.ownership, log.certification.automaticPassAllowed, log.certification.defaultDisposition], [{ verified: true, unverifiedSegments: [] }, true, null]);
+  });
+
+  it('lets a judge accept only the exact evidence the disposition names', async () => {
+    const owner = { pid: deadPid(), host: os.hostname() };
+    await crashed(owner, JSON.stringify(owner));
+    await run();
+    const cert = driver.readLog(logPath).certification;
+    const exact = { ...cert.operatorAcceptance.evidence };
+    assert.equal(driver.acceptanceMatches(cert, exact), true);
+    for (const [label, bad] of [
+      ['other bytes', { ...exact, logSha256: '0'.repeat(64) }],
+      ['another size', { ...exact, logBytes: exact.logBytes + 1 }],
+      ['another log', { ...exact, logPath: '/tmp/other.ndjson' }],
+      ['no binding', {}],
+      ['nothing', null]
+    ]) assert.equal(driver.acceptanceMatches(cert, bad), false, label);
+    assert.equal(driver.acceptanceMatches(driver.readLog(logPath).certification, exact), true, 'reading again names the same evidence');
+    fs.appendFileSync(logPath, `${JSON.stringify({ type: 'note' })}\n`);
+    assert.equal(driver.acceptanceMatches(driver.readLog(logPath).certification, exact), false, 'an acceptance does not follow the log once it changes');
+  });
+
+  describe('exact owner and exact bindings', () => {
+    it('never resumes when the lock names the marker\'s pid on another host', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify({ pid: owner.pid, host: 'elsewhere' }));
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCKED');
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'a lock on another host proves nothing about the owner');
+    });
+
+    it('never resumes, and condemns, when the lock names another dead process on this host', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      const other = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(other));
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.lockFound.pid === other.pid && err.details.condemned === driver.lockLostPath(logPath));
+      fs.writeFileSync(lockFile(), JSON.stringify(owner));
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST', 'a lock restored to name the exact owner resumes nothing');
+    });
+
+    it('never resumes an exact-owner lock when the marker is on another host', async () => {
+      const pid = deadPid();
+      await crashed({ pid, host: 'elsewhere' }, JSON.stringify({ pid, host: os.hostname() }));
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.condemned === null);
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'an owner on another host is not provably dead, so it is not condemned');
+    });
+
+    it('never resumes an exact-owner lock when the log no longer begins with the bytes the marker bound', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(owner));
+      const bytes = fs.readFileSync(logPath);
+      bytes[bytes.indexOf('"index":0') + 8] = 0x37; // one digit of the first event's index
+      fs.writeFileSync(logPath, bytes);
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_INVALID');
+    });
+  });
+
+  describe('permanent refusal', () => {
+    it('condemns a segment whose lock was removed, so a lock restored later still resumes nothing', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, null);
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.lockFound === null && err.details.condemned !== null);
+      const side = JSON.parse(fs.readFileSync(driver.lockLostPath(logPath), 'utf8'));
+      assert.deepEqual([side.expected, side.observed], [owner, null]);
+      fs.writeFileSync(lockFile(), JSON.stringify(owner));
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST');
+      assert.throws(() => driver.readLog(logPath), (err) => err.code === 'LOG_LOCK_LOST');
+    });
+
+    it('condemns a segment whose lock is unreadable at recovery, even once it reads back as the exact owner', { skip: asRoot }, async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, JSON.stringify(owner));
+      fs.chmodSync(lockFile(), 0o000);
+      try {
+        await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && /unreadable \(EACCES\)/.test(err.message) && err.details.condemned !== null);
+      } finally {
+        fs.chmodSync(lockFile(), 0o600);
+      }
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST');
+    });
+
+    it('condemns a segment whose lock holds no identity at recovery', async () => {
+      const owner = { pid: deadPid(), host: os.hostname() };
+      await crashed(owner, 'not json');
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && /unparseable/.test(err.message));
+      fs.writeFileSync(lockFile(), JSON.stringify(owner));
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCK_LOST');
+    });
+
+    it('never condemns a segment whose owner may still be running', async () => {
+      await crashed({ pid: process.pid, host: os.hostname() }, null);
+      await assert.rejects(run(), (err) => err.code === 'LOG_SEGMENT_UNRECONCILED' && err.details.condemned === null);
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false, 'a live owner may be finishing its segment right now');
+      fs.writeFileSync(lockFile(), 'not json');
+      await assert.rejects(run(), (err) => err.code === 'LOG_LOCKED' && err.details.lockUnreadable === 'unparseable');
+      assert.equal(fs.existsSync(driver.lockLostPath(logPath)), false);
+    });
+
+    it('still condemns a lock removed or taken over mid-run as LOCK_LOST, never as unverified', async () => {
+      await assert.rejects(run({ executors: secondEventDoes(() => fs.rmSync(lockFile())) }), (err) => err.code === 'LOCK_LOST');
+      assert.ok(fs.existsSync(driver.lockLostPath(logPath)));
+      fs.rmSync(driver.lockLostPath(logPath));
+      fs.rmSync(driver.segmentPath(logPath));
+      fs.rmSync(logPath);
+      await assert.rejects(run({ executors: secondEventDoes(() => fs.writeFileSync(lockFile(), JSON.stringify({ pid: 1, host: 'intruder' }))) }), (err) => err.code === 'LOCK_LOST');
+      assert.ok(fs.existsSync(driver.lockLostPath(logPath)));
+    });
+  });
+
+  describe('a segment that could not be closed', () => {
+    it('says to start a new log or reset by hand when the marker could not be removed', async () => {
+      const failRm = { rmSync: () => { const e = new Error('io'); e.code = 'EIO'; throw e; } };
+      await assert.rejects(run({ segmentFs: failRm }), (err) => err.code === 'SEGMENT_CLOSE_FAILED' && err.details.cleanup === 'marker-remains'
+        && /start a new log, or reset it by hand/.test(err.message) && !/until it is reconciled/.test(err.message));
+      assert.ok(fs.existsSync(driver.segmentPath(logPath)));
+    });
+
+    it('reports the cleanup as unknown, not as a marker that remains, when the unlink worked but the directory fsync failed', async () => {
+      const failSync = { fsyncDir: () => { const e = new Error('io'); e.code = 'EIO'; throw e; } };
+      await assert.rejects(run({ segmentFs: failSync }), (err) => err.code === 'SEGMENT_CLOSE_FAILED' && err.details.cleanup === 'unknown'
+        && /unknown/.test(err.message) && !/could not be removed/.test(err.message) && err.details.result.status === 'completed');
+      assert.equal(fs.existsSync(driver.segmentPath(logPath)), false, 'the marker is gone now; only its durability is unknown');
+    });
   });
 });

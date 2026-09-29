@@ -30,7 +30,8 @@
  *
  * Exit codes: 0 done (completed, or the log had already completed), 2 usage
  * error, 3 refused (the code is printed as JSON on stderr), 4 stopped before
- * the end.
+ * the end, 5 done but a segment's lock ownership could not be verified
+ * (`*-ownership-unverified`), which is not an automatic certification pass.
  *
  * @module scripts/soak
  */
@@ -253,7 +254,9 @@ async function cmdRun(flags, io, deps) {
     }
   });
   io.stdout.write(`${JSON.stringify(result)}\n`);
-  return result.status === 'stopped' ? 4 : 0;
+  if (result.status === 'stopped') return 4;
+  // Finished, but not cleanly: the default disposition is fail and reset.
+  return result.ownershipUnverified ? 5 : 0;
 }
 
 /**
@@ -286,7 +289,7 @@ async function main(argv, deps = {}) {
     if (err instanceof driver.DriverRefusal) {
       // A lock lost during a run that also failed rides along as a secondary
       // fact; the primary refusal stays the headline.
-      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details, ...(err.lockLost ? { lockLost: err.lockLost } : {}), ...(err.lockReleaseFailed ? { lockReleaseFailed: err.lockReleaseFailed } : {}), ...(err.segmentCloseFailed ? { segmentCloseFailed: err.segmentCloseFailed } : {}), ...(err.lockRelease ? { lockRelease: err.lockRelease } : {}) })}\n`);
+      io.stderr.write(`${JSON.stringify({ code: err.code, message: err.message, details: err.details, ...(err.lockLost ? { lockLost: err.lockLost } : {}), ...(err.ownershipUnverified ? { ownershipUnverified: err.ownershipUnverified } : {}), ...(err.lockReleaseFailed ? { lockReleaseFailed: err.lockReleaseFailed } : {}), ...(err.segmentCloseFailed ? { segmentCloseFailed: err.segmentCloseFailed } : {}), ...(err.lockRelease ? { lockRelease: err.lockRelease } : {}) })}\n`);
       return 3;
     }
     throw err;
