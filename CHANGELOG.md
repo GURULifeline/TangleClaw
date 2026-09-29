@@ -60,7 +60,7 @@ All notable changes to TangleClaw are documented in this file.
   - **The guest's network isolation is attested at admission and at every sample** (Architect rulings A43, A44 and A47).
     - Two joined planes are required: the admin plane (packet filter on, with an exact ruleset digest; boot identity; a `host-only` management path, meaning SSH in from the configured host only) and the workload plane (non-admin identity; `sudo` and `pfctl` refused; IPv4, IPv6 and DNS egress denied).
     - They come from a program pinned with `start --isolation-producer`, and must be bound to that sample.
-    - In the guest that program is `guest-setup.sh --verify-network --candidate --run-id --manifest-digest --sample-seq`. It runs as the guest admin, takes one fresh `--verify-admin` line and one fresh `--verify-workload` line (the latter as the workload user), and prints one bound pair. Any failure prints nothing, so the sample reads as unattested. The workload plane now reports numeric group ids, and the healthy management path is `host-only` (SSH in from the configured host only), never `closed`.
+    - In the guest that program is `guest-setup.sh --verify-network --candidate --run-id --manifest-digest --sample-seq`. It runs as the guest admin, takes one fresh `--verify-admin` line and one fresh `--verify-workload` line (the latter as the workload user), and prints one bound pair. When a verifier positively measures isolation broken (packet filter off or its rules changed, a privileged workload, `sudo`, `pfctl` or egress actually permitted), it prints a bound breach envelope instead, and the run fails. Anything it could not measure prints nothing, so the sample reads as unattested; the failure's class and a short, sanitized tail of its stderr stay in the private sample diagnostics. The workload plane now reports numeric group ids, and the healthy management path is `host-only` (SSH in from the configured host only), never `closed`.
     - An unattested sample earns nothing. A breach, a reboot or a changed ruleset fails the run.
     - The run's baseline is written once, at admission. The admission record now publishes `isolation` and `baselineSource`.
   - **The relay reads the guest once, and its record proves itself.**
@@ -68,6 +68,7 @@ All notable changes to TangleClaw are documented in this file.
     - Each remote has its own relay repository, held under a lock.
     - The record is created once, binding the commit, its tree and the digests of the admission, the scorecard and the finalization.
     - `verifyRecord` re-derives every binding from the public branch.
+    - Finalizing and relaying one run share a per-run lock, so a re-finalize cannot land mid-relay, and the relay records the digest of the exact finalization bytes it read.
     - A host GitHub failure now leaves a recorded reason in each sample it affects.
 
 - **Release-candidate certification is hardened for the soak** (#2020 integration of #1962 and #1975).

@@ -804,7 +804,7 @@ describe('soak guest: workload verifier', () => {
     const [j] = r.json;
     assert.equal(j.mode, 'workload');
     assert.equal(j.ok, true);
-    assert.deepEqual(j.identity, { user: 'soakrun', uid: 502, groups: 'staff everyone localaccounts' });
+    assert.deepEqual(j.identity, { user: 'soakrun', uid: 502, groups: 'staff everyone localaccounts', gids: '20 12 61' });
     assert.deepEqual(j.refused, { sudo: true, pfctl: true });
     assert.deepEqual(Object.keys(j.artifact), ['scriptSha256', 'profileSha256', 'guestConfSha256']);
     assert.deepEqual(j.probes, { tcp4: '1.1.1.1', tcp6: '2606:4700:4700::1111', udpDns: '1.1.1.1' });
@@ -943,18 +943,48 @@ describe('soak guest: --verify-network, one bound sample (Architect ruling 2baea
     assert.equal(r.stdout, '');
   });
 
-  for (const [label, over, env] of [
-    ['the admin plane cannot attest (pf off)', { pfctl: '[ "$*" = "-s info" ] && echo "Status: Disabled" ; exit 0' }, {}],
-    ['the workload plane cannot attest (egress answers)', { nc: 'exit 0' }, {}],
-    ['the workload is in the admin group by number', {}, { FAKE_GIDS: '20 80' }]
+  // A MEASURED unsafe fact is a bound breach envelope, which fails the run.
+  for (const [label, over, env, plane, fact] of [
+    ['pf reads Disabled', { pfctl: '[ "${FAKE_USER:-admin}" = admin ] || exit 1\ncase "$*" in "-s info") echo "Status: Disabled";; esac' }, {}, 'admin', 'pf-disabled'],
+    ['an egress probe answers', { nc: 'exit 0' }, {}, 'workload', 'egress-permitted'],
+    ['the workload is in the admin group by number', {}, { FAKE_GIDS: '20 80' }, 'workload', 'privileged-workload']
   ]) {
-    it(`prints no pair and exits 3 when ${label}`, () => {
+    it(`prints one bound breach envelope, and no healthy plane, when ${label}`, () => {
       const f = guestFakes(tmp, over);
       const r = setup(ARGS, f, tmp, env);
-      assert.equal(r.status, 3, r.stderr);
-      assert.equal(r.stdout, '', 'the runner records unattested');
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim().split('\n').length, 1);
+      const out = JSON.parse(r.stdout);
+      assert.deepEqual(Object.keys(out), ['breach']);
+      assert.ok(out.breach.facts.some((x) => x.plane === plane && x.fact === fact), JSON.stringify(out.breach.facts));
+      assert.deepEqual([out.breach.candidateSha, out.breach.runId, out.breach.manifestDigest, out.breach.sampleSeq], [B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq]);
+      assert.equal(isolation.judgeIsolation(out, B).observation.state, 'breached');
     });
   }
+
+  // Anything the guest could not MEASURE is unavailable: no pair, no breach.
+  for (const [label, over] of [
+    ['an egress probe hangs past the timeout', { nc: 'sleep 30' }],
+    ['the DNS tool is missing', { dig: null }],
+    ['the SSH management path cannot be seen', { netstat: 'echo "tcp4 0 0 127.0.0.1.3102 *.* LISTEN"' }],
+    ['pfctl cannot report pf\'s status', { pfctl: '[ "${FAKE_USER:-admin}" = admin ] || exit 1\ncase "$*" in "-s info") echo "garbled";; esac' }]
+  ]) {
+    it(`prints nothing and exits 3 when ${label}`, () => {
+      const f = guestFakes(tmp, over);
+      const r = setup(ARGS, f, tmp);
+      assert.equal(r.status, 3, r.stderr);
+      assert.equal(r.stdout, '', 'the runner records unattested, never a breach');
+    });
+  }
+
+  it('reports a measured breach in the raw verifier as code BREACH with its fact, and a failure to measure as REFUSED', () => {
+    const breached = setup(['--verify-workload'], guestFakes(tmp, { nc: 'exit 0' }), tmp, { FAKE_USER: 'soakrun' });
+    assert.equal(breached.status, 3);
+    assert.deepEqual([breached.json[0].ok, breached.json[0].code, breached.json[0].breach.fact], [false, 'BREACH', 'egress-permitted']);
+    assert.ok(breached.json[0].boot && breached.json[0].artifact, 'a breach line carries the boot and artifact identity it is bound by');
+    const hung = setup(['--verify-workload'], guestFakes(tmp, { nc: 'sleep 30' }), tmp, { FAKE_USER: 'soakrun' });
+    assert.equal(hung.json[0].code, 'REFUSED');
+  });
 
   it('keeps the raw verifiers for diagnostics, the workload one now with numeric group ids', () => {
     const f = guestFakes(tmp);

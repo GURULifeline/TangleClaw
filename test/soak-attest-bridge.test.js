@@ -116,12 +116,67 @@ describe('soak attest bridge: two fresh raw lines become one bound pair (Archite
     let out = '';
     let err = '';
     const io = { stdout: { write: (s) => { out += s; } }, stderr: { write: (s) => { err += s; } } };
-    assert.equal(bridge.main([line(admin()), line(workload()), B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], io), 0);
+    assert.equal(bridge.main([line(admin()), '0', line(workload()), '0', B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], io), 0);
     assert.equal(out.split('\n').filter(Boolean).length, 1);
     out = '';
-    assert.equal(bridge.main([line(admin({ ok: false })), line(workload()), B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], io), 3);
+    assert.equal(bridge.main([line(admin({ ok: false })), '3', line(workload()), '0', B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], io), 3);
     assert.equal(out, '');
     assert.match(err, /NOT_OK/);
     assert.equal(bridge.main([line(admin())], io), 3, 'a wrong argument count yields no pair');
+    out = '';
+    assert.equal(bridge.main([line(breachLine('admin', 'pf-disabled')), '3', line(workload()), '0', B.candidateSha, B.runId, B.manifestDigest, B.sampleSeq], io), 0);
+    assert.ok(JSON.parse(out).breach, 'a measured breach is printed as its envelope');
+  });
+});
+
+
+/**
+ * A raw line reporting a MEASURED breach, as a verifier prints it (exit 3).
+ * @param {'admin'|'workload'} mode - The plane
+ * @param {string} fact - The measured fact
+ * @param {object} [over] - Top-level fields to replace
+ * @returns {object} The line's object
+ */
+function breachLine(mode, fact, over = {}) {
+  return { schema: 'tc.soak-guest-attest/v1', mode, ok: false, code: 'BREACH', breach: { fact }, reason: 'measured', time: '2026-09-29T19:50:02Z', boot: BOOT, artifact: ART, ...over };
+}
+
+describe('soak attest bridge: a measured breach is bound, an inability to measure is not (Architect ruling 727dcaaf)', () => {
+  const binding = { candidateSha: B.candidateSha, runId: B.runId, manifestDigest: B.manifestDigest, sampleSeq: 7 };
+
+  it('binds an admin-plane breach without fabricating a healthy plane, and the judge reads it as breached', () => {
+    const r = bridge.bridge(line(breachLine('admin', 'pf-disabled')), line(workload()), B, { admin: 3, workload: 0 });
+    assert.deepEqual(Object.keys(r), ['breach']);
+    assert.deepEqual(r.breach, { schema: bridge.BREACH_SCHEMA, ...binding, bootId: `${BOOT.session}@${BOOT.time}`, facts: [{ plane: 'admin', fact: 'pf-disabled' }], observedAt: Date.parse('2026-09-29T19:50:02Z') });
+    const judged = isolation.judgeIsolation(r, binding);
+    assert.equal(judged.observation.state, 'breached');
+    assert.deepEqual(judged.observation.facts, ['admin:pf-disabled']);
+  });
+
+  it('binds a workload-plane breach even when the admin plane could not attest', () => {
+    const r = bridge.bridge('not json\n', line(breachLine('workload', 'egress-permitted')), B, { admin: 3, workload: 3 });
+    assert.deepEqual(r.breach.facts, [{ plane: 'workload', fact: 'egress-permitted' }]);
+  });
+
+  it('names both facts when both planes measured a breach', () => {
+    const r = bridge.bridge(line(breachLine('admin', 'pf-rules-changed')), line(breachLine('workload', 'sudo-permitted')), B, { admin: 3, workload: 3 });
+    assert.deepEqual(r.breach.facts, [{ plane: 'admin', fact: 'pf-rules-changed' }, { plane: 'workload', fact: 'sudo-permitted' }]);
+  });
+
+  for (const [name, a, rcA] of [
+    ['a refusal to measure (code REFUSED)', { ...breachLine('admin', 'pf-disabled'), code: 'REFUSED' }, 3],
+    ['a BREACH code from a verifier that did not exit 3', breachLine('admin', 'pf-disabled'), 0],
+    ['an unknown breach fact', breachLine('admin', 'pf-flaky'), 3],
+    ['a BREACH with no fact', { ...breachLine('admin', 'pf-disabled'), breach: null }, 3],
+    ['a missing tool reported by the verifier', { schema: 'tc.soak-guest-attest/v1', mode: 'admin', ok: false, code: 'ENCODER_MISSING', reason: 'node is missing' }, 3]
+  ]) {
+    it(`never reads ${name} as a breach: the sample is unattested`, () => {
+      refuses(() => bridge.bridge(line(a), line(workload()), B, { admin: rcA, workload: 0 }), 'NOT_OK');
+    });
+  }
+
+  it('refuses a breach it cannot bind to one boot (FIELD, SPLIT)', () => {
+    refuses(() => bridge.bridge(line(breachLine('admin', 'pf-disabled', { boot: undefined })), line(workload()), B, { admin: 3, workload: 0 }), 'FIELD');
+    refuses(() => bridge.bridge(line(breachLine('admin', 'pf-disabled')), line(breachLine('workload', 'sudo-permitted', { boot: { ...BOOT, time: 1 } })), B, { admin: 3, workload: 3 }), 'SPLIT');
   });
 });

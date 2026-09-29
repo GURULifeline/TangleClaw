@@ -146,6 +146,25 @@ refuse() {
   exit 3
 }
 
+# A MEASURED breach: the verifier positively observed an unsafe isolation fact
+# (pf reported disabled, a loaded ruleset that is not the profile, a
+# privileged workload, sudo or pfctl or egress actually permitted). Its line
+# carries code BREACH, a closed breach.fact, and the boot and artifact
+# identity, so --verify-network can bind it to the sample. Anything the
+# verifier could not measure (a missing tool, a timeout, unreadable output) is
+# a refusal instead, which is never read as a breach. Outside the two verifier
+# modes it is an ordinary refusal.
+breach() {
+  local fact="$1"; shift
+  if [ "$mode" = 'admin' ] || [ "$mode" = 'workload' ]; then
+    echo "breach ($fact): $*" >&2
+    emit_json "schema=s:$SCHEMA" "mode=s:$mode" "ok=b:false" "code=s:BREACH" "breach.fact=s:$fact" "reason=s:$*" \
+      ${common_json[@]+"${common_json[@]}"} ${fail_extra[@]+"${fail_extra[@]}"}
+    exit 3
+  fi
+  refuse "$*"
+}
+
 # A pane launched by a live TangleClaw exports TANGLECLAW_API. This script
 # rewrites the firewall, creates a user and registers projects, so it never
 # runs there.
@@ -307,7 +326,7 @@ must_be_denied() {
   local what="$1"; shift
   local rc=0
   bounded "$@" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 0 ] || refuse "$what answered: the guest is not isolated"
+  [ "$rc" -ne 0 ] || breach egress-permitted "$what answered: the guest is not isolated"
   [ "$rc" -ne 124 ] || refuse "$what hung past ${t}s: denial is not proven"
 }
 
@@ -453,7 +472,7 @@ check_workload_identity() {
   [ "$(stat -f %u "$wl_home" 2>/dev/null || true)" = "$wl_uid" ] || refuse "$wl_home is not owned by $user ($wl_uid)"
   for g in admin wheel; do
     if dseditgroup -o checkmember -m "$user" "$g" >/dev/null 2>&1; then
-      refuse "$user is a member of $g; the workload must not be an admin (fix it by hand, this script never demotes an account)"
+      breach privileged-workload "$user is a member of $g; the workload must not be an admin (fix it by hand, this script never demotes an account)"
     fi
   done
   # Judged by exit status, not by sudo's (localized) wording: `sudo -l -U
@@ -474,7 +493,7 @@ check_workload_identity() {
     bounded sudo -n -l -U "$user" "$c" >/dev/null 2>&1 || rc=$?
     case "$rc" in
       1) ;;
-      0) refuse "$user has sudo rights ($c is permitted); the workload must have none" ;;
+      0) breach sudo-permitted "$user has sudo rights ($c is permitted); the workload must have none" ;;
       124) refuse "sudo -l for $user hung: its rights are not established" ;;
       *) refuse "sudo -l for $user exited $rc for $c: its rights are not established" ;;
     esac
@@ -488,7 +507,10 @@ verify_admin() {
   check_workload_cannot_write
   local info rules expected addr
   info="$(bounded sudo -n pfctl -s info 2>/dev/null)" || refuse "cannot read pf status"
-  grep -q '^Status: Enabled' <<< "$info" || refuse "pf is not enabled"
+  if ! grep -q '^Status: Enabled' <<< "$info"; then
+    grep -q '^Status: Disabled' <<< "$info" && breach pf-disabled "pf is not enabled (pfctl reports Disabled)"
+    refuse "cannot tell from pfctl whether pf is enabled"
+  fi
   # pfctl's own parse of the profile, so the comparison assumes no output format.
   expected="$(bounded sudo -n pfctl -n -v "${pf_macros[@]}" -f "$here/pf/soak-deny.conf" 2>/dev/null | grep -E '^(block|pass) ')" \
     || refuse "pfctl cannot parse the soak profile"
@@ -500,7 +522,7 @@ verify_admin() {
   active_sha="$(printf '%s\n' "$rules" | shasum -a 256 | cut -d' ' -f1)"
   if [ "$rules" != "$expected" ]; then
     fail_extra=("pf.expectedRulesSha256=s:$expected_sha" "pf.activeRulesSha256=s:$active_sha" "pf.rulesMatch=b:false")
-    refuse "pf's loaded rules are not exactly the soak profile:
+    breach pf-rules-changed "pf's loaded rules are not exactly the soak profile:
 $rules"
   fi
   bounded sudo -n pfctl -s Interfaces -v 2>/dev/null | grep -Eq '^lo0 .*\(skip\)' || refuse "pf is not skipping lo0"
@@ -523,26 +545,28 @@ verify_workload() {
   me="$(id -un)"
   [ "$me" = "$user" ] || refuse "the workload verifier must run as $user, not $me"
   uid="$(id -u)"
-  [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ge 501 ] || refuse "workload uid $uid is a system or root uid"
+  [[ "$uid" =~ ^[0-9]+$ ]] || refuse "cannot read the workload uid: '$uid'"
+  [ "$uid" != 0 ] || breach privileged-workload "workload uid 0 is a system or root uid (root)"
+  [ "$uid" -ge 501 ] || refuse "workload uid $uid is a system or root uid"
   groups="$(id -Gn)"
   for g in $groups; do
-    case "$g" in admin|wheel) refuse "$user is in the $g group" ;; esac
+    case "$g" in admin|wheel) breach privileged-workload "$user is in the $g group" ;; esac
   done
   # The numeric group ids too, so the certification record never has to infer
   # them from names. Admin (80) and wheel (0) are refused by number as well.
   gids="$(id -G)"
   [[ "$gids" =~ ^[0-9]+( [0-9]+)*$ ]] || refuse "cannot read $user's numeric group ids: '$gids'"
   for g in $gids; do
-    case "$g" in 0|80) refuse "$user is in group $g (wheel or admin)" ;; esac
+    case "$g" in 0|80) breach privileged-workload "$user is in group $g (wheel or admin)" ;; esac
   done
   # Each must be refused to the workload. A hang is not a refusal.
   local rc=0
   bounded sudo -n true >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 0 ] || refuse "sudo works for $user"
+  [ "$rc" -ne 0 ] || breach sudo-permitted "sudo works for $user"
   [ "$rc" -ne 124 ] || refuse "sudo hung for $user: refusal is not proven"
   rc=0
   bounded pfctl -s info >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 0 ] || refuse "pfctl works for $user"
+  [ "$rc" -ne 0 ] || breach pfctl-permitted "pfctl works for $user"
   [ "$rc" -ne 124 ] || refuse "pfctl hung for $user: refusal is not proven"
 
   # Loopback must work, or the soak would fail for the wrong reason.
@@ -578,11 +602,15 @@ verify_network() {
   bounded sudo -n true >/dev/null 2>&1 || refuse "--verify-network needs the admin's non-interactive sudo"
   local net_env=() v admin_line workload_line pair
   while IFS= read -r v; do net_env+=("$v=${!v}"); done < <(compgen -v SOAK_)
-  admin_line="$(bash "$here/guest-setup.sh" --verify-admin)" || refuse "the admin verifier did not attest"
-  workload_line="$(sudo -n -u "$user" -H env "${net_env[@]}" bash "$here/guest-setup.sh" --verify-workload)" || refuse "the workload verifier did not attest"
+  # Each child's line and exit status go to the bridge, which alone decides:
+  # both ok is a pair; a MEASURED breach from either (exit 3, code BREACH) is
+  # a bound breach envelope; anything else yields nothing.
+  local admin_rc=0 workload_rc=0
+  admin_line="$(bash "$here/guest-setup.sh" --verify-admin)" || admin_rc=$?
+  workload_line="$(sudo -n -u "$user" -H env "${net_env[@]}" bash "$here/guest-setup.sh" --verify-workload)" || workload_rc=$?
   pair="$(node -e 'process.exitCode = require(process.argv[1]).main(process.argv.slice(2), process)' \
-    "$repo/lib/soak/attest-bridge.js" "$admin_line" "$workload_line" "$net_candidate" "$net_run_id" "$net_digest" "$net_seq")" \
-    || refuse "the two attestations could not be joined into one bound pair"
+    "$repo/lib/soak/attest-bridge.js" "$admin_line" "$admin_rc" "$workload_line" "$workload_rc" "$net_candidate" "$net_run_id" "$net_digest" "$net_seq")" \
+    || refuse "the two attestations could not be joined into one bound result"
   [ -n "$pair" ] && [ "$(grep -c . <<< "$pair")" -eq 1 ] || refuse "the bridge did not produce exactly one line"
   printf '%s\n' "$pair"
 }

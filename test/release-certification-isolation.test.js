@@ -69,14 +69,46 @@ describe('isolation attestations (#2020, A43, A44)', () => {
     assert.equal((await iso.attest(async (b) => fx.isolationPair(b), B)).observation.state, 'ok');
   });
 
-  it('runs the pinned producer with the sample\'s binding and reads its JSON, or reads nothing', async () => {
+  it('runs the pinned producer with the sample\'s binding and reads its JSON, or a classed failure with sanitized stderr', async () => {
     const calls = [];
-    const fake = (out, err) => (program, args, opts, cb) => { calls.push([program, args]); cb(err, out); };
+    const fake = (out, err, stderr = '') => (program, args, opts, cb) => { calls.push([program, args]); cb(err, out, stderr); };
     const pair = fx.isolationPair(B);
     assert.deepEqual(await iso.producer('/x/guest-setup.sh', fake(JSON.stringify(pair), null))(B), pair);
     assert.deepEqual(calls[0], ['/x/guest-setup.sh', ['--verify-network', '--candidate', SHA, '--run-id', fx.RUN_ID, '--manifest-digest', B.manifestDigest, '--sample-seq', '3']]);
-    assert.equal(await iso.producer('/x/g', fake('', new Error('exit 1')))(B), null);
-    assert.equal(await iso.producer('/x/g', fake('not json', null))(B), null);
+    const exit3 = Object.assign(new Error('exit 3'), { code: 3 });
+    assert.deepEqual(await iso.producer('/x/g', fake('', exit3, 'refused: the two attestations could not be joined\n\u0007attest-bridge refused (SPLIT)'))(B),
+      { failure: { class: 'exit-3', detail: 'refused: the two attestations could not be joined attest-bridge refused (SPLIT)' } });
+    assert.equal((await iso.producer('/x/g', fake('', Object.assign(new Error('t'), { killed: true, signal: 'SIGTERM' })))(B)).failure.class, 'timeout');
+    assert.equal((await iso.producer('/x/g', fake('', new Error('ENOENT')))(B)).failure.class, 'spawn-failed');
+    assert.equal((await iso.producer('/x/g', fake('  ', null))(B)).failure.class, 'no-output');
+    assert.equal((await iso.producer('/x/g', fake('not json', null))(B)).failure.class, 'bad-json');
+    assert.equal((await iso.producer('/x/g', fake('', exit3, 'x'.repeat(500)))(B)).failure.detail.length, 300, 'stderr is truncated');
+  });
+
+  it('keeps a producer failure as a private diagnostic, never a breach', async () => {
+    const r = await iso.attest(async () => ({ failure: { class: 'exit-3', detail: 'attest-bridge refused (SPLIT)' } }), B);
+    assert.deepEqual(r, { observation: { state: 'unavailable' }, error: iso.DIAGNOSTIC.MISSING, detail: 'exit-3: attest-bridge refused (SPLIT)' });
+    const raw = await iso.attest(async () => ({ failure: { class: 'exit-1', detail: '\u001b[31m' + 'y'.repeat(900) } }), B);
+    assert.equal(raw.observation.state, 'unavailable', 'a failure is never a breach');
+    assert.ok(raw.detail.length <= 300 && /^[\x20-\x7e]*$/.test(raw.detail), 'attest bounds a producer it did not build');
+  });
+
+  it('reads only a closed, bound breach envelope as breached', () => {
+    const env = { schema: iso.BREACH_SCHEMA, ...B, bootId: fx.BOOT_ID, facts: [{ plane: 'workload', fact: 'egress-permitted' }], observedAt: T0 };
+    const ok = iso.judgeIsolation({ breach: env }, B);
+    assert.equal(ok.observation.state, 'breached');
+    assert.match(ok.observation.breachDigest, /^[0-9a-f]{64}$/);
+    for (const [name, bad, diag] of [
+      ['an unknown fact', { ...env, facts: [{ plane: 'workload', fact: 'flaky' }] }, 'INVALID'],
+      ['no facts', { ...env, facts: [] }, 'INVALID'],
+      ['the same plane twice', { ...env, facts: [{ plane: 'admin', fact: 'pf-disabled' }, { plane: 'admin', fact: 'pf-rules-changed' }] }, 'INVALID'],
+      ['an extra field', { ...env, extra: 1 }, 'INVALID'],
+      ['another sample', { ...env, sampleSeq: 4 }, 'UNBOUND'],
+      ['another run', { ...env, runId: 'f'.repeat(32) }, 'UNBOUND']
+    ]) {
+      assert.equal(iso.judgeIsolation({ breach: bad }, B).error, iso.DIAGNOSTIC[diag], name);
+    }
+    assert.equal(iso.judgeIsolation({ breach: env, admin: {} }, B).error, iso.DIAGNOSTIC.INVALID, 'an envelope beside a pair is ambiguous');
   });
 });
 
@@ -118,6 +150,13 @@ describe('state machine: a guest run is judged on its isolation (A43, A44, A47)'
       assert.throws(() => sm.reduce(out.state, m, fx.sample(2 * MIN, healthy())), (e) => e.code === REFUSAL.ALREADY_TERMINAL);
     });
   }
+
+  it('fails the run on a measured-breach envelope, with no spurious ruleset change', () => {
+    const s1 = admitted().state;
+    const out = sm.reduce(s1, m, fx.sample(MIN, { ...fx.observations(), isolation: { state: 'breached', bootId: fx.BOOT_ID, facts: ['workload:egress-permitted'], breachDigest: 'e'.repeat(64) } }));
+    assert.equal(out.state.state, STATES.FAILED);
+    assert.deepEqual(out.state.failure.reasons.map((r) => r.code), [HARD_FAIL.ISOLATION_BREACHED]);
+  });
 
   it('ignores isolation entirely on a host run', () => {
     const host = fx.manifest();

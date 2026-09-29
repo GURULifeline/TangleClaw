@@ -438,3 +438,72 @@ describe('host relay: a relayed run\'s finalization is sealed (RM05 finding 1)',
     assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, true);
   });
 });
+
+describe('host relay and finalize never interleave (Architect ruling 727dcaaf, B9 review R-1)', () => {
+  const lockfile = require('../lib/release-certification/lockfile');
+  const refin = (run) => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 7 });
+
+  it('refuses a finalize that lands in the middle of a relay, and the record still verifies', async () => {
+    const run = await guestRun();
+    let attempted = null;
+    const midway = async (args, o) => {
+      if (args.includes('push') && attempted === null) {
+        attempted = await refin(run).then(() => 'finalized', (e) => e.code);
+      }
+      return publisherLib.runGit(args, o);
+    };
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, git: midway });
+    assert.equal(attempted, REFUSAL.LOCK_HELD, 'the relay held the run lock');
+    assert.deepEqual(await hostPublish.verifyRecord(r, { hostBase, remoteUrl: pub }), { ok: true, reasons: [] });
+  });
+
+  it('refuses a relay while the run is being finalized', async () => {
+    await guestRun();
+    const lock = hc.hostPaths(hostBase, SHA).runLock(fx.RUN_ID);
+    const token = lockfile.acquire(lock, { timeoutMs: 0 });
+    try {
+      await refuses(REFUSAL.LOCK_HELD);
+    } finally {
+      lockfile.release(lock, token);
+    }
+    assert.ok(await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub }), 'once released, the relay runs');
+  });
+
+  it('refuses a finalize while the run lock is held', async () => {
+    const run = await guestRun();
+    const lock = hc.hostPaths(hostBase, SHA).runLock(fx.RUN_ID);
+    const token = lockfile.acquire(lock, { timeoutMs: 0 });
+    try {
+      await assert.rejects(() => refin(run), (e) => e.code === REFUSAL.LOCK_HELD);
+    } finally {
+      lockfile.release(lock, token);
+    }
+  });
+
+  it('records the digest of the finalization bytes it read, once, even if the file changes under it', async () => {
+    await guestRun();
+    const fin = hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID);
+    const original = fs.readFileSync(fin);
+    let swapped = false;
+    const swapping = async (args, o) => {
+      if (args.includes('push') && !swapped) {
+        swapped = true;
+        fs.chmodSync(fin, 0o600);
+        fs.writeFileSync(fin, original.toString().replace('"finalizedAt"', '"finalizedAt_" : 0, "finalizedAt"'));
+      }
+      return publisherLib.runGit(args, o);
+    };
+    const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub, git: swapping });
+    assert.ok(swapped);
+    assert.equal(r.finalizationSha256, require('node:crypto').createHash('sha256').update(original).digest('hex'), 'the one buffer read under the lock, not a second read');
+  });
+
+  it('names relay records in one place, and the seal finds exactly those', () => {
+    const paths = hc.hostPaths(hostBase, SHA);
+    const oid = 'e'.repeat(40);
+    assert.equal(hostPublish.recordPath(hostBase, SHA, fx.RUN_ID, oid), paths.record(fx.RUN_ID, oid));
+    assert.ok(path.basename(paths.record(fx.RUN_ID, oid)).startsWith(paths.recordPrefix(fx.RUN_ID)));
+    assert.throws(() => paths.record(fx.RUN_ID, 'short'), (e) => e.code === REFUSAL.INVALID_MANIFEST);
+    assert.throws(() => paths.recordPrefix('../x'), (e) => e.code === REFUSAL.INVALID_MANIFEST);
+  });
+});

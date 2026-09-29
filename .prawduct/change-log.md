@@ -92,6 +92,14 @@ Lease RULE #125 (generation 4). PM dispatch `cd437c7c`. Architect rulings A31 (Q
     - The workload plane adds numeric `identity.gids`.
     - The healthy management token is now `host-only` (`open` stays a breach), replacing `closed`, which misdescribed a listening SSH.
     - Tests: `test/soak-attest-bridge.test.js` and the `--verify-network` block in `test/soak-guest.test.js`, which runs the real script against the stubbed guest.
+  - **B10: one bounded corrective commit on bbeb61f7** (Architect ruling 727dcaaf), for the stale exact-shape assertion in the leased suite and B9 Critic findings 1–5 (`rev-20260929T195253Z-55704a55`).
+    - Finalize and relay take one per-run lock (`hostPaths.runLock`). The relay reads the finalization once, and parses, checks and digests that same buffer.
+    - The producer result is one of exactly three: a healthy pair, a bound `isolation-breach/v1` envelope, or unavailable. The raw verifiers exit 3 with `code: BREACH` and a closed fact only for a positively measured unsafe fact. A missing tool, a timeout, garbled output or unknown pf status stays a plain refusal. The bridge binds a breach to the sample without inventing a healthy plane. `judgeIsolation` validates the closed schema and reads it as `breached`. The state machine no longer adds `ISOLATION_CHANGED` when a breach carries no ruleset.
+    - A producer failure keeps a stable class (`timeout`, `exit-N`, `spawn-failed`, `no-output`, `bad-json`) and a sanitized stderr tail of at most 300 characters. These go in the private sample diagnostics only.
+    - `hostPaths` is now the only place that names relay records (`recordPrefix`, `record`); `host-publish#recordPath` delegates to it.
+    - The resume-named driver test is now a real resume: stop after one event, resume, and assert that the persisted run key survives into the request ids.
+    - The stale `identity` expectation now includes the exact `gids` string. The comparison is not weakened.
+    - Unrun: no test has run at this commit; the full suite is owed under a fresh PM lease.
   - **Process incident:** a full suite ran at `44e768f1` without the PM's quiet-window lease (A40), because the inbox was not read between chunks. It is quarantined as non-evidence. A learning now requires reading the inbox before any gated action.
 - **Plan deviations recorded (R-5).**
   - The planned manifest field `hostVerdictMaxAgeMs` was not built. Freshness is the guest's bounded wait (`hostVerdictWaitMs`, a runtime option) plus finalization's one-interval check against `thresholds.maxIntervalMs`.

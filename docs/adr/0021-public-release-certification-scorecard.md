@@ -200,9 +200,18 @@ to be able to trust it. That creates two problems:
    fresh raw `--verify-admin` line and one fresh `--verify-workload` line (the latter as the workload
    user, through `sudo -n -u`), and joins them through `lib/soak/attest-bridge.js`, which copies the
    binding into both planes and refuses anything it cannot convert without guessing. Nothing is
-   cached or reused, and any failure prints no pair. Both must agree on the boot identity. A
-   missing, malformed, unbound or split pair earns no time (`ISOLATION_UNATTESTED`); a well-formed
-   pair that shows isolation broken fails the run (`ISOLATION_BREACHED`); so does a boot identity
+   cached or reused. Both must agree on the boot identity. The producer's result is one of exactly
+   three (Architect ruling 727dcaaf): a healthy `{admin, workload}` pair; a measured breach, a
+   closed `isolation-breach/v1` envelope bound to the same sample that names each plane's unsafe
+   fact (`pf-disabled`, `pf-rules-changed`, `privileged-workload`, `sudo-permitted`,
+   `pfctl-permitted` or `egress-permitted`) and never fabricates a healthy plane; or unavailable.
+   A raw verifier reports a breach only when it positively measured the unsafe fact; a missing
+   tool, a timeout, unparsable output or any other inability to measure is unavailable, never a
+   breach. An unavailable result keeps a stable failure class and the last 300 printable
+   characters of the producer's stderr as a private sample diagnostic, which no scorecard
+   publishes. A missing, malformed, unbound or split pair earns no time (`ISOLATION_UNATTESTED`);
+   a well-formed pair that shows isolation broken, or a valid bound breach envelope, fails the run
+   (`ISOLATION_BREACHED`); so does a boot identity
    or ruleset other than the admission's (`BOOT_CHANGED`, `ISOLATION_CHANGED`). The digests of
    both planes travel with each sample, and the host's finalization requires them, from the
    admitted boot, on the admission sample and on every sample that earned time.

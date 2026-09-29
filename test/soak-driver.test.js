@@ -157,15 +157,35 @@ describe('soak driver — a complete run', () => {
     assert.deepEqual(shared, { tag: 'guest' });
   });
 
-  it('tells each executor its run, the same on a resume and different for another run', async () => {
+  it('tells each executor its run: the same key after a real resume, a different one for another run', async () => {
     const s = apiSchedule({ durationMs: 30 * MIN });
+    /**
+     * Executors that record the run key each event was given.
+     * @param {string[]} into - Where to record
+     * @returns {object} Executors by kind
+     */
+    const recording = (into) => {
+      const ex = {};
+      for (const kind of new Set(s.events.map((e) => e.kind))) ex[kind] = async (ctx) => { into.push(ctx.runKey); return { ok: true, code: 'OK' }; };
+      return ex;
+    };
     const keys = [];
-    const executors = {};
-    for (const kind of new Set(s.events.map((e) => e.kind))) executors[kind] = async (ctx) => { keys.push(ctx.runKey); return { ok: true, code: 'OK' }; };
-    await driver.runSchedule({ schedule: s, executors, ctx: {}, logPath, clock: fakeClock(T0) });
-    assert.ok(keys.length > 0);
-    assert.equal(new Set(keys).size, 1);
-    assert.equal(keys[0], `${s.digest.slice(0, 16)}-${T0}`);
+    const clock = fakeClock(T0);
+    await driver.runSchedule({ schedule: s, executors: recording(keys), ctx: {}, logPath, clock, shouldStop: afterEvents(1) });
+    const beforeResume = keys.length;
+    assert.ok(beforeResume >= 1);
+    // A new process resumes the same log a minute later: the key comes back
+    // from the log's header, not from the new start.
+    clock.advance(MIN);
+    await driver.runSchedule({ schedule: s, executors: recording(keys), ctx: {}, logPath, clock });
+    assert.ok(keys.length > beforeResume, 'the resumed segment ran events');
+    assert.ok(records(logPath).some((r) => r.type === 'resume'), 'it really resumed');
+    assert.deepEqual([...new Set(keys)], [`${s.digest.slice(0, 16)}-${T0}`]);
+    // The same schedule run again, on its own log, is another run.
+    const other = [];
+    await driver.runSchedule({ schedule: s, executors: recording(other), ctx: {}, logPath: path.join(dir, 'other.ndjson'), clock: fakeClock(T0 + 5000) });
+    assert.equal(new Set(other).size, 1);
+    assert.notEqual(other[0], keys[0], 'a second run never shares the first one\'s request ids');
   });
 });
 
