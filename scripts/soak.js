@@ -10,6 +10,7 @@
  *                 [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]
  *   soak validate --schedule <file>
  *   soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]
+ *                 [--home <dir>] [--webdriver <url>]
  *   soak repos    --root <dir> --origins <dir> [--projects a,b,c]
  *
  * `repos` creates the synthetic `soak-*` repos the load targets, each with a
@@ -30,6 +31,12 @@
  * Neither is ever passed on the operator's behalf. The service token is read from `TANGLECLAW_SERVICE_TOKEN` only,
  * never from a flag that would put it in shell history and process listings.
  *
+ * A schedule with `fault` or `browser` events also needs `--home` (and
+ * `--webdriver` for browser events), and runs only inside the soak guest:
+ * those events act on this machine, not only through `--api`
+ * (`lib/soak/local.js`). The local context admitted is recorded with the
+ * run's guards.
+ *
  * Interrupting `run` (SIGINT/SIGTERM) stops before the next event. Running it
  * again with the same log resumes where it stopped.
  *
@@ -46,7 +53,13 @@ const fs = require('node:fs');
 const scheduleLib = require('../lib/soak/schedule');
 const driver = require('../lib/soak/driver');
 const { EXECUTORS } = require('../lib/soak/executors');
+const { FAULT_EXECUTORS } = require('../lib/soak/faults');
+const { BROWSER_EXECUTORS } = require('../lib/soak/browser');
+const localLib = require('../lib/soak/local');
 const reposLib = require('../lib/soak/repos');
+
+/** Every executor `run` can use, by event kind. */
+const RUN_EXECUTORS = Object.freeze({ ...EXECUTORS, ...FAULT_EXECUTORS, ...BROWSER_EXECUTORS });
 
 const USAGE = [
   'usage: soak plan     --seed <s> --phase certifying|destructive --duration-hours <h> --out <file>',
@@ -54,6 +67,7 @@ const USAGE = [
   '                     [--load-mean-ms <n>] [--fault-mean-ms <n>] [--fault-quiet-ms <n>]',
   '       soak validate --schedule <file>',
   '       soak run      --schedule <file> --api <url> --log <file> [--allow-unverified-live] [--no-live-install]',
+  '                     [--home <dir>] [--webdriver <url>]',
   '       soak repos    --root <dir> --origins <dir> [--projects a,b,c]'
 ].join('\n');
 
@@ -205,7 +219,7 @@ function cmdValidate(flags, io) {
  * @returns {Promise<number>} Exit code
  */
 async function cmdRun(flags, io, deps) {
-  expectFlags(flags, ['schedule', 'api', 'log'], ['allow-unverified-live', 'no-live-install']);
+  expectFlags(flags, ['schedule', 'api', 'log'], ['allow-unverified-live', 'no-live-install', 'home', 'webdriver']);
   let api;
   try {
     api = new URL(flags.api);
@@ -229,6 +243,7 @@ async function cmdRun(flags, io, deps) {
   driver.refuseLiveTarget(api.href, liveApi);
   const address = await driver.refuseLiveAddress({ apiBase: api.href, liveApi, lookup: deps.lookup });
   const schedule = readSchedule(flags.schedule);
+  const localCtx = await localLib.requireLocalControl({ schedule, noLiveInstall, apiBase: api.href, home: flags.home, webdriver: flags.webdriver }, deps.local);
   const token = deps.env.TANGLECLAW_SERVICE_TOKEN || null;
   const identity = await driver.refuseSameInstall({ apiBase: api.href, liveApi, fetch: deps.fetch, token, allowUnverifiedLive: flags['allow-unverified-live'] === true });
   if (!identity.checked) io.stderr.write(`${JSON.stringify({ warning: 'IDENTITY_UNCHECKED', reason: identity.reason, liveUnverified: identity.liveUnverified })}\n`);
@@ -239,8 +254,8 @@ async function cmdRun(flags, io, deps) {
   });
   const result = await driver.runSchedule({
     schedule,
-    executors: EXECUTORS,
-    ctx: { apiBase: api.href, token, fetch: deps.fetch },
+    executors: RUN_EXECUTORS,
+    ctx: { apiBase: api.href, token, fetch: deps.fetch, ...(localCtx ? { local: localCtx } : {}) },
     logPath: flags.log,
     clock: deps.clock,
     shouldStop: () => stop,
@@ -254,7 +269,8 @@ async function cmdRun(flags, io, deps) {
         liveApi: liveApi ? new URL(liveApi).origin : null,
         target: api.origin,
         targetAddress: address ? address.targetAddress : null,
-        identity: { checked: identity.checked, reason: identity.reason }
+        identity: { checked: identity.checked, reason: identity.reason },
+        ...(localCtx ? { local: { home: localCtx.home, webdriver: localCtx.webdriver, uid: localCtx.uid } } : {})
       },
       ...(identity.liveUnverified ? { liveIdentityOverride: { reason: identity.reason } } : {}),
       ...(noLiveInstall ? { guardContextOverride: 'no-live-install' } : {})
@@ -291,7 +307,7 @@ function cmdRepos(flags, io) {
 /**
  * Entry point, with every side effect injectable for tests.
  * @param {string[]} argv - Arguments after the script name
- * @param {object} [deps] - `{stdout, stderr, env, fetch, lookup, clock, onStopSignal}`
+ * @param {object} [deps] - `{stdout, stderr, env, fetch, lookup, clock, onStopSignal, local}`; `local` reaches `requireLocalControl` (`{fs, run, uid}`)
  * @returns {Promise<number>} Exit code
  */
 async function main(argv, deps = {}) {
@@ -301,7 +317,8 @@ async function main(argv, deps = {}) {
     fetch: deps.fetch || globalThis.fetch,
     lookup: deps.lookup,
     clock: deps.clock || { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
-    onStopSignal: deps.onStopSignal || ((fn) => { process.once('SIGINT', fn); process.once('SIGTERM', fn); })
+    onStopSignal: deps.onStopSignal || ((fn) => { process.once('SIGINT', fn); process.once('SIGTERM', fn); }),
+    local: deps.local
   };
   const [command, ...rest] = argv;
   try {
@@ -330,4 +347,4 @@ if (require.main === module) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }
 
-module.exports = { main, parseFlags, USAGE };
+module.exports = { main, parseFlags, USAGE, RUN_EXECUTORS };

@@ -488,14 +488,50 @@ describe('soak CLI — run', () => {
     assert.deepEqual([warning.warning, warning.liveUnverified], ['IDENTITY_UNCHECKED', false]);
   });
 
-  it('refuses a schedule whose kinds have no executor with exit 3', async () => {
+  it('refuses a schedule with fault or browser events outside the soak guest, before any load', async () => {
     const out = path.join(dir, 'full.json');
     await run(['plan', '--seed', 'rc', '--phase', 'certifying', '--duration-hours', '4', '--out', out]);
-    const r = await run(['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', path.join(dir, 'l'), '--no-live-install'],
-      { fetch: async () => ({ status: 200, text: async () => '{}' }), clock: instantClock() });
+    const log = path.join(dir, 'l');
+    let calls = 0;
+    const r = await run(['run', '--schedule', out, '--api', 'http://192.168.64.7:3102', '--log', log, '--no-live-install'],
+      { fetch: async () => { calls++; return { status: 200, text: async () => '{}' }; }, clock: instantClock(), local: { run: async () => ({ code: 0, stdout: '0\n', stderr: '', error: null }) } });
     assert.equal(r.code, 3);
     const lines = r.err.trim().split('\n');
-    assert.equal(JSON.parse(lines[lines.length - 1]).code, 'NO_EXECUTOR');
+    const refusal = JSON.parse(lines[lines.length - 1]);
+    assert.equal(refusal.code, 'LOCAL_CONTROL_REFUSED');
+    assert.ok(refusal.details.problems.length >= 3, 'names the api, the home and the machine');
+    assert.equal(calls, 0);
+    assert.equal(fs.existsSync(log), false);
+  });
+
+  it('has an executor for every kind in the catalogue, and names the local context it ran under', async () => {
+    const catalogue = require('../lib/soak/schedule');
+    assert.deepEqual(Object.keys(cli.RUN_EXECUTORS).sort(), [...catalogue.TASKS, ...catalogue.FAULTS].map((k) => k.kind).sort());
+    const sched = require('../lib/soak/schedule');
+    // A short api-and-fault schedule draws no fault, so one api event is
+    // turned into a client abort, the one fault that needs nothing but HTTP.
+    const s = sched.buildSchedule({ seed: 'local-run', phase: 'certifying', durationMs: 20 * 60 * 1000, classes: ['api', 'fault'], faultMeanMs: 60 * 60 * 1000 });
+    const i = s.events.findIndex((e) => Object.keys(e.params).length === 0);
+    s.events[i] = { ...s.events[i], kind: 'fault.client.abort', class: 'fault' };
+    s.digest = sched.scheduleDigest(s);
+    assert.deepEqual(sched.validateSchedule(s), []);
+    const schedulePath = path.join(dir, 'local.json');
+    fs.writeFileSync(schedulePath, JSON.stringify(s));
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'soak-cli-home-')));
+    fs.writeFileSync(path.join(home, 'tangleclaw.db'), '');
+    try {
+      const log = path.join(dir, 'local.ndjson');
+      const fetch = async (url) => ({ status: 200, text: async () => JSON.stringify(url.pathname === '/api/server-info' ? { startedAt: 'A', startupSha: 'a'.repeat(40) } : {}) });
+      const r = await run(['run', '--schedule', schedulePath, '--api', 'http://127.0.0.1:3102', '--log', log, '--no-live-install', '--home', home],
+        { fetch, clock: instantClock(), local: { run: async () => ({ code: 0, stdout: '1\n', stderr: '', error: null }) } });
+      assert.equal(r.code, 0, r.err);
+      const recs = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+      assert.deepEqual(recs[0].guard.local, { home, webdriver: null, uid: process.getuid() });
+      const abort = recs.find((x) => x.kind === 'fault.client.abort');
+      assert.equal(abort.ok, true, JSON.stringify(abort));
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('exits 4 when stopped by a signal, and a second run resumes to completion', async () => {
