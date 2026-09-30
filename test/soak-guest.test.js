@@ -639,7 +639,9 @@ describe('soak guest: admin verifier', () => {
     'the lease start is reported twice': [{ ipconfig: packetWith(TIMING, `LeaseStartTime : ${leaseStartAgo(60)}\\nLeaseStartTime : ${leaseStartAgo(60)}`) }, {}, /more than once/],
     'the lease start is in the future': [{ ipconfig: packetWith(TIMING, `LeaseStartTime : ${leaseStartAgo(-3600)}`) }, {}, /out of range/],
     'the lease has expired': [{ ipconfig: packetWith(TIMING, `LeaseStartTime : ${leaseStartAgo(2 * 86400)}`) }, {}, /lease expired/],
-    'less lease remains than the next attestation window': [{ ipconfig: packetWith(TIMING, `LeaseStartTime : ${leaseStartAgo(86400 - 300)}`) }, {}, /less than the next sample interval plus margin \(900 s\)/],
+    // Built when the case runs: 300 s of lease is left only at that moment, and
+    // a full suite can take longer than that to reach this case.
+    'less lease remains than the next attestation window': [() => ({ ipconfig: packetWith(TIMING, `LeaseStartTime : ${leaseStartAgo(86400 - 300)}`) }), {}, /less than the next sample interval plus margin \(900 s\)/],
     'renewal comes after rebinding': [{ ipconfig: packetWith('lease_time (uint32): 0x15180\\nrenewal_t1_time_value (uint32): 0x12750\\nrebinding_t2_time_value (uint32): 0xa8c0', `LeaseStartTime : ${leaseStartAgo(60)}`) }, {}, /timing is inconsistent/],
     'renewal equals rebinding': [{ ipconfig: packetWith('lease_time (uint32): 0x15180\\nrenewal_t1_time_value (uint32): 0xa8c0\\nrebinding_t2_time_value (uint32): 0xa8c0', `LeaseStartTime : ${leaseStartAgo(60)}`) }, {}, /timing is inconsistent/],
     'rebinding reaches the lease end': [{ ipconfig: packetWith('lease_time (uint32): 0x15180\\nrenewal_t1_time_value (uint32): 0xa8c0\\nrebinding_t2_time_value (uint32): 0x15180', `LeaseStartTime : ${leaseStartAgo(60)}`) }, {}, /timing is inconsistent/],
@@ -662,7 +664,7 @@ describe('soak guest: admin verifier', () => {
   };
   for (const [label, [over, env, reason]] of Object.entries(failures)) {
     it(`fails closed (exit 3, ok:false) when ${label}`, () => {
-      const f = guestFakes(tmp, over);
+      const f = guestFakes(tmp, typeof over === 'function' ? over() : over);
       const r = setup(['--verify-admin'], f, tmp, { RULES: path.join(tmp, 'rules.txt'), ...env });
       assert.equal(r.status, 3, `${label}: ${r.stderr}`);
       assert.equal(r.json.length, 1);

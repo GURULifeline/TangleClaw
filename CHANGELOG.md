@@ -619,6 +619,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **A soak guest test no longer fails in a long full-suite run** (#2020). The "less lease remains than the next attestation window" case built its 300-second lease fixture when the test file loaded. A run that took more than 300 seconds to reach the case found the lease already expired. The fixture is now built when the case runs.
 - **The prime golden fixtures render the same on every machine** (#1874). The test harness pads its temporary base directory to a fixed length and pins the local host before rendering. The prime's size budget is spent on those real strings, so a macOS temp path, about 50 characters longer than a Linux runner's, could make a near-budget scenario drop a different section than CI did.
 
 - **`CONTRIBUTING.md` explains that each governed clone needs its own `.prawduct/project-state.yaml`.** The file is gitignored, so a fresh clone lacks it, and Prawduct then reads the frozen markdown backlog as live and offers to migrate it again. That migration would duplicate issues #1032–#1072. The new section gives the one-line minimal file (`backlog_service_repo`) and says never to accept the migration (backlog triage audit, 2026-09-27).

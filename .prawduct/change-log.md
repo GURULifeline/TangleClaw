@@ -69,6 +69,8 @@ Install runbook steps 8 and 10 carry this, and the run runbook's step 9 carries 
 
 **Review.** Cumulative `rev-20260929T232557Z-d0b342f2`: 0 blocking, 4 warnings, 6 notes. The code findings were fixed in `e8b1f356`, and verify-resolutions `rev-20260929T233248Z-a6f74105` confirmed them with 0 new findings. Its observation that the runbook's gap check assumed the default interval was fixed with the ruling edits: the bundle now reports the run's own `intervalMs`.
 
+**Pre-existing test fixed, by PM ruling (1).** The full suite at `07c92aa5` failed one case in `test/soak-guest.test.js`, a file this branch had not touched. Its lease fixture (300 s left) was built when the file loaded, so in a run longer than that the lease had really expired by the time the case ran. It passed when run alone. The fixture is now built when the case runs, and the case's contract is unchanged.
+
 **Verification.** Unit and integration tests use fakes for HTTP, WebDriver, launchctl, tmux and statfs, and a real SQLite database and real files. Nothing was run in a real guest: the runbooks mark those steps unverified until the first dry run.
 
 ## 2026-09-29 — #2020 Chunk 2B: soak load for plans, switchboard and wrap; C01/C02 integrated; host-attested checks (Q1)
