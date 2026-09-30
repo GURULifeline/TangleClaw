@@ -48,7 +48,9 @@
 #   3. install the stub engine on PATH and its profile for the workload user;
 #   4. create the synthetic repos as the workload user (soak.js repos);
 #   5. finish the guest TangleClaw's first-run setup (no login, the soak's
-#      projects root), then attach each repo as a project through its own API.
+#      projects root), then attach each repo as a project through its own API;
+#   6. lease the stub Medusa hub's ports and start it as a LaunchAgent in the
+#      workload user's GUI session, then check it answers on loopback.
 # Before step 2 it checks that the TangleClaw on SOAK_TC_PORT runs as the
 # workload user.
 # Every step is safe to repeat. The TangleClaw checkout lives in a dedicated
@@ -698,7 +700,7 @@ soak_env=()
 while IFS= read -r v; do soak_env+=("$v=${!v}"); done < <(compgen -v SOAK_)
 as_user() { sudo -n -u "$user" -H env "${soak_env[@]}" "$@"; }
 
-echo "== 1/5 workload user $user"
+echo "== 1/6 workload user $user"
 if id "$user" >/dev/null 2>&1; then
   echo "$user exists"
 else
@@ -723,7 +725,7 @@ as_user test -r "$here/guest-setup.sh" && as_user test -r "$repo/scripts/soak.js
 check_tc_owner
 echo "TangleClaw on port $SOAK_TC_PORT runs as $user"
 
-echo "== 2/5 default-deny network"
+echo "== 2/6 default-deny network"
 sudo -n pfctl "${pf_macros[@]}" -f "$here/pf/soak-deny.conf" -E
 # The admin verifier runs as its own --verify-admin process, so a failure's
 # ok:false line is printed rather than lost inside a command substitution.
@@ -732,18 +734,18 @@ echo "$admin_json"
 workload_json="$(as_user bash "$here/guest-setup.sh" --verify-workload)" || { echo "$workload_json"; refuse "the workload verifier failed"; }
 echo "$workload_json"
 
-echo "== 3/5 stub engine"
+echo "== 3/6 stub engine"
 # A macOS 26 base image has no /usr/local/bin, the default install target.
 sudo -n install -d -o root -g wheel -m 0755 "$SOAK_BIN_DIR"
 sudo -n install -m 0755 "$repo/deploy/soak/stub-engine/soak-stub.js" "$SOAK_BIN_DIR/soak-stub"
 as_user mkdir -p "/Users/$user/.tangleclaw/engines"
 as_user install -m 0644 "$repo/deploy/soak/stub-engine/soak-stub.json" "/Users/$user/.tangleclaw/engines/soak-stub.json"
 
-echo "== 4/5 synthetic repos"
+echo "== 4/6 synthetic repos"
 as_user node "$repo/scripts/soak.js" repos --root "$SOAK_PROJECTS_ROOT" --origins "$SOAK_ORIGINS_ROOT" --projects "$SOAK_PROJECTS" \
   || refuse "soak.js repos failed (see above)"
 
-echo "== 5/5 finish setup, attach projects"
+echo "== 5/6 finish setup, attach projects"
 # With the guest's auth gate down, the dashboard client header is how the
 # operator's own tools reach operator routes. With the gate up, attach through
 # the dashboard instead.
@@ -800,4 +802,76 @@ for name in "${projects[@]}"; do
   esac
 done
 
-echo "guest ready: workload user $user, default-deny network attested on both planes, stub engine, projects $SOAK_PROJECTS"
+echo "== 6/6 switchboard stub hub"
+# The guest is offline, so no real Medusa hub can run in it, and without one no
+# session's switchboard listener ever reaches listening. The stub hub speaks the
+# part of the protocol the candidate uses, on loopback only. It runs as a
+# LaunchAgent in the workload user's GUI session, so launchd restarts it if it
+# dies during a run and loads it again at login after a restart. Its ports are
+# leased in the guest TangleClaw's registry before it binds them.
+hub_label='com.tangleclaw.soak-medusa-stub'
+# The candidate's own defaults: it looks for its hub at MEDUSA_BRIDGE_HTTP_URL,
+# http://localhost:3009 unless its environment says otherwise, and derives the
+# WebSocket as the next port. The install sets neither, so the hub takes exactly
+# these. They are not settings: a hub anywhere else would be one the candidate
+# never finds. If another service holds them, setup refuses.
+hub_http_port=3009
+hub_ws_port=3010
+hub_home="/Users/$user"
+hub_plist="$hub_home/Library/LaunchAgents/$hub_label.plist"
+hub_node="$(as_user /bin/sh -c 'command -v node')" || refuse "node is not on $user's PATH"
+case "$hub_node$repo" in *[\<\>\&\"\']*) refuse "the node path or checkout path holds a character the LaunchAgent cannot carry" ;; esac
+for spec in "$hub_http_port:http" "$hub_ws_port:websocket"; do
+  port="${spec%%:*}"
+  lease_body="$(node -e 'process.stdout.write(JSON.stringify({ port: Number(process.argv[1]), host: "localhost", project: "soak-medusa-stub", service: `medusa-stub-${process.argv[2]}`, permanent: true, reach: "loopback", ownerKind: "external" }))' "$port" "${spec#*:}")"
+  # The reply names why a lease failed (who holds the port, or what was wrong
+  # with the request), so it is kept rather than discarded.
+  lease_out="$(mktemp)"
+  status="$(curl -sS -o "$lease_out" -w '%{http_code}' --max-time "$t" -X POST \
+    -H 'content-type: application/json' -H 'x-tangleclaw-client: dashboard' \
+    -d "$lease_body" "$api/api/ports/lease" || true)"
+  lease_reply="$(cat "$lease_out" 2>/dev/null || true)"
+  rm -f "$lease_out"
+  lease_why="$(node -e '
+    try { const r = JSON.parse(process.argv[1]); if (r && r.code) process.stdout.write(`: ${r.code}: ${r.error || ""}`); } catch {}
+  ' "$lease_reply")"
+  [ "$status" = "201" ] || [ "$status" = "200" ] || refuse "leasing port $port for the stub hub answered $status$lease_why"
+done
+as_user mkdir -p "$hub_home/Library/LaunchAgents" "$hub_home/Library/Logs"
+hub_tmp="$(mktemp)"
+cat > "$hub_tmp" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$hub_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$hub_node</string>
+    <string>$repo/deploy/soak/medusa-stub/medusa-stub.js</string>
+    <string>--http-port</string><string>$hub_http_port</string>
+    <string>--ws-port</string><string>$hub_ws_port</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$hub_home/Library/Logs/soak-medusa-stub.log</string>
+  <key>StandardErrorPath</key><string>$hub_home/Library/Logs/soak-medusa-stub.log</string>
+</dict>
+</plist>
+PLIST
+chmod 0644 "$hub_tmp"
+as_user install -m 0644 "$hub_tmp" "$hub_plist"
+rm -f "$hub_tmp"
+wl_uid="$(id -u "$user")"
+# Replace a hub an earlier run loaded, so this run's checkout is the one serving.
+sudo -n launchctl bootout "gui/$wl_uid/$hub_label" >/dev/null 2>&1 || true
+sudo -n launchctl bootstrap "gui/$wl_uid" "$hub_plist" \
+  || refuse "launchd would not load the stub hub in $user's GUI session (is $user logged in? see install step 8)"
+hub_up=''
+for _ in $(seq 1 "$t"); do
+  if curl -sS --max-time "$t" "http://127.0.0.1:$hub_http_port/health" 2>/dev/null | grep -q '"status":"hissing"'; then hub_up=1; break; fi
+  sleep 1
+done
+[ -n "$hub_up" ] || refuse "the stub hub did not answer on 127.0.0.1:$hub_http_port within $t s (see $hub_home/Library/Logs/soak-medusa-stub.log)"
+
+echo "guest ready: workload user $user, default-deny network attested on both planes, stub engine, projects $SOAK_PROJECTS, stub hub on $hub_http_port/$hub_ws_port"
