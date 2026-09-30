@@ -8,19 +8,21 @@ It judges nothing. Whether the release candidate passes is decided by the releas
 judge (`rc-cert`) and the soak's own acceptance gates. This tool only produces the conditions and
 records what happened.
 
-> **Status: Chunks 2 (the core, plus plans, switchboard and wrap load) and 1 (the guest and the
-> synthetic repos).** This directory has the schedule, the runner for the `api` and `engine` load
-> classes, the stub engine, the guest definition (`guest/`) and the generator for the synthetic
-> `soak-*` repos. Not built yet:
-> - installing and starting the pinned release candidate inside the guest (the operator runbook);
-> - the executors for the `browser` and `fault` classes;
-> - integrity sampling, the evidence bundle and the operator runbook;
-> - the certification judge (Chunks 3 and 4 of #2020, with the link to rc-cert). Until it exists,
->   nothing but `run`'s exit 5 acts on a log's ownership-unverified disposition;
+> **Status: Chunks 1, 2 and 3.** This directory has the schedule, the runner and an executor for every
+> kind in the catalogue (`api`, `engine`, `browser` and `fault`), the stub engine, the guest definition
+> (`guest/`), the generator for the synthetic `soak-*` repos, the integrity sampler and the evidence
+> bundle. The operator procedure is two runbooks:
+> [install and start the pinned candidate](../../docs/runbooks/soak-install-the-candidate.md), and
+> [run, sample and bundle the soak](../../docs/runbooks/soak-run-sample-and-bundle.md).
 >
-> Until the missing executors exist, `run` **refuses** any schedule containing those kinds
-> (`NO_EXECUTOR`) rather than skipping them. Plan with `--classes api,engine` to run the load
-> that exists today.
+> Not built yet: the certification judge that reads a bundle (Chunk 4 of #2020, with the link to
+> rc-cert). Until it exists, nothing but `run`'s exit 5 acts on a log's ownership-unverified
+> disposition.
+>
+> The server and ttyd run as launchd agents in the workload user's GUI session. Per Architect ruling A1,
+> that user gets a login secret generated inside the guest and never exposed, and the guest logs it in
+> automatically (install runbook, step 8). Without that session, `fault.server.restart` and
+> `fault.ttyd.restart` have no launchd job to act on.
 
 ## Build a schedule
 
@@ -102,7 +104,7 @@ node scripts/soak.js validate --schedule soak-certifying.json
 
 ### Prerequisites on the target
 
-These kinds need a target prepared as Chunk 1 will prepare it:
+These kinds need a target prepared as Chunk 1 prepares it (`guest/guest-setup.sh`):
 - **A Medusa hub** running with `A2A_SECRET`, reachable at the TangleClaw process's
   `MEDUSA_BRIDGE_HTTP_URL`. Without it no listener reaches `listening`.
 - **Each `soak-*` project's `.tangleclaw/project.json`** has `medusaEnabled: true`,
@@ -320,8 +322,108 @@ TANGLECLAW_SERVICE_TOKEN=… node scripts/soak.js run --schedule soak-certifying
 Exit codes: 0 done, 2 usage, 3 refused (the code is printed as JSON on stderr), 4 stopped, 5 done but with an ownership-unverified segment (not an automatic pass).
 
 ```sh
-node scripts/soak.js run --schedule s.json --api http://<guest-ip>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install]
+node scripts/soak.js run --schedule s.json --api http://<guest-ip>:<port> --log s.ndjson [--allow-unverified-live] [--no-live-install] \
+  [--home <guest TangleClaw home>] [--webdriver http://127.0.0.1:<port>]
 ```
+
+`--home` and `--webdriver` are for schedules with fault and browser events (see below). Such a schedule
+runs only inside the guest, against `--api http://127.0.0.1:<port>`.
+
+## Fault and browser events
+
+Faults and browser events act on the machine the driver runs on, not only through `--api`: they restart
+launchd jobs, kill a tmux session, lock the database file, fill the disk and drive Safari. So a schedule
+with any of them runs only where `lib/soak/local.js` admits it, and `run` refuses
+(`LOCAL_CONTROL_REFUSED`, naming every unmet condition) before any load otherwise:
+
+- `--no-live-install`, which in turn needs `TANGLECLAW_API` unset;
+- the machine is a virtual machine (`kern.hv_vmm_present` is 1), so an operator's own Mac is refused
+  even from a pane with no `TANGLECLAW_API`;
+- `--api` is a loopback IP literal, so the server the load reaches is the one the faults act on;
+- `--home` is the guest TangleClaw's home (its `TANGLECLAW_HOME`, `~/.tangleclaw` for the workload user):
+  an absolute, plain directory owned by the driver's user, holding a `tangleclaw.db` it owns;
+- for browser events, `--webdriver` is a loopback IP literal: `safaridriver -p <port>`.
+
+The header's `guard.local` records the home, the WebDriver and the uid a run was admitted with.
+
+| Kind | Phases | What it does | It passes when |
+|---|---|---|---|
+| `fault.server.restart` | both | `POST /api/server/restart`, the product's own launchd kickstart. A running wrap's `409 WRAP_RESTART_BLOCKED` is retried for up to 10 minutes and never forced. | A server with a new `startedAt` answers within 3 minutes, and health is 200. |
+| `fault.tmux.session-kill` | both | Launches its own stub session, then `tmux kill-session -t =<name>` on exactly the session that launch named, after checking the name and the stub engine. | The server reports the session not active within a minute. |
+| `fault.client.abort` | both | Cuts off five reads a few milliseconds in. | The same server (same `startedAt`) answers health within 2 minutes. |
+| `fault.db.lock-contention` | both | Holds `BEGIN EXCLUSIVE` on `tangleclaw.db` for 5 s while a read and a port lease are tried, then rolls back. | The same server recovers. What the probes got while locked is recorded (`during`), not judged. |
+| `fault.disk.pressure` | both | Writes real ballast under `<home>/soak-ballast/` down to 2 GiB free (at most 64 GiB), holds it 30 s under probes, then removes it. | The same server recovers. Too little headroom is `NO_HEADROOM`, not a pass. |
+| `fault.ttyd.restart` | destructive | `launchctl kickstart -k gui/<uid>/com.tangleclaw.ttyd`, as `lib/ttyd-watcher.js` does. It refuses (`NOT_DESTRUCTIVE`) in any other phase too. | launchd runs a ttyd with a new pid within a minute, and health is 200. |
+| `browser.dashboard.load` | both | Opens `/` in Safari. | The dashboard's own script fills the uptime stat from the API within 30 s. |
+| `browser.terminal.attach` | both | Launches its own stub session and opens `/session/<project>`. | The terminal frame renders xterm, and the server's `/api/system/pty-activity` counts a new attach on the same server instance. |
+
+- **Every fault touches only what it owns or the guest serves:** its own stub session, `tangleclaw.db`
+  under `--home`, the ballast directory under `--home`, and the guest's own launchd jobs.
+- **Ballast a dead run left is removed** before the next disk fault writes any. Only files named
+  `ballast-*.bin` are ever removed.
+- **Browser events need the front-door gate off.** A browser is not a machine client, and the soak holds
+  no login, so with the gate on the dashboard never renders (`NOT_RENDERED`). Each event ends its
+  WebDriver session whatever failed, because Safari runs one at a time.
+
+## Integrity samples
+
+```sh
+node scripts/soak.js sample --home ~/.tangleclaw --api http://127.0.0.1:3102 --out samples.ndjson --no-live-install \
+  [--interval-ms 600000] [--count <n>] [--full-every 6]
+```
+
+- **Each sample** (`tc.soak-samples/v1`) records:
+  - the database's `quick_check`, or its full `integrity_check` on the first sample and every
+    `--full-every`-th after, through a read-only connection;
+  - the server's resident memory and open descriptors, for the pid in `<home>/tangleclaw.pid`;
+  - the disk's free and total bytes;
+  - `/api/health`'s status.
+- **`corrupt` means SQLite reported damage:** a check that returned problems, or a file that is corrupt
+  or not a database. A check that could not run, for example on a database the server holds locked,
+  is `unavailable`.
+- **Either check holds a shared lock while it runs**, so the server's writers wait for it. On the soak's
+  small database that takes milliseconds.
+- **The file is `0600`, and one sampler holds it at a time** (`<out>.lock`; `SAMPLER_LOCKED`). A lock
+  whose process is gone is taken over.
+- **A sample that fails is recorded (`sample-failed`, with its error), and sampling carries on.** A
+  server whose memory cannot be read (a `ps` that failed or timed out) is recorded as `alive: null`
+  with a `reason`, never as down.
+- **Running it again continues the file:** sequence numbers carry on. A file for another home is
+  refused (`SAMPLES_MISMATCH`), and so is one ending in a torn line (`SAMPLES_TORN`).
+- **It runs only in the guest**, admitted like the faults (`LOCAL_CONTROL_REFUSED` otherwise).
+- **Ctrl-C stops it between samples** (exit 0).
+
+## Evidence bundle
+
+```sh
+node scripts/soak.js bundle --out <new dir> --schedule s.json --log s.ndjson [--samples samples.ndjson] \
+  [--attestations a.json,b.json] [--home ~/.tangleclaw --no-live-install]
+```
+
+- **It copies each input into a new `0700` directory, owner-only:**
+  - the schedule;
+  - the log, byte for byte, with any `.lock-lost` or `.segment` sidecar beside it;
+  - the samples;
+  - each attestation, under `attestations/`.
+- **With `--home` it also snapshots `tangleclaw.db`** (`VACUUM INTO`, one consistent read) to
+  `db/tangleclaw.db`, and runs `integrity_check` on the copy. `--home` is admitted like the faults,
+  so the snapshot is only taken in the guest.
+- **`manifest.json` (`tc.soak-evidence/v1`) binds every file by size and sha256.** The command prints
+  the manifest's own sha256. Its `summary` holds:
+  - the schedule's validity and digest;
+  - the driver's own reading of the log: its disposition, or its refusal;
+  - whether the log belongs to that schedule, with outcomes and failure codes by kind. `ended` is the
+    driver's verdict on whether the run finished; `endRecordSeen` is only the summary's own parse,
+    kept for a log the driver refuses;
+  - the samples' coverage (first and last time, largest gap, failed samples) and their worst readings;
+  - the snapshot's verdict.
+- **It judges nothing, and never refuses because the run went badly.** A log the driver will not read as
+  evidence is still bundled, with the refusal recorded, because that is the run to investigate.
+- **It refuses only what would make the bundle untrustworthy** (`BUNDLE_REFUSED`, exit 3):
+  - an existing `--out`;
+  - a missing or symlinked input;
+  - two attestations with the same file name;
+  - a schedule that is not JSON.
 
 ## The stub engine
 

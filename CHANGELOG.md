@@ -36,6 +36,15 @@ All notable changes to TangleClaw are documented in this file.
   - **Storage.** The rotation and coordinator-role records are schema v51.
   - **Reference:** `docs/coordinator-rotation.md`.
 
+- **The soak can run its faults and a real browser, sample the guest's integrity, and bundle its evidence** (#2020 Chunk 3, part of #1949).
+  - **Faults and browser events run.** Before this, `run` refused them (`NO_EXECUTOR`).
+    - Six faults: a server restart through the product's own restart route, a tmux kill of the harness's own session, client aborts, an exclusive database lock (rolled back), bounded disk ballast, and a ttyd kickstart. The ttyd kickstart runs in the destructive phase only.
+    - Two browser events drive Safari through `safaridriver`: the dashboard's scripts must fill in its stats, and a terminal attach must be counted by the server.
+  - **Where they run.** They act on the machine the driver runs on, so `run` admits them only inside the soak guest: `--no-live-install`, a virtual machine, a loopback `--api`, the guest home as `--home` and, for browser events, a loopback `--webdriver`. Anywhere else it refuses with `LOCAL_CONTROL_REFUSED` before any load.
+  - **`soak sample`** records the guest database's `quick_check`/`integrity_check`, the server's memory and open descriptors, disk space and health, every ten minutes by default.
+  - **`soak bundle`** gathers a run's schedule, log, sidecars, samples, attestations and a checked database snapshot into a new directory, with a manifest binding every file by sha256. A log the driver refuses as evidence is still bundled, with the refusal recorded.
+  - **Two operator runbooks** cover the procedure: installing and starting the pinned candidate in the guest, and running, sampling and bundling the soak. The workload user gets a GUI login session, which launchd needs for the server and ttyd restarts. Its login secret is generated inside the guest and never exposed (Architect ruling A1). The exact commands that set it without a command-line argument are for the dry run to prove.
+
 - **The soak's load reaches plans, the Medusa switchboard and wrap** (#2020 Chunk 2B, part of #1949). Four load kinds join the schedule:
   - `api.plans.read`: lists a project's plans, requires the provisioned `soak-plan.md`, and fetches its page. A listing link that points off the soak target is refused, so the soak's token is never sent elsewhere.
   - `api.medusa.reads`: the fleet-wide switchboard deliveries and escalations.
@@ -610,6 +619,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **A soak guest test no longer fails in a long full-suite run** (#2020). The "less lease remains than the next attestation window" case built its 300-second lease fixture when the test file loaded. A run that took more than 300 seconds to reach the case found the lease already expired. The fixture is now built when the case runs.
 - **The prime golden fixtures render the same on every machine** (#1874). The test harness pads its temporary base directory to a fixed length and pins the local host before rendering. The prime's size budget is spent on those real strings, so a macOS temp path, about 50 characters longer than a Linux runner's, could make a near-budget scenario drop a different section than CI did.
 
 - **`CONTRIBUTING.md` explains that each governed clone needs its own `.prawduct/project-state.yaml`.** The file is gitignored, so a fresh clone lacks it, and Prawduct then reads the frozen markdown backlog as live and offers to migrate it again. That migration would duplicate issues #1032–#1072. The new section gives the one-line minimal file (`backlog_service_repo`) and says never to accept the migration (backlog triage audit, 2026-09-27).
