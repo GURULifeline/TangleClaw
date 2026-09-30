@@ -634,8 +634,19 @@ The guest is attested from two planes, because neither can see everything.
       (see the DHCP limit under **Known limits** below).
 
     It fails closed when:
-    - `ipconfig getsummary` doesn't report `LeaseStartTime` exactly once, in the form
-      `YYYY-MM-DD HH:MM:SS +ZZZZ`;
+    - `ipconfig getsummary` doesn't report `LeaseStartTime` exactly once, in one of two forms:
+      - `YYYY-MM-DD HH:MM:SS +ZZZZ`, which carries its own zone;
+      - `MM/DD/YYYY HH:MM:SS`, which macOS 26 prints with no zone. `ipconfig` prints this form in the
+        time zone of the process that calls it, so the verifier calls it with `TZ=UTC` and reads the
+        result as UTC. Nothing then depends on the admin's shell or the guest's configured zone. It must
+        name a real calendar day and time.
+
+      `dhcp.leaseStartForm` (`zoned` or `utc`) and `dhcp.leaseStartUtcOffsetMinutes` record which form
+      was read and the offset used, so the evidence shows how the start was interpreted;
+    - `ipconfig getsummary` reports `LeaseExpirationTime` (in either form) and it isn't exactly
+      `LeaseStartTime` plus `lease_time`, or it reports it twice or in neither form. On a real macOS 26.3
+      guest the two agree. The raw value is attested as `dhcp.leaseExpiryRaw`, which is `null` when the
+      summary has no expiry line;
     - the start is before 2000 or in the future;
     - the lease has expired;
     - the lease doesn't report `lease_time`;
@@ -655,7 +666,9 @@ The guest is attested from two planes, because neither can see everything.
     kernel's view of what the process has mapped: exactly one may be a node binary, and it is recorded
     canonicalized. `ps`'s command name isn't used, because on macOS it is the process's own `argv[0]`;
   - that the workload account is still what setup made: a regular uid (501 or above), its own home
-    owned by it, in neither `admin` nor `wheel`, and with no sudo rights. Sudo rights are judged by the
+    owned by it, in neither `admin` nor `wheel`, and with no sudo rights. Group membership is judged
+    by `dseditgroup -o checkmember`'s exit status: 0 is a member, 67 is not, and any other status leaves
+    membership unknown and is refused. Sudo rights are judged by the
     exit status of `sudo -l -U <user> <command>`, for a shell, `pfctl` and a no-op. Two positive controls
     come first: the admin can run `sudo -n true` right now, and the same query says yes for the admin.
     After that, only exit status 1 counts as the policy's "no". A 0 means the workload has sudo, and a
@@ -701,8 +714,10 @@ changes the boot identity, so no time survives one.
   it, if the dry run shows one is workable.
 - **The DHCP allowance is a best effort at keeping the management path**, not a proof. It depends on
   macOS's DHCP client renewing with the configured server over the allowed ports, and on the
-  `ipconfig` output forms the verifier parses (`getpacket`, and `getsummary`'s `LeaseStartTime`).
-  Neither has been seen on a real guest yet; the verifier fails closed when either differs. The dry run
+  `ipconfig` output forms the verifier parses (`getpacket`, and `getsummary`'s `LeaseStartTime` and
+  `LeaseExpirationTime`). A census of a real macOS 26.3 guest has confirmed both forms. It also watched
+  a renewal keep the address and accept a new SSH session under this pf profile, although no attested
+  run has observed one yet. The verifier fails closed when a form differs. The dry run
   must show that the address, and SSH, survive a real lease renewal. That applies especially when the
   timing is `derived-rfc2131`: the verifier then attests when a renewal *should* happen, never that one
   did. The observation is step 12 of
