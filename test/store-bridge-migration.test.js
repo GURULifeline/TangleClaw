@@ -1,0 +1,236 @@
+'use strict';
+
+// #2031 (ADR 0023): schema v52 adds the Master-mediated operator bridge's
+// storage in its final shape. A fresh install and a v51 store reach the same
+// shape; a store whose bridge tables are the wrong shape is refused at the
+// migration and at every later startup; and the Medusa exchange table is left
+// exactly as it was.
+
+const { describe, it, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { setLevel } = require('../lib/logger');
+
+setLevel('error');
+
+const store = require('../lib/store');
+const bridgeSchema = require('../lib/bridge-schema');
+
+let tmpDir = null;
+
+/**
+ * The SQL of every bridge object, by name.
+ * @returns {Map<string, string>}
+ */
+function bridgeObjects() {
+  const rows = store.getDb().prepare(
+    "SELECT name, sql FROM sqlite_master WHERE name LIKE 'bridge_%' OR name LIKE 'idx_bridge_%' ORDER BY name"
+  ).all();
+  return new Map(rows.map((r) => [r.name, r.sql]));
+}
+
+/**
+ * Open a fresh store in a new temp dir.
+ * @param {string} label - Temp dir label.
+ * @returns {void}
+ */
+function freshStore(label) {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-bridge-${label}-`));
+  store._setBasePath(tmpDir);
+  store.init();
+}
+
+/**
+ * Turn the open store back into a v51 one: drop every bridge object and the newer stamp.
+ * @returns {void}
+ */
+function rewindToV51() {
+  const db = store.getDb();
+  for (const object of bridgeSchema.BRIDGE_SCHEMA_OBJECTS.filter((o) => o.type === 'trigger')) {
+    db.exec(`DROP TRIGGER ${object.name}`);
+  }
+  for (const object of bridgeSchema.BRIDGE_SCHEMA_OBJECTS.filter((o) => o.type === 'table')) {
+    db.exec(`DROP TABLE ${object.name}`);
+  }
+  db.exec('DELETE FROM schema_version WHERE version >= 52');
+  db.exec('INSERT INTO schema_version (version) VALUES (51)');
+  store.close();
+}
+
+/**
+ * Reopen the store in the current temp dir.
+ * @returns {void}
+ */
+function reopen() {
+  store._setBasePath(tmpDir);
+  store.init();
+}
+
+describe('store: operator bridge schema (v52, #2031)', () => {
+  afterEach(() => {
+    store.close();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = null;
+  });
+
+  it('a fresh install has every bridge object in its checked shape', () => {
+    freshStore('fresh');
+    assert.ok(store.CURRENT_SCHEMA_VERSION >= 52);
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb()), []);
+    const have = bridgeObjects();
+    for (const object of bridgeSchema.BRIDGE_SCHEMA_OBJECTS) assert.ok(have.has(object.name), `missing ${object.name}`);
+  });
+
+  it('a v51 store migrates to the same shape a fresh install has', () => {
+    freshStore('v51');
+    const fresh = bridgeObjects();
+    rewindToV51();
+
+    reopen();
+    assert.deepEqual([...bridgeObjects()], [...fresh]);
+    const version = store.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
+    assert.equal(version, store.CURRENT_SCHEMA_VERSION);
+  });
+
+  it('leaves the Medusa exchange table exactly as it was', () => {
+    freshStore('exchanges');
+    const sql = () => store.getDb().prepare("SELECT sql FROM sqlite_master WHERE name = 'medusa_exchanges'").get().sql;
+    const before = sql();
+    rewindToV51();
+    reopen();
+    assert.equal(sql(), before);
+    assert.ok(!/master-launch|sender_generation/.test(before));
+  });
+
+  it('refuses to advance over a bridge table of the wrong shape', () => {
+    freshStore('misshapen');
+    rewindToV51();
+    // An outbound table from the superseded design: no idempotency key of its
+    // own, so nothing could tell two notifications apart.
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    raw.exec('CREATE TABLE bridge_outbound (outbound_id INTEGER PRIMARY KEY, hub_id TEXT UNIQUE, text TEXT)');
+    raw.close();
+
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /bridge_outbound/);
+    store.close();
+    const check = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    const version = check.prepare('SELECT MAX(version) AS v FROM schema_version').get().v;
+    check.close();
+    assert.equal(version, 51);
+  });
+
+  it('refuses at startup when a bridge object goes missing after the migration', () => {
+    freshStore('tampered');
+    store.getDb().exec('DROP TRIGGER bridge_audit_append_only_delete');
+    store.close();
+    // The table DDL would quietly put a missing TABLE back; a store that lost
+    // an index it rests on is the case only the startup check sees.
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    raw.exec('DROP INDEX idx_bridge_route_proofs_hub');
+    raw.exec('CREATE INDEX idx_bridge_route_proofs_hub ON bridge_route_proofs(hub_id)');
+    raw.close();
+
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /idx_bridge_route_proofs_hub/);
+  });
+});
+
+describe('store: operator bridge constraints (#2031)', () => {
+  afterEach(() => {
+    store.close();
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = null;
+  });
+
+  const at = '2026-10-04T00:00:00.000Z';
+  const digest = 'a'.repeat(64);
+
+  it('keeps the audit append-only', () => {
+    freshStore('audit');
+    const db = store.getDb();
+    db.prepare(
+      "INSERT INTO bridge_audit (op, request_id, actor, proof, outcome, at) VALUES ('close', 'req-00000001', 'operator', 'operator', 'applied', ?)"
+    ).run(at);
+    assert.throws(() => db.exec("UPDATE bridge_audit SET outcome = 'changed'"), /append-only/);
+    assert.throws(() => db.exec('DELETE FROM bridge_audit'), /append-only/);
+  });
+
+  it('refuses an audit row for Master that names no generation', () => {
+    freshStore('audit-gen');
+    assert.throws(() => store.getDb().prepare(
+      "INSERT INTO bridge_audit (op, actor, proof, outcome, at) VALUES ('close', 'master', 'master-launch', 'applied', ?)"
+    ).run(at), /CHECK/);
+  });
+
+  it('allows one live Master generation and one active helper token', () => {
+    freshStore('single');
+    const db = store.getDb();
+    const mint = db.prepare('INSERT INTO bridge_master_credentials (generation, credential_hash, status, minted_at) VALUES (?, ?, ?, ?)');
+    mint.run(1, 'b'.repeat(64), 'active', at);
+    assert.throws(() => mint.run(2, 'c'.repeat(64), 'active', at), /UNIQUE/);
+    mint.run(2, 'c'.repeat(64), 'revoked', at);
+
+    const token = db.prepare("INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at) VALUES (?, ?, 'active', 'operator', ?)");
+    token.run('t1', 'd'.repeat(64), at);
+    assert.throws(() => token.run('t2', 'e'.repeat(64), at), /UNIQUE/);
+  });
+
+  it('gives every outbound item its own idempotency key and no synthetic Hub id', () => {
+    freshStore('outbound');
+    const db = store.getDb();
+    const insert = db.prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, created_at, updated_at) '
+      + "VALUES (?, 'notification', ?, 'TangleClaw', 'x', ?, 'ready', ?, ?) ON CONFLICT(idem_key) DO NOTHING"
+    );
+    assert.equal(insert.run('notify:fleet-idle:1', 'fleet-idle', digest, at, at).changes, 1);
+    assert.equal(insert.run('notify:fleet-idle:1', 'fleet-idle', digest, at, at).changes, 0);
+    assert.equal(insert.run('notify:fleet-idle:2', 'fleet-idle', digest, at, at).changes, 1);
+    const rows = db.prepare('SELECT hub_id FROM bridge_outbound').all();
+    assert.deepEqual(rows.map((r) => r.hub_id), [null, null]);
+    // A reserved notification type has no producer yet and is not storable.
+    assert.throws(() => insert.run('notify:x:1', 'release-action-needed', digest, at, at), /CHECK/);
+  });
+
+  it('refuses a reply that was not released by a Master generation', () => {
+    freshStore('reply');
+    assert.throws(() => store.getDb().prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
+      + "VALUES ('route:r1:answer', 'reply', 'r1', 'Master', 'x', ?, 'ready', ?, ?)"
+    ).run(digest, at, at), /CHECK/);
+  });
+
+  it('refuses a reply proof that does not name its launch, project and the message it answers', () => {
+    freshStore('proof');
+    const db = store.getDb();
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, recorded_at) VALUES ('r1', 'from-target', 'h2', 'launch', ?)"
+    ).run(at), /CHECK/);
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', ?)"
+    ).run(at), /CHECK/);
+    db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 3, ?)"
+    ).run(at);
+    // One Hub message belongs to one route.
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, recorded_at) VALUES ('r2', 'to-target', 'h1', 'master-launch', 3, ?)"
+    ).run(at), /UNIQUE/);
+  });
+
+  it('keeps a global pin for the operator and a conversation pin to one per conversation', () => {
+    freshStore('pins');
+    const db = store.getDb();
+    const pin = db.prepare(
+      'INSERT INTO bridge_pins (pin_id, scope, conversation_key, destination_kind, created_by, master_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    assert.throws(() => pin.run('p0', 'global', null, 'master', 'master', 1, at), /CHECK/);
+    pin.run('p1', 'conversation', 'chan:1', 'master', 'master', 1, at);
+    assert.throws(() => pin.run('p2', 'conversation', 'chan:1', 'master', 'master', 1, at), /UNIQUE/);
+    pin.run('p3', 'global', null, 'master', 'operator', null, at);
+  });
+});
