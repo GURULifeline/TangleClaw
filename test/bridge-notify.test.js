@@ -290,6 +290,13 @@ describe('bridge notifications (#2031)', () => {
       lanes = [idle(1, 'launch-a', 2)];
       assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'found idle on the first reading that says anything: not announced');
       assert.equal(notifications().length, 1);
+      assert.deepEqual(bridgeNotify.episode(), { open: true, resumed: true }, 'the episode its notice recorded, resumed');
+
+      // A different fleet found idle after a start is taken as it is too, but it is not that episode.
+      bridgeNotify._reset();
+      lanes = [idle(7, 'launch-z', 1)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+      assert.deepEqual(bridgeNotify.episode(), { open: true, resumed: false });
     });
 
     it('a reading that lapses and comes back is the same episode, not a new one', () => {

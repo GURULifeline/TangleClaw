@@ -273,7 +273,7 @@ tc candidate submit --kind milestone --receipt workload:<seq> --text "PR 12 merg
   returns the same candidate; the same id with a different payload is refused.
 - **Bounded.** At most five undecided candidates per launch, text of at most 1800 characters
   with no control or text-direction characters. A candidate the Master has not decided within
-  7 days is rejected as expired.
+  its limit is rejected as expired: 7 days for a milestone, 30 for an operator action.
 - **Nothing is posted.** A candidate never reaches the helper by itself.
 
 The Master decides, through `tc bridge`:
@@ -333,12 +333,12 @@ name or a count the server resolved, never anything a session or the operator ty
   same episode. After the bridge is enabled, or the server restarts, the first reading that
   says anything is taken as it is and not announced; for the first seconds after a restart
   every reading is unknown, because no engine has been observed at rest yet.
-- **Not kept for a late helper.** A notification or status notice nobody collected within 24
-  hours is dropped, and an approved candidate within 7 days, so a helper that attaches late
-  does not post stale news ahead of current answers. A reply is never dropped. What is let go
-  is recorded in the audit. A helper that had already fetched an item and posts it after it
-  expired is still believed when it acknowledges. A route's status notice that expired is not
-  raised a second time.
+- **Not kept for a late helper.** A notification nobody collected is let go after its limit
+  (see Retention), so a helper that attaches late does not post stale news ahead of current
+  answers. A helper that had already fetched an item and posts it after it expired is still
+  believed when it acknowledges.
+- **An episode's identity outlives a restart.** Its notice is the record of it. When the
+  server starts and finds the same lanes idle, that is the episode resumed, not a new one.
 
 `release-action-needed` and `certification-state-changed` remain reserved, with no producer.
 
@@ -426,14 +426,22 @@ a day, whether or not the bridge is enabled. Revoked pins and helper tokens leav
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
 | Delivered or dropped outbound items | 30 days |
 | Decided candidates | 30 days |
-| Undecided candidates | Rejected as expired after 7 days, then kept 30 days |
-| Uncollected notifications and status notices | Dropped after 24 hours, then kept 30 days |
-| Uncollected approved candidates | Dropped after 7 days, then kept 30 days |
+| A reply, or a delivery-failure notice | Never let go while it waits |
+| An undecided or uncollected `milestone` candidate | Let go after 7 days, then kept 30 days |
+| An undecided or uncollected `operator-action-required` candidate | Let go after 30 days, then kept 30 days |
+| An uncollected `work-blocked` or `operator-needed` notification | Let go after 7 days, then kept 30 days |
+| An uncollected `fleet-idle` notification or route status notice | Let go after 24 hours, then kept 30 days |
 | Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
 | Audit rows | 90 days, then compacted |
 
 An open route, an undelivered reply and the live credential are never removed, whatever their
-age. A closed route takes its outbound items with
+age.
+
+"Let go" means an undecided candidate is rejected as expired and an uncollected item is
+dropped. Something is let go when it has waited strictly longer than its limit. Each one is
+audited by itself, with the reason `expired` and its own id. Nothing let go is raised again:
+its row and its idempotency key stay until retention removes them, so the event that caused it
+remains accounted for. A route's status notice that expired is not raised a second time. A closed route takes its outbound items with
 it in any state: a route closes only once its answer has been relayed or abandoned. An audit row of a route that is still open is never compacted, and
 neither is any row written after it.
 

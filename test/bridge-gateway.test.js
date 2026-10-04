@@ -872,11 +872,13 @@ describe('bridge gateway (#2031)', () => {
         [['notification', 'Alpha reports its work is blocked.', null]]);
 
       const [fetched] = gateway.outboundForHelper();
-      later(bridgeStore.OUTBOUND_TTL_MS.notification + 60000);
+      later(bridgeStore.EXPIRY_MS.notification['work-blocked'] + 60000);
       await gateway.tick();
-      assert.deepEqual(gateway.outboundForHelper(), [], 'a day-old notification is not handed to a helper that attaches late');
+      assert.deepEqual(gateway.outboundForHelper(), [], 'a week-old notification is not handed to a helper that attaches late');
       const expiry = store.getDb().prepare("SELECT * FROM bridge_audit WHERE op = 'expire'").get();
-      assert.deepEqual([expiry.actor, JSON.parse(expiry.detail_json).outbound], ['gateway', 1], 'what was let go is on the record');
+      assert.deepEqual([expiry.actor, expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['gateway', 'expired', fetched.outboundId],
+        'what was let go is on the record, by its id');
+      assert.equal((await gateway.tick()).notifications.workBlocked, 0, 'and it is not raised again');
       // A helper that had already fetched it and posted it late is still believed.
       assert.equal(gateway.acknowledgeOutbound(fetched.outboundId, 'posted-late').status, 200);
       assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'delivered');

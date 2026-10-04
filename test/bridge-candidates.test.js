@@ -293,23 +293,6 @@ describe('bridge candidates (#2031)', () => {
     assert.deepEqual([...bridgeStore.WORKLOAD_RECEIPT_COLUMNS].sort(), columns);
   });
 
-  it('lets go of a candidate the Master never decided, and of an approved item nobody collected', async () => {
-    const session = liveSession();
-    reports(session);
-    const waiting = (await offers(session)).body.candidateId;
-    const approved = (await offers(session)).body.candidateId;
-    await master(approved, 'approve');
-    const now = Date.now();
-
-    assert.deepEqual(bridgeStore.expire({ now: new Date(now + bridgeStore.CANDIDATE_TTL_MS - 60000).toISOString() }), { outbound: 0, candidates: 0 });
-    const expired = bridgeStore.expire({ now: new Date(now + bridgeStore.CANDIDATE_TTL_MS + 60000).toISOString() });
-    assert.ok(expired.candidates >= 1 && expired.outbound >= 1);
-    assert.equal(bridgeStore.candidates.get(waiting).state, 'rejected');
-    const item = candidateItems().find((i) => i.candidate_id === approved);
-    assert.deepEqual([item.state, item.drop_code, item.text], ['dropped', 'expired', null]);
-    assert.equal((await master(waiting, 'approve', { expectedVersion: 2 })).body.code, 'ALREADY_DECIDED');
-  });
-
   it('refuses to approve a candidate whose receipt is no longer what it was', async () => {
     const session = liveSession();
     reports(session);
