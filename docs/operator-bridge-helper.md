@@ -140,6 +140,11 @@ It exits non-zero if any check fails. It prints no secret and no id.
 
 ### 5. Run it under launchd
 
+On a live install, do this only where [the activation runbook](runbooks/activate-the-operator-bridge.md)
+says to: after the operator has enabled the bridge. A helper started against a disabled bridge
+finds every claim refused, backs off to five minutes, and answers each operator message with
+"Not delivered: the TangleClaw operator bridge is turned off."
+
 ```sh
 bin/tc-bridge-helper install-launchd
 ```

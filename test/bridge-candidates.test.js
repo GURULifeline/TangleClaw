@@ -377,4 +377,142 @@ describe('bridge candidates (#2031)', () => {
     const selfApprove = await run(['bridge', 'approve', id, '--version', '2'], pane);
     assert.deepEqual([selfApprove.code, /BRIDGE_CREDENTIAL_REQUIRED/.test(selfApprove.stderr)], [2, true]);
   });
+  // What a rollback has to be able to clear. Closing routes withdraws what was
+  // released for them; everything else queued belongs to no open route, waits
+  // through a disabled bridge, and posts when it is next enabled.
+  describe('everything queued that no open route owns', () => {
+    const bridgeApi = require('../lib/bridge-api');
+    const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {} };
+    const AMBIENT = { tcGateActive: false, tcGateState: 'open', headers: { 'sec-fetch-site': 'same-origin' } };
+    /**
+     * Call an operator route as a given caller.
+     * @param {object} req - The HTTP request as the server would have annotated it.
+     * @param {string} method - HTTP method.
+     * @param {string} declared - The declared path.
+     * @param {object} [request] - `params`, `body`.
+     * @returns {Promise<{status: number, body: object}>}
+     */
+    const operator = (req, method, declared, request = {}) => bridgeApi.handle(bridgeApi.routeFor(method, declared), { req, headers: req.headers, ...request });
+    const inventory = async () => (await operator(SIGNED_IN, 'GET', '/api/bridge/operator/status')).body.routelessItems;
+    const notice = (key, type) => {
+      const text = `notice text ${key}`;
+      return bridgeStore.outbound.enqueue({ idemKey: `notify:${type}:${key}`, kind: 'notification', notifyType: type, sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text) }).outboundId;
+    };
+
+    it('lists every class of it, by id, kind, state and age, and never its text; and nothing an open route owns', async () => {
+      const db = store.getDb();
+      db.exec('DELETE FROM bridge_outbound');
+      db.exec("UPDATE bridge_candidates SET state = 'rejected', decided_at = '2026-10-04T00:00:00.000Z' WHERE state = 'submitted'");
+      const session = liveSession();
+      reports(session);
+      // 1. A candidate nobody has decided.
+      const undecided = (await offers(session, { text: 'SECRET-UNDECIDED text' })).body.candidateId;
+      // 2. A candidate approved and not yet collected.
+      const approvedId = (await offers(session, { text: 'SECRET-APPROVED text' })).body.candidateId;
+      assert.equal((await master(approvedId, 'approve')).status, 200);
+      const approvedItem = candidateItems().find((i) => i.candidate_id === approvedId).outbound_id;
+      // 3. A typed notification waiting.
+      const waiting = notice('inv-1', 'fleet-idle');
+      // 4. An item set aside.
+      const aside = notice('inv-2', 'operator-needed');
+      db.prepare("UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?").run(aside);
+      // 5. A notice left behind by a route that has since closed.
+      bridgeStore.routes.accept({ routeId: 'rt_inv_closed', externalId: `inv-closed-${++seq}`, authorId: 'a', spaceId: 's', channelId: 'c', text: 'SECRET-ROUTE text', digest: bridgeStore.digest('x') });
+      const ofClosed = bridgeStore.outbound.enqueue({ idemKey: 'route:rt_inv_closed:send-unconfirmed', kind: 'failure', routeId: 'rt_inv_closed', sourceLabel: 'TangleClaw', text: 'SECRET-FAILURE text', digest: bridgeStore.digest('f') }).outboundId;
+      db.prepare("UPDATE bridge_routes SET state = 'closed', closed_by = 'master', closed_at = '2026-10-04T00:00:00.000Z' WHERE route_id = 'rt_inv_closed'").run();
+      // An item cannot name a route that does not exist: the store refuses it.
+      assert.throws(() => bridgeStore.outbound.enqueue({ idemKey: 'route:rt_inv_gone:send-unconfirmed', kind: 'failure', routeId: 'rt_inv_gone', sourceLabel: 'TangleClaw', text: 'gone', digest: bridgeStore.digest('g') }),
+        /needs its route or candidate/);
+      // NOT in it: what an open route owns, what is already delivered or let go, and a decided candidate.
+      bridgeStore.routes.accept({ routeId: 'rt_inv_open', externalId: `inv-open-${++seq}`, authorId: 'a', spaceId: 's', channelId: 'c', text: 'x', digest: bridgeStore.digest('x') });
+      const owned = bridgeStore.outbound.enqueue({ idemKey: 'route:rt_inv_open:send-unconfirmed', kind: 'failure', routeId: 'rt_inv_open', sourceLabel: 'TangleClaw', text: 'owned', digest: bridgeStore.digest('o') }).outboundId;
+      const delivered = notice('inv-3', 'fleet-idle');
+      db.prepare("UPDATE bridge_outbound SET state = 'delivered', delivered_ref = 'x', delivered_at = '2026-10-04T00:00:00.000Z', text = NULL WHERE outbound_id = ?").run(delivered);
+      const dropped = notice('inv-4', 'fleet-idle');
+      db.prepare("UPDATE bridge_outbound SET state = 'dropped', drop_code = 'withdrawn', text = NULL WHERE outbound_id = ?").run(dropped);
+      const rejected = (await offers(session, { text: 'decided already' })).body.candidateId;
+      assert.equal((await master(rejected, 'reject')).status, 200);
+
+      const listed = await inventory();
+      assert.deepEqual(listed.map((e) => [e.ref, e.id, e.kind, e.state]), [
+        ['candidate', undecided, 'candidate:milestone', 'undecided'],
+        ['item', approvedItem, 'candidate', 'waiting'],
+        ['item', waiting, 'notification:fleet-idle', 'waiting'],
+        ['item', aside, 'notification:operator-needed', 'set-aside:rejected-by-chat'],
+        ['item', ofClosed, 'failure', 'waiting']
+      ]);
+      for (const entry of listed) {
+        assert.deepEqual(Object.keys(entry).sort(), ['createdAt', 'id', 'kind', 'ref', 'state'], 'id, kind, state and age, and nothing else');
+        assert.match(entry.createdAt, /^20\d\d-\d\d-\d\dT/);
+      }
+      assert.ok(!/SECRET|notice text|PR 12/.test(JSON.stringify(listed)), 'no word of anything anyone wrote');
+      for (const absent of [owned, delivered, dropped]) assert.ok(!listed.some((e) => e.ref === 'item' && e.id === absent));
+      assert.ok(!listed.some((e) => e.id === rejected));
+      assert.deepEqual(bridgeStore.routelessInventory(), listed, 'status shows exactly the store\'s inventory');
+    });
+
+    it('the signed-in operator withdraws each one, once, with the bridge disabled; nobody else can', async () => {
+      const db = store.getDb();
+      db.exec('DELETE FROM bridge_outbound');
+      db.exec("UPDATE bridge_candidates SET state = 'rejected', decided_at = '2026-10-04T00:00:00.000Z' WHERE state = 'submitted'");
+      const session = liveSession();
+      reports(session);
+      const undecided = (await offers(session)).body.candidateId;
+      const approvedId = (await offers(session, { text: 'Another.' })).body.candidateId;
+      await master(approvedId, 'approve');
+      const item = notice('wd-1', 'fleet-idle');
+      const aside = notice('wd-2', 'operator-needed');
+      db.prepare("UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?").run(aside);
+      assert.equal((await inventory()).length, 4);
+
+      // Disabling withdraws nothing by itself, and the Master's own decisions are refused from then on.
+      bridgeStore.settings.set('enabled', 'false');
+      assert.equal((await inventory()).length, 4);
+      assert.deepEqual([(await master(undecided, 'reject')).status, (await master(undecided, 'reject')).body.code], [409, 'BRIDGE_DISABLED']);
+
+      // Not the operator: an open gate and a dashboard-shaped request change nothing.
+      const candidateRoute = '/api/bridge/operator/candidates/:candidateId/withdraw';
+      const itemRoute = '/api/bridge/operator/outbound/:outboundId/withdraw';
+      assert.equal((await operator(AMBIENT, 'POST', candidateRoute, { params: { candidateId: undecided }, body: { requestId: 'req-amb-cand-0001' } })).status, 403);
+      assert.equal((await operator(AMBIENT, 'POST', itemRoute, { params: { outboundId: String(item) }, body: { requestId: 'req-amb-item-0001' } })).status, 403);
+      for (const headers of [{}, session.headers, { 'x-tangleclaw-bridge-credential': masterCredential }]) {
+        const res = await call('POST', `/api/bridge/operator/candidates/${undecided}/withdraw`, { headers, body: { requestId: 'req-http-cand-0001' } });
+        assert.deepEqual([res.status, res.body.code], [403, 'OPERATOR_SESSION_REQUIRED']);
+      }
+      assert.equal((await inventory()).length, 4, 'none of that withdrew anything');
+
+      // The candidate: once, audited with who did it, and a repeat of the request changes nothing.
+      const first = await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: undecided }, body: { requestId: 'req-op-cand-0001' } });
+      assert.deepEqual([first.status, first.body.candidate.state, first.body.replayed], [200, 'rejected', false]);
+      assert.ok(!JSON.stringify(first.body).includes('PR 12'), 'the answer carries no text');
+      const again = await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: undecided }, body: { requestId: 'req-op-cand-0001' } });
+      assert.deepEqual([again.status, again.body.replayed], [200, true]);
+      const other = await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: undecided }, body: { requestId: 'req-op-cand-0002' } });
+      assert.deepEqual([other.status, other.body.code], [409, 'NOT_WAITING'], 'a new request finds it already decided');
+      const reused = await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: approvedId }, body: { requestId: 'req-op-cand-0001' } });
+      assert.deepEqual([reused.status, reused.body.code], [409, 'REQUEST_ID_REUSED']);
+      assert.equal((await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: 'cand_no_such' }, body: { requestId: 'req-op-cand-0003' } })).status, 404);
+      assert.equal((await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: 'not a candidate id' }, body: { requestId: 'req-op-cand-0004' } })).status, 404);
+      assert.equal((await operator(SIGNED_IN, 'POST', candidateRoute, { params: { candidateId: undecided }, body: {} })).body.code, 'REQUEST_ID_REQUIRED');
+      const audited = db.prepare("SELECT actor, proof, outcome, master_generation, detail_json FROM bridge_audit WHERE op = 'candidate-withdraw' AND request_id = 'req-op-cand-0001'").all();
+      assert.deepEqual(audited.map((r) => [r.actor, r.proof, r.outcome, r.master_generation, JSON.parse(r.detail_json).user, JSON.parse(r.detail_json).candidateId]),
+        [['operator', 'verified-session', 'applied', null, 'rosie', undecided]]);
+      const row = db.prepare('SELECT state, decided_generation, decided_at FROM bridge_candidates WHERE candidate_id = ?').get(undecided);
+      assert.deepEqual([row.state, row.decided_generation, typeof row.decided_at], ['rejected', null, 'string'], 'decided by the operator, not by a Master generation');
+      // It can never be approved now.
+      bridgeStore.settings.set('enabled', 'true');
+      assert.equal((await master(undecided, 'approve', { expectedVersion: 2 })).status, 409);
+      bridgeStore.settings.set('enabled', 'false');
+
+      // Every item left, each by its own id, and the inventory is then empty.
+      for (const entry of await inventory()) {
+        assert.equal(entry.ref, 'item');
+        const done = await operator(SIGNED_IN, 'POST', itemRoute, { params: { outboundId: String(entry.id) }, body: { requestId: `req-op-item-${entry.id}-0001` } });
+        assert.deepEqual([done.status, done.body.item.state], [200, 'dropped'], `${entry.kind} ${entry.state}`);
+      }
+      assert.deepEqual(await inventory(), []);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE state IN ('ready','blocked')").get().n, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE text IS NOT NULL").get().n, 0, 'and no text of any of it is kept');
+    });
+  });
 });

@@ -41,7 +41,8 @@
     primer: '/api/bridge/operator/candidate-primer',
     circuitReset: '/api/bridge/operator/circuit/reset',
     requeue: (id) => `/api/bridge/operator/outbound/${Number(id)}/requeue`,
-    withdraw: (id) => `/api/bridge/operator/outbound/${Number(id)}/withdraw`
+    withdraw: (id) => `/api/bridge/operator/outbound/${Number(id)}/withdraw`,
+    withdrawCandidate: (id) => `/api/bridge/operator/candidates/${encodeURIComponent(String(id))}/withdraw`
   });
 
   /** What Discord's ids look like: digits only. The server checks again. */
@@ -66,7 +67,8 @@
       ? 'Reset the circuit and WITHDRAW what it set aside? Those items will never be posted, and a route whose answer is among them is closed.'
       : 'Reset the circuit and put what it set aside back in the queue to be posted?'),
     requeue: (f) => `Put item ${f.outboundId} back in the queue to be posted?`,
-    withdraw: (f) => `Withdraw item ${f.outboundId}? It will never be posted. If it is a route's answer, that route is closed.`
+    withdraw: (f) => `Withdraw item ${f.outboundId}? It will never be posted. If it is a route's answer, that route is closed.`,
+    'withdraw-candidate': (f) => `Withdraw candidate ${f.candidateId}? Nobody has decided it, and it will then never be approved or posted.`
   });
 
   /**
@@ -182,6 +184,10 @@
       withdraw: (f) => {
         const key = `withdraw:${f.outboundId}`;
         return send(ROUTES.withdraw(f.outboundId), 'POST', { requestId: requestIdFor(key) }, `Item ${Number(f.outboundId)} is withdrawn.`, key);
+      },
+      'withdraw-candidate': (f) => {
+        const key = `withdraw-candidate:${f.candidateId}`;
+        return send(ROUTES.withdrawCandidate(f.candidateId), 'POST', { requestId: requestIdFor(key) }, `Candidate ${f.candidateId} is withdrawn.`, key);
       }
     };
 
@@ -202,6 +208,7 @@
       if (action === 'revoke-token' && state.status && state.status.enabled) return 'Disable the bridge first, then revoke the token.';
       if (action === 'circuit-reset' && f.decision !== 'requeue' && f.decision !== 'withdraw') return 'Say what becomes of the items set aside: put back, or withdrawn.';
       if ((action === 'requeue' || action === 'withdraw') && !Number.isInteger(Number(f.outboundId))) return 'No such item.';
+      if (action === 'withdraw-candidate' && !/^[A-Za-z0-9_-]{1,64}$/.test(String(f.candidateId || ''))) return 'No such candidate.';
       return null;
     }
 
@@ -286,6 +293,7 @@
       const circuit = s.configurationCircuit;
       const routes = Object.entries(s.openRoutesByState || {}).map(([k, v]) => `${escapeHtml(k)} ${escapeHtml(v)}`).join(', ');
       const items = Array.isArray(s.setAsideItems) ? s.setAsideItems : [];
+      const routeless = Array.isArray(s.routelessItems) ? s.routelessItems : [];
       const token = state.token === null ? '' : `
         <div class="ob-token" data-bridge-token-shown="1">
           <div class="form-hint"><strong>The helper token, shown once.</strong> It is not saved anywhere by this page.
@@ -302,7 +310,7 @@
           + `listener ${s.masterListener && s.masterListener.enabled ? escapeHtml(s.masterListener.state || 'on') : '<strong>off</strong>'}`
           + (s.routesMasterNotTold ? `; <strong>${escapeHtml(s.routesMasterNotTold)} route(s) it has not been told of</strong>` : ''))}
         ${line('Routes', `${escapeHtml(s.openRoutes)} open${routes ? ` (${routes})` : ''}${s.oldestOpenRouteAt ? `, oldest since ${escapeHtml(s.oldestOpenRouteAt)}` : ''}`)}
-        ${line('To post', `${escapeHtml(s.waitingForHelper)} waiting for the helper, ${escapeHtml(s.setAside)} set aside`)}
+        ${line('To post', `${escapeHtml(s.waitingForHelper)} waiting for the helper, ${escapeHtml(s.setAside)} set aside, ${escapeHtml(routeless.length)} queued with no open route`)}
 
         <div class="gs-section-sublabel">Allowlist</div>
         ${line('Now', allow ? `author ${escapeHtml(allow.authorId)}, server ${escapeHtml(allow.spaceId)}, channel ${escapeHtml(allow.channelId)}` : '<strong>not set</strong>')}
@@ -340,6 +348,16 @@
           + `handed over ${escapeHtml(item.attempts)} time(s), ${escapeHtml(item.partsPosted)} part(s) posted `
           + `${button('requeue', 'Put back', { item: item.outboundId })} ${button('withdraw', 'Withdraw', { item: item.outboundId })}</div>`).join('')
           : '<div class="form-hint">Nothing is set aside.</div>'}
+
+        <div class="gs-section-sublabel">Queued with no open route</div>
+        <div class="form-hint">Closing a route withdraws what was released for it. These belong to no open route, so they wait,
+          through a disabled bridge too, and are posted when it is next enabled unless withdrawn here.</div>
+        ${routeless.length ? routeless.map((entry) => (entry.ref === 'candidate'
+          ? `<div class="ob-item" data-bridge-queued="candidate:${escapeHtml(entry.id)}">candidate ${escapeHtml(entry.id)}: ${escapeHtml(entry.kind)}, ${escapeHtml(entry.state)}, `
+            + `since ${escapeHtml(entry.createdAt)} ${button('withdraw-candidate', 'Withdraw', { candidate: entry.id })}</div>`
+          : `<div class="ob-item" data-bridge-queued="item:${escapeHtml(entry.id)}">item ${escapeHtml(entry.id)}: ${escapeHtml(entry.kind)}, ${escapeHtml(entry.state)}, `
+            + `since ${escapeHtml(entry.createdAt)} ${button('withdraw', 'Withdraw', { item: entry.id })}</div>`)).join('')
+          : '<div class="form-hint">Nothing is queued without a route.</div>'}
       `;
     }
 
@@ -392,7 +410,8 @@
       const value = (id) => { const input = doc.getElementById(id); return input ? String(input.value || '').trim() : ''; };
       return {
         authorId: value('obAuthorId'), spaceId: value('obSpaceId'), channelId: value('obChannelId'),
-        outboundId: target.dataset.bridgeItem, episodeId: target.dataset.bridgeEpisode, decision: target.dataset.bridgeDecision
+        outboundId: target.dataset.bridgeItem, candidateId: target.dataset.bridgeCandidate,
+        episodeId: target.dataset.bridgeEpisode, decision: target.dataset.bridgeDecision
       };
     };
     if (!container.dataset.bridgeBound) {

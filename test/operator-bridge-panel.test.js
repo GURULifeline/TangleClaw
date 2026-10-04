@@ -113,7 +113,7 @@ function controller(wires, over = {}) {
   const panel = sandbox.tcCreateOperatorBridgePanel({
     api: wires.api, apiMutate: wires.apiMutate,
     confirm: (text) => { asked.push(text); return over.confirm ? over.confirm(text) : true; },
-    randomId: () => `rand${String(++n).padStart(4, '0')}abcdef`,
+    randomId: over.randomId || (() => `rand${String(++n).padStart(4, '0')}abcdef`),
     clipboard: over.clipboard === undefined ? { writeText: async (t) => { copied.push(t); } } : over.clipboard
   });
   return { panel, asked, copied, sandbox };
@@ -398,12 +398,15 @@ describe('the Operator Bridge panel (#2031)', () => {
           openRoutesByState: { '<b>x</b>': 1 }, waitingForHelper: 0, setAside: 1, masterListener: { enabled: false },
           configurationCircuit: { episodeId: 4, openedAt: 't', reason: '"><script>' },
           setAsideItems: [{ outboundId: 9, kind: 'reply', notifyType: null, blockCode: '<i>', attempts: 1, partsPosted: 0 }],
+          routelessItems: [{ ref: 'item', id: 4, kind: '<u>k</u>', state: '<s>', createdAt: '<t>' }, { ref: 'candidate', id: 'c"><x', kind: 'candidate:<k>', state: 'undecided', createdAt: 'when' }],
           candidatesPrimed: true, candidatePrimerOmitted: { projectId: 91, length: 2835, cap: 2820, at: 'then' }, routesMasterNotTold: 2
         }
       })));
       await hostile.panel.load();
       const unsafe = hostile.panel.html();
-      assert.ok(!/<img|<script|<b>x|<i>/.test(unsafe), 'nothing from the server becomes an element');
+      assert.ok(!/<img|<script|<b>x|<i>|<u>|<s>|<t>|<x|<k>/.test(unsafe), 'nothing from the server becomes an element');
+      assert.match(unsafe, /item 4: &lt;u&gt;k&lt;\/u&gt;, &lt;s&gt;, since &lt;t&gt;/);
+      assert.match(unsafe, /data-bridge-candidate="c&quot;&gt;&lt;x"/);
       assert.match(unsafe, /&lt;img src=x onerror=1&gt;/);
       assert.match(unsafe, /listener <strong>off<\/strong>; <strong>2 route\(s\) it has not been told of<\/strong>/);
       assert.match(unsafe, /a session of project 91 was not told<\/strong> \(2835 characters against a cap of 2820, at then\)/);
@@ -511,6 +514,55 @@ describe('the Operator Bridge panel (#2031)', () => {
       const body = wires.calls.find((c) => /circuit\/reset$/.test(c.url)).body;
       assert.deepEqual([body.decision, /^op-/.test(body.requestId)], ['requeue', true]);
       assert.equal(await panel.act('circuit-reset', { episodeId: episode, decision: 'requeue' }), 'failed', 'there is no open episode to reset twice');
+    });
+  });
+
+  describe('what is queued with no open route', () => {
+    it('lists each by id, kind, state and age with its own Withdraw, asks first, and ends with nothing queued', async () => {
+      const wires = real(SIGNED_IN);
+      // Request ids of this test's own: the store remembers every id a write was made under.
+      let made = 0;
+      const { panel, asked } = controller(wires, { randomId: () => `queued${String(++made).padStart(4, '0')}abcdef` });
+      await panel.load();
+      assert.match(panel.html(), /Queued with no open route[\s\S]*Nothing is queued without a route\./);
+      assert.match(panel.html(), /0 queued with no open route/);
+
+      // A notification waiting, and a candidate nobody has decided.
+      const text = 'SECRET notice text';
+      const item = bridgeStore.outbound.enqueue({ idemKey: `notify:fleet-idle:panel-${Date.now()}`, kind: 'notification', notifyType: 'fleet-idle', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text) }).outboundId;
+      const project = store.projects.create({ name: `PanelProj${Date.now()}`, path: path.join(tmpDir, `pp${Date.now()}`) });
+      const candidateId = `cand_panel_${Date.now()}`;
+      store.getDb().prepare(
+        "INSERT INTO bridge_candidates (candidate_id, idem_key, kind, source_project_id, source_launch_id, text, digest, state, created_at) VALUES (?, ?, 'milestone', ?, 'launch-x', 'SECRET candidate text', ?, 'submitted', '2026-10-04T10:00:00.000Z')"
+      ).run(candidateId, `idem-${candidateId}`, project.id, 'd'.repeat(64));
+      await panel.act('refresh');
+      const drawn = panel.html();
+      assert.match(drawn, /2 queued with no open route/);
+      assert.match(drawn, new RegExp(`data-bridge-queued="candidate:${candidateId}">candidate ${candidateId}: candidate:milestone, undecided, since 2026-10-04T10:00:00\\.000Z <button[^>]*data-bridge-action="withdraw-candidate" data-bridge-candidate="${candidateId}">Withdraw</button>`));
+      assert.match(drawn, new RegExp(`data-bridge-queued="item:${item}">item ${item}: notification:fleet-idle, waiting, since [^ ]+ <button[^>]*data-bridge-action="withdraw" data-bridge-item="${item}">Withdraw</button>`));
+      assert.ok(!/SECRET/.test(drawn), 'none of its text');
+
+      // Each asks first, and a no sends nothing.
+      const declined = controller(wires, { confirm: () => false });
+      await declined.panel.load();
+      const before = wires.calls.filter((c) => c.method !== 'GET').length;
+      assert.equal(await declined.panel.act('withdraw-candidate', { candidateId }), 'declined');
+      assert.match(declined.asked[0], new RegExp(`^Withdraw candidate ${candidateId}\\? Nobody has decided it, and it will then never be approved or posted\\.$`));
+      assert.equal(wires.calls.filter((c) => c.method !== 'GET').length, before);
+      assert.equal(await panel.act('withdraw-candidate', { candidateId: 'not a candidate' }), 'blocked');
+      assert.equal(await panel.act('withdraw-candidate', {}), 'blocked');
+
+      // With the bridge disabled, as in a rollback.
+      bridgeStore.settings.set('enabled', 'false');
+      assert.equal(await panel.act('withdraw-candidate', { candidateId }), 'done');
+      assert.equal(await panel.act('withdraw', { outboundId: item }), 'done');
+      assert.equal(asked.length, 2);
+      const sent = wires.calls.find((c) => c.url === `/api/bridge/operator/candidates/${candidateId}/withdraw`);
+      assert.deepEqual([sent.method, /^op-queued\d{4}abcdef$/.test(sent.body.requestId), Object.keys(sent.body)], ['POST', true, ['requestId']]);
+      assert.match(panel.html(), /Nothing is queued without a route\./);
+      assert.match(panel.html(), /0 queued with no open route/);
+      assert.equal(store.getDb().prepare('SELECT state FROM bridge_candidates WHERE candidate_id = ?').get(candidateId).state, 'rejected');
+      assert.equal(bridgeStore.outbound.get(item).state, 'dropped');
     });
   });
 

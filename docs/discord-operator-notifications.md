@@ -144,8 +144,13 @@ Cutover happens only when both of these are true:
 
 At cutover:
 
+- **After a rollback, one narrow fallback.** The rule that replaces Rule #145 says so itself:
+  while the bridge is disabled or rolled back the helper sends nothing, and the Architect alone
+  may use the former direct route for milestones and genuine operator-action-required notices
+  until the bridge is enabled again. That uses the send steps of the interim section below,
+  under the new rule's number. No rule is edited to roll back.
 - **The interim procedure is retired, not merged into the new path.** This page's interim section
-  is removed or marked historical.
+  is kept for one use only: the rollback fallback above.
 - **The Architect leaves the routine delivery path** and keeps architectural and governance
   oversight. Master becomes the sole filter and router, and the helper the sole Discord sender.
 

@@ -305,6 +305,24 @@ bridge's own message. Three things hold the cap now:
 - **The bridge does not forward an alert about its own send,** even one recorded before any of
   this was so.
 
+**Winding the bridge down (Architect rulings, 2026-10-04).** Disabling is the kill switch and
+withdraws nothing by itself. The rollback's order is: disable; switch the candidate primer off;
+stop the helper; revoke the helper token, which ends every lease it held at once; then the
+Master closes every open route; then the operator withdraws everything queued that no open
+route owns. That last set is what closing routes cannot reach: a candidate nobody decided, a
+milestone approved and not yet collected, a server notice, an item set aside. It would wait
+through a disabled bridge and be posted when the bridge was next enabled, so the operator's
+status lists it, by id, kind, state and age and never its text, and the operator withdraws each
+item by its own id. A rollback is finished when the Master's route list and that list are both
+empty.
+
+**The stored rules at cutover.** No code rewrites a stored rule. The operator brings the
+Master's first hard rule to the shipped sentence without losing a custom rule or the history:
+Restore defaults only where every rule is an untouched shipped default, otherwise add the shipped
+rule and disable the old one. The Discord rule is replaced the same way: the replacement is
+added as a new project rule and is the live rule under its own new number; Rule #145 and Rule
+#128 are then disabled and kept for audit. A rollback toggles none of them.
+
 An alert the watchdog raises for an exchange between sessions is a different thing and is meant
 to reach the operator through the bridge, as `operator-needed`, once, in words that say why.
 
@@ -313,11 +331,13 @@ is sent, started or resolved. It does not mean the bridge cannot be seen or woun
 disabled the Master, with its live credential, is still answered on: `status`, with the true
 count of open routes; the route list and the read of one route; `close`; the list of items set
 aside and `withdraw`; and the circuit's acknowledgement and reset. The helper is still answered
-on `preflight`. The operator's own routes need no bridge to be enabled. Everything else, for
+on `preflight`. The operator's own routes need no bridge to be enabled, with one exception:
+switching the candidate primer ON is refused, since it primes nothing while the bridge is off.
+Everything else, for
 the Master, the helper and a session alike, answers `409 BRIDGE_DISABLED`. The reads are there
 because a rollback has the Master close the routes still open, and it cannot close what it
-cannot see. The Master's baseline rule says the same: while disabled it may only close a route,
-withdraw what is queued, and acknowledge or reset the circuit. The list is pinned by a test
+cannot see. The Master's baseline rule says the same: while disabled it may only close routes,
+withdraw queued items, and acknowledge or reset the circuit. The list is pinned by a test
 derived from the route table, so a route added to it, or taken from it, is a decision.
 
 ### 18. Pins and aliases (R5)

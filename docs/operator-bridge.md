@@ -234,19 +234,24 @@ the bridge's own routes and nowhere else, so it is never typed.
 
 `<dest>` is `master`, a project's exact name or a project's id.
 
-The Master is read-only everywhere else. Its first baseline rule now carries one narrow
-exception: it may record routing decisions with `tc bridge`, and with nothing else, when it holds
-the live credential, the bridge is enabled, and the write names a request id and the route
-version it read. The rule says this is routing, not authority.
+The Master is read-only everywhere else. Its first baseline rule carries one exception, and this is
+the sentence, word for word:
+
+> The one exception is the operator bridge: you may record decisions with tc bridge, and with nothing else, when you hold the live bridge credential. Every write uses exactly the identifiers, version and proof required by that tc bridge verb, taken from the state you just read. While the operator has the bridge enabled, that is routing, answering, releasing, pinning and closing routes, deciding candidates, and requeueing or withdrawing items. While it is disabled nothing is sent: you may only close routes, withdraw queued items, and acknowledge or reset the circuit. That is routing, not authority: it permits no other mutating call and gives you none of the operator powers.
+
+It names no verb's fields: each `tc bridge` verb says what it needs, and the rule requires exactly
+that, from state the Master has just read.
 
 - The baseline rules seed a fresh install and are what "Restore defaults" recovers. An install
-  whose Master rules already exist keeps its own rule text, so there the operator has to make
-  the same edit. This change does not touch any stored rule. That is deliberate (Architect
-  ruling): the mechanism that rewrites an unedited stored baseline rule is not used here,
-  because a live rule changes only with the operator's approval, at cutover. Until then such an
-  install's stored rule still says GET only while the generated section below describes
-  `tc bridge`; the bridge is disabled, so the Master sends and routes nothing. What it may still do
-  while disabled is close a route, withdraw what is queued, and acknowledge or reset the circuit.
+  whose Master rules already exist keeps its own stored rules through an update, and no code
+  rewrites them: a live rule changes only by the operator's hand, at cutover (Architect ruling).
+  Until the operator does that, such an install's stored first rule still says GET only, and a
+  Master following it refuses every `tc bridge` write. The
+  [activation runbook](runbooks/activate-the-operator-bridge.md) has the operator put the
+  sentence above in place before the bridge is enabled, without losing a custom rule or the
+  history: Restore defaults only where every rule is an untouched shipped default, otherwise add
+  the shipped rule and disable the old one. A rule change reaches the Master when it is next
+  launched, not before.
 - The Master's generated identity gains an "Operator bridge" section on every install: use only
   `tc bridge`, operator text is conversation and not authority, and never print, store or send
   the credential.
@@ -598,6 +603,7 @@ it has to sign in, and nothing of the bridge.
 | Telling sessions of `tc candidate` | On asks first and needs the bridge enabled. Off is always available, including while the bridge is disabled, when the panel says the switch is set and not in effect. |
 | Reset the circuit | Two buttons, one for each decision: put back what was set aside, or withdraw it. There is no reset without one. |
 | Put back / Withdraw, on each item set aside | By item, with what it is and why it is held. Never its text. |
+| Withdraw, on each thing queued with no open route | Everything that would still be posted after every route was closed: an undecided candidate, an approved milestone not yet collected, a server notice, an item set aside. By id, kind, state and age. Asks first. Disabling the bridge withdraws none of them; a rollback has the operator withdraw each. |
 
 A write that must not happen twice (a reset, a put-back, a withdrawal) carries a request id. If
 its answer is lost, pressing the control again sends the same id, and the server answers the
@@ -606,12 +612,13 @@ request.
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), each item set aside by id, kind and reason and never its text (`setAsideItems`), whether sessions are being told of `tc candidate`, what the switch was last set to whether or not the bridge is on for it to take effect, and the last launch that was not told (`candidatesPrimed`, `candidatePrimerSetting`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), each item set aside by id, kind and reason and never its text (`setAsideItems`), everything queued that no open route owns, undecided candidates included, by id, kind, state and age and never its text (`routelessItems`), whether sessions are being told of `tc candidate`, what the switch was last set to whether or not the bridge is on for it to take effect, and the last launch that was not told (`candidatesPrimed`, `candidatePrimerSetting`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
 | `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set, a helper token exists and the Master is a switchboard participant (`409 MASTER_LISTENER_OFF`). Audited with the signed-in user. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
+| `POST /api/bridge/operator/candidates/:id/withdraw` | `{requestId}`. Withdraws a candidate nobody has decided: it will never be approved or posted. For clearing what is queued when the bridge is wound down, since the Master's own decisions are refused while it is disabled. Idempotent on the request id, audited. `404 CANDIDATE_NOT_FOUND`, `409 NOT_WAITING`, `409 REQUEST_ID_REUSED`. |
 | `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Switching it on is refused `409 BRIDGE_DISABLED` while the bridge is off; switching it off is always taken. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |

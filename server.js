@@ -1576,8 +1576,9 @@ route('POST', '/api/master/kill', (_req, res) => {
 
 // POST /api/master/rules/restore-defaults — replace every master Hard rule
 // with the shipped baseline (the recovery path if an edit ever weakened the
-// boundary). History survives in session_rule_versions. A live master picks
-// the change up on the next ensure (identity regeneration).
+// boundary). History survives in session_rule_versions. The Master's identity
+// file is regenerated on the next ensure, but a running Master read it when it
+// was launched: the change reaches it at its next launch.
 route('POST', '/api/master/rules/restore-defaults', (req, res) => {
   // It deletes every master rule the operator added, so it is theirs to run.
   if (!operatorProjectCaller(req, res, 'restore the Project Master\'s default rules')) return;

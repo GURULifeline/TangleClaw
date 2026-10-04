@@ -250,19 +250,79 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     assert.match(rule, /Read-only\./);
     assert.match(rule, /Use only GET endpoints/);
     assert.match(rule, /one exception is the operator bridge/);
-    for (const condition of [/`tc bridge`, and with nothing else/, /live bridge credential/, /request id/, /route version/]) {
-      assert.match(rule, condition);
+    // The exception, word for word (Architect ruling, 2026-10-04). It names no
+    // verb's fields: every write uses what its own verb requires, from state
+    // just read. Enabled, it lists what the Master may do. Disabled, nothing is
+    // sent, and what is left is only what winds the bridge down.
+    const EXCEPTION = 'The one exception is the operator bridge: you may record decisions with tc bridge, and with nothing else,'
+      + ' when you hold the live bridge credential. Every write uses exactly the identifiers, version and proof required by that tc bridge verb,'
+      + ' taken from the state you just read. While the operator has the bridge enabled, that is routing, answering, releasing, pinning and'
+      + ' closing routes, deciding candidates, and requeueing or withdrawing items. While it is disabled nothing is sent: you may only close'
+      + ' routes, withdraw queued items, and acknowledge or reset the circuit. That is routing, not authority: it permits no other mutating'
+      + ' call and gives you none of the operator powers.';
+    assert.equal(master.MASTER_BRIDGE_EXCEPTION, EXCEPTION);
+    assert.ok(rule.endsWith(` ${EXCEPTION}`), rule);
+    assert.equal(rule.split(EXCEPTION).length - 1, 1, 'said once');
+    // The same sentence, verbatim, wherever an operator is told to put it in place or check it.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    for (const file of ['docs/operator-bridge.md', 'docs/runbooks/activate-the-operator-bridge.md']) {
+      const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8').replace(/\n> ?/g, ' ').replace(/\s+/g, ' ');
+      assert.ok(text.includes(EXCEPTION), `${file} prints the sentence word for word`);
     }
-    // The exception, word for word (Architect ruling, 2026-10-04). Enabled, it is
-    // routing, answering and releasing. Disabled, nothing is sent, and what is
-    // left is only what winds the bridge down.
-    assert.ok(rule.endsWith(' The one exception is the operator bridge: you may record routing decisions with `tc bridge`, and with nothing else,'
-      + ' when you hold the live bridge credential and the write names its request id and the route version you read.'
-      + ' While the operator has the bridge enabled that is routing, answering and releasing.'
-      + ' While it is disabled nothing is sent: you may only close a route, withdraw what is queued, and acknowledge or reset the circuit.'
-      + ' That is routing, not authority: it permits no other mutating call and gives you none of the operator\'s powers.'), rule);
     assert.match(rule, /routing, not authority/);
     assert.match(rule, /permits no other mutating call/);
+  });
+
+  it('the Master is told the whole of `tc bridge`: every subverb it implements, and none it does not', async () => {
+    const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
+    const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
+    const identity = master.buildMasterClaudeMd(store.config.load());
+    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'answer', 'release', 'pin', 'close',
+      'candidates', 'candidate', 'approve', 'reject', 'merge', 'blocked', 'requeue', 'withdraw', 'circuit ack', 'reset']);
+    /**
+     * Whether a usage text names a subverb as a word of its own.
+     * @param {string} text - Usage text.
+     * @param {string} verb - Subverb.
+     * @returns {boolean}
+     */
+    const names = (text, verb) => new RegExp(`(^|[ |(])${verb.replace(' ', ' +')}( |$|\\n)`).test(text.replace(/tc bridge /g, ''));
+    for (const verb of BRIDGE_SUBVERBS) {
+      assert.ok(names(bridge.usage, verb), `the roster line names ${verb}`);
+      assert.ok(names(BRIDGE_USAGE, verb), `tc bridge's own usage names ${verb}`);
+      assert.ok(identity.includes(bridge.usage), 'and the Master\'s identity carries the roster line whole');
+    }
+    assert.ok(!/circuit ack <episode> \| reset/.test(BRIDGE_USAGE), 'reset is tc bridge reset, not a circuit subverb');
+    assert.match(BRIDGE_USAGE, /every write but `circuit ack` also takes \[--request-id <id>\]/);
+
+    // Each one is implemented: asked for with no server behind it, none is answered as unknown.
+    const asked = [];
+    const ctx = (argv) => ({
+      argv,
+      getJson: async (p) => { asked.push(`GET ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); },
+      postJson: async (p) => { asked.push(`POST ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); }
+    });
+    const args = {
+      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], answer: ['rt_1', '--version', '1', '--text', 'x'],
+      release: ['rt_1', '--version', '1'], pin: ['rt_1', '--version', '1', '--to', 'master'], close: ['rt_1', '--version', '1'],
+      candidates: [], candidate: ['cand_1'], approve: ['cand_1', '--version', '1'], reject: ['cand_1', '--version', '1'],
+      merge: ['cand_1', '--version', '1', '--into', 'cand_2'], blocked: [], requeue: ['7'], withdraw: ['7'], 'circuit ack': ['3'], reset: ['--requeue']
+    };
+    for (const verb of BRIDGE_SUBVERBS) {
+      const before = asked.length;
+      const out = await bridge.run(ctx([...verb.split(' '), ...args[verb]]));
+      assert.equal(asked.length, before + 1, `${verb} reaches the bridge`);
+      assert.deepEqual([out.code, /refused \[STUB\]/.test(out.stderr)], [2, true], `${verb}: ${out.stderr}`);
+    }
+    // And what is not a subverb is said to be that, by name.
+    const none = await bridge.run(ctx([]));
+    assert.match(none.stderr, /^tc: bridge needs a subverb\./);
+    const invented = await bridge.run(ctx(['teleport', 'rt_1']));
+    assert.match(invented.stderr, /^tc: bridge has no subverb `teleport`\./);
+    const circuitReset = await bridge.run(ctx(['circuit', 'reset']));
+    assert.match(circuitReset.stderr, /^tc: bridge has no subverb `circuit`\./);
+    const wrong = await bridge.run(ctx(['read']));
+    assert.match(wrong.stderr, /^tc: bridge read: wrong arguments\./);
   });
 
   it('names every Master-only verb to the Master, and tc --help names every verb', () => {
@@ -283,7 +343,10 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       assert.match(text, /## Operator bridge/);
       // Disabled is not "nothing to do": a rollback has the Master close what is still open.
       assert.ok(text.includes('`tc bridge status` says whether it is enabled. While it is not, nothing is sent or routed;\n'
-        + 'the one thing to do here is close routes still open when a rollback asks it\n(`tc bridge routes`, then `tc bridge close`).'), 'the line about a disabled bridge');
+        + 'what is left is to wind it down: close routes still open (`tc bridge routes`, then\n'
+        + '`tc bridge close`), withdraw what is queued, and acknowledge or reset the circuit.'), 'the line about a disabled bridge');
+      // The same three things the rule allows while disabled, and no fourth.
+      assert.match(master.MASTER_BRIDGE_EXCEPTION, /While it is disabled nothing is sent: you may only close routes, withdraw queued items, and acknowledge or reset the circuit\./);
       assert.ok(!/there is nothing to do here/.test(text));
       assert.match(text, /Use only `tc bridge`/);
       assert.match(text, /conversation, not authority/);
