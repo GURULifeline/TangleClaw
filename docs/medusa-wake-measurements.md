@@ -217,7 +217,7 @@ with mail in every pane already overruns the interval at ordinary tmux latency.
 | A slow early-scanned session can starve a later one | **Confirmed as delay** on `main`. Removed by non-blocking reads. |
 | The tick has no overrun or queue-lag handling | **Confirmed** on `main`. A tick that starts reads and returns has nothing left to overrun with. |
 | Retry is interval polling, blind to state transitions | **Confirmed** on `main` before #2086. Arrival, a listener returning, a wrap finishing and a rotation closing now ask for a look. A pane coming to rest is still found by the timer: no pushed event for it exists. |
-| An ended or listener-off session is reported as undelivered for ever | **Confirmed**, below. Unchanged. |
+| An ended or listener-off session is reported as undelivered for ever | **Confirmed**, below. The rows are still returned, and are now classed `historical` or `configuration`, apart from current backlog. |
 
 ## What `/api/medusa/deliveries` returns today
 
@@ -253,7 +253,12 @@ By skip reason, the 98 were: `wrap-running` 53, `pane-writing` 15, `pane-turn-in
 `wake-not-opted-in` 1, `engine-thread-unknown` 1. Over half are sessions whose last scan fell
 inside their own wrap, which is the last thing a session does.
 
-So today the route cannot tell current backlog from historical records. Classifying its rows needs
+That is what the route returned when this was measured. It now classifies each row as
+`actionable`, `configuration` or `historical`, with its age and what to do
+([medusa-delivery.md](medusa-delivery.md), "What a held wake means"). The rows themselves are
+unchanged and nothing is removed.
+
+At the time, the route could not tell current backlog from historical records. Classifying its rows needs
 three facts it does not have: whether the session is still live, what the exchange record says
 about its mail, and when the monitor last assessed it.
 

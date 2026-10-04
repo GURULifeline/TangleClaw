@@ -2734,6 +2734,105 @@ describe('medusa delivery ledger (#792)', () => {
     assert.equal(one.data.deliveries.length, 1);
     assert.equal(one.data.deliveries[0].skipReason, 'pane-turn-in-flight');
   });
+
+  // #2086: the same list, classified. `undelivered` stays complete; the three
+  // partitions are the same items again, and a summary counts them.
+  describe('GET /api/medusa/deliveries classifies what it returns (#2086)', () => {
+    let waiting;
+    let optedOut;
+    let ended;
+
+    before(() => {
+      const mk = (tag) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-disposition-${tag}-`));
+        const proj = store.projects.create({ name: `disposition-${tag}`, path: dir, engine: 'claude' });
+        return store.sessions.start({ projectId: proj.id, engineId: 'claude', tmuxSession: `fake-disposition-${tag}` });
+      };
+      waiting = mk('waiting');
+      optedOut = mk('opted-out');
+      ended = mk('ended');
+      store.medusaDeliveries.record({ sessionId: waiting.id, messageKey: 'w1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'pane-turn-in-flight' });
+      store.medusaDeliveries.record({ sessionId: optedOut.id, messageKey: 'o1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'wake-not-opted-in' });
+      store.medusaDeliveries.record({ sessionId: ended.id, messageKey: 'e1', unread: 2, channel: 'none', outcome: 'skipped', skipReason: 'wrap-running' });
+      store.sessions.kill(ended.id, 'test: ended with mail deferred');
+    });
+
+    /**
+     * The item for one session in a list.
+     * @param {object[]} list - A list from the response
+     * @param {object} session - The session
+     * @returns {object|undefined}
+     */
+    const of = (list, session) => list.find((r) => String(r.sessionId) === String(session.id));
+
+    it('a live session held by a busy pane is actionable: the monitor retries by itself', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = of(data.undelivered, waiting);
+      assert.deepEqual([item.class, item.live, item.reason, item.nextAction], ['actionable', true, 'pane-turn-in-flight', 'wait']);
+      assert.ok(of(data.actionable, waiting));
+      assert.equal(typeof item.ageMs, 'number');
+      assert.equal(item.since, item.createdAt);
+      assert.match(item.nextActionMeaning, /retries by itself/);
+    });
+
+    it('a live session that never opted in is configuration: someone has to act', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = of(data.undelivered, optedOut);
+      assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', true, 'enable-wake']);
+      assert.ok(of(data.configuration, optedOut));
+      assert.equal(of(data.actionable, optedOut), undefined);
+    });
+
+    it('a session that ended with mail deferred is historical, whatever held it at the end', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = of(data.undelivered, ended);
+      assert.deepEqual([item.class, item.live, item.reason, item.nextAction, item.lastAssessedAt], ['historical', false, 'wrap-running', 'resend', null]);
+      assert.ok(of(data.historical, ended));
+    });
+
+    it('a row whose session id the store has never held is historical too', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = data.undelivered.find((r) => String(r.sessionId) === '7201');
+      assert.deepEqual([item.class, item.live], ['historical', false]);
+    });
+
+    it('undelivered is still the whole list in its old order, and every old field is still there', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const stored = store.medusaDeliveries.sessionsWithUndeliveredMail();
+      assert.deepEqual(data.undelivered.map((r) => String(r.sessionId)), stored.map((r) => String(r.sessionId)));
+      for (const [i, raw] of stored.entries()) {
+        for (const key of Object.keys(raw)) assert.deepEqual(data.undelivered[i][key], raw[key], `${key} of row ${i}`);
+      }
+    });
+
+    it('the three partitions are the same items and add up to undelivered', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const parts = [...data.actionable, ...data.configuration, ...data.historical];
+      assert.equal(parts.length, data.undelivered.length);
+      assert.deepEqual(parts.map((r) => String(r.sessionId)).sort(), data.undelivered.map((r) => String(r.sessionId)).sort());
+      assert.deepEqual(
+        [data.summary.total, data.summary.actionable, data.summary.configuration, data.summary.historical],
+        [data.undelivered.length, data.actionable.length, data.configuration.length, data.historical.length]
+      );
+      for (const r of data.actionable) assert.equal(r.class, 'actionable');
+      for (const r of data.historical) assert.equal(r.live, false);
+    });
+
+    it('reading the list writes nothing', async () => {
+      const before = JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail());
+      const history = JSON.stringify(store.medusaDeliveries.listForSession(waiting.id));
+      await get('/api/medusa/deliveries');
+      await get('/api/medusa/deliveries');
+      assert.equal(JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail()), before);
+      assert.equal(JSON.stringify(store.medusaDeliveries.listForSession(waiting.id)), history);
+    });
+
+    it('the per-session history route is unchanged', async () => {
+      const one = await get(`/api/medusa/deliveries?sessionId=${waiting.id}`);
+      assert.deepEqual(Object.keys(one.data), ['deliveries']);
+      assert.equal(one.data.deliveries[0].class, undefined);
+    });
+  });
 });
 
 describe('a rotated workspace id is re-resolved, not reported as a missing peer (#1023)', () => {

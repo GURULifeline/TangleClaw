@@ -211,6 +211,42 @@ with no trigger stays unconfirmed and escalates by age instead. Re-arms back
 off (2, 4, then 8 minutes) up to 3 times. The count and the next eligible time
 are stored, so duplicate ticks and restarts re-arm nothing twice.
 
+## What a held wake means
+
+Every wake the monitor withholds has a reason code. A code says what was
+observed, not whether waiting will fix it. One classifier
+(`lib/medusa-delivery-disposition.js`) answers that, and both readers below
+use it (#2086):
+
+| Class | What it means | Examples |
+|---|---|---|
+| `actionable` | The recipient is live and the monitor retries by itself. Waiting fixes it. | A busy pane, a wrap in progress, a listener reconnecting |
+| `configuration` | The recipient is live and nothing changes until someone acts. | Wake not opted in, an engine with no wake profile, a listener that is off |
+| `historical` | The recipient session is not live. | A session that ended with mail deferred |
+
+- **`tc message status <workspace-id>`** prints the class and what to do
+  beside the reason. The peers route returns them as `class`, `nextAction` and
+  `nextActionMeaning`. A reason that is not a held wake (`nudged`, `no-mail`)
+  has the class `none`.
+- **`GET /api/medusa/deliveries`** returns every session whose newest mail was
+  not nudged. `undelivered` is the whole list, as before. Each item now also
+  carries `class`, `live`, `reason`, `since`, `lastAssessedAt`, `ageMs`,
+  `nextAction` and `nextActionMeaning`, and the response adds `actionable`,
+  `configuration` and `historical` (the same items, partitioned) and
+  `summary` (counts, the oldest actionable age, and any reason code no class
+  is declared for).
+
+Two rules decide the doubtful cases. A reason code the classifier does not
+know is `configuration`, to be investigated, and is logged once. A row is
+`historical` only when something positively says its session is not live: the
+store holds no active session under that id, or the monitor's last tick found
+the Master not running. Where that cannot be established the row is
+`configuration`, never `historical`.
+
+`since` is when the ledger recorded the current verdict. `lastAssessedAt` is
+when the monitor last looked at a live session, and is null until it has. The
+read writes nothing: old rows are classified, not removed.
+
 ## Escalation
 
 An open exchange climbs a one-way ladder. Each step is recorded once, from
