@@ -74,6 +74,13 @@ async function main() {
   // its bound replacement thread. Forwarded, never typed: no secret rides in
   // argv or in an environment the model manages.
   if (process.env.CODEX_THREAD_ID) headers['x-tangleclaw-engine-thread'] = process.env.CODEX_THREAD_ID;
+  // ADR 0023: the Project Master's bridge credential, forwarded for the one
+  // verb it authorises and only to the bridge's own routes.
+  // Read from the pane's environment, never typed and never an argument.
+  // Attached per request, to bridge paths only: this verb also makes requests
+  // that are not the bridge's (the control banner below), and those must not
+  // carry it either.
+  const bridgeCredential = verb === 'bridge' ? process.env.TANGLECLAW_BRIDGE_CREDENTIAL : null;
 
   /**
    * Perform one JSON API request; failures throw with the server's own words.
@@ -92,6 +99,9 @@ async function main() {
     if (opts.aux) {
       const { 'x-tangleclaw-verb': _dropped, ...rest } = headers;
       reqHeaders = { ...rest, 'x-tangleclaw-aux': '1' };
+    }
+    if (bridgeCredential && apiPath.startsWith('/api/bridge/')) {
+      reqHeaders = { ...reqHeaders, 'x-tangleclaw-bridge-credential': bridgeCredential };
     }
     let res;
     try {
