@@ -20,14 +20,14 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The operator's policy routes: enable, allowlist, token, aliases, pins | Built |
 | The candidate lane: a session offers, the Master decides | Built |
 | The three typed server notifications | Built |
-| Discord helper | Not built |
+| Discord helper (`bin/tc-bridge-helper`) | Built; not yet run against Discord. See [operator-bridge-helper.md](operator-bridge-helper.md) |
 | A dashboard page for the operator's policy | Not built; the routes exist |
 | Cutover | Not started; Rule #145 is unchanged and in force |
 
 The bridge is **disabled by default**. Only the operator can enable it, signed in with an
-account session, and only after setting the allowlist and creating the helper token. With no
-helper built, enabling it connects to nothing: no chat message can arrive and nothing posts to
-a chat application.
+account session, and only after setting the allowlist and creating the helper token. The
+helper is not installed by anything here: until the operator sets it up, enabling the bridge
+connects to nothing, no chat message can arrive and nothing posts to a chat application.
 
 ### What ADR 0023 still requires
 
@@ -528,3 +528,5 @@ check is refused, and the message names each object that is missing or misshapen
 - `lib/bridge-api.js`: every bridge route, declared with the principal it belongs to. One
   function proves the principal before any handler runs.
 - `bin/tc-bridge-receive`: the pane-side reader.
+- `bin/tc-bridge-helper` and `lib/bridge-helper/`: the Discord helper, a separate process that
+  reaches the server only through the helper's routes.

@@ -12,6 +12,15 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **The operator bridge has its Discord helper** (#2031, ADR 0023). `bin/tc-bridge-helper` is built and tested against the real bridge routes and a stand-in for Discord. It has not been run against Discord, nothing installs it, and the bridge is still off by default: Rule #145's interim procedure remains the only Discord path. `docs/operator-bridge-helper.md` has setup, operation and removal.
+  - **In.** It listens to one channel over the Gateway and hands over only the allowlisted author's messages, judged on ids before the text is read. The bridge checks the same three ids again.
+  - **Out.** It claims what the Master released, posts it to its one configured channel, and acknowledges under the item's lease only after Discord confirms the post.
+  - **Never twice.** An owner-only local record and a per-post nonce make a lost acknowledgement, a lapsed lease, a restart and a lost claim safe. A post whose outcome cannot be known is held for the operator, not retried.
+  - **Secrets.** The bot token and the helper token live only in the Keychain and are stored from standard input. Neither is in a command line, an environment variable, a file or a log.
+  - **No redirects.** Neither client follows one, so neither token reaches a host that was not configured. Plain `http` is accepted for this machine only.
+  - **launchd.** `install-launchd` writes a job that carries paths and a label only.
+  - **Known gap.** The helper cannot discard an item Discord rejects, and closing a route does not withdraw a released answer. Such an item stays held and is never posted.
+
 - **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023). Still off by default. `docs/operator-bridge.md` has the detail.
   - **Claim, not read.** `GET /api/bridge/helper/outbound` is replaced by `POST /api/bridge/helper/outbound/claim`. Each item is handed over under a two-minute lease bound to the helper token that claimed it. An item holds one live lease at a time, and one whose lease lapses is handed over again.
   - **A claim is named by its nonce.** Repeating it exactly returns the same leases and issues nothing. The same nonce with a different request or token is refused.
