@@ -8,6 +8,12 @@ All notable changes to TangleClaw are documented in this file.
 
 - **A release can no longer leave a tag with no Release because its notes are too long** (#2080). v5.30.0's notes were about 191,000 characters, GitHub refused them at its 125,000-character limit, and the tag was already pushed. Before any tag, push or release, `release.yml` now measures the exact UTF-8 bytes of the notes and stops, with a message saying what to do, when they are empty or over 120,000 bytes. The notes are never truncated: shorten the version's `CHANGELOG.md` section and release again, as `docs/release-process.md` describes. A new test also fails a pull request that takes `[Unreleased]` past 110,000 bytes, so the problem shows up at merge time and not at the release.
 
+### Internal
+
+- **The Discord operator bridge has an architectural record, and the interim Discord procedure is documented apart from it** (#2031, #2040). Documentation only; no code or schema changes.
+  - **ADR 0023** records the Architect's ruling of 2026-10-04: the permanent bridge is Master-mediated. The Discord helper delivers to a Master gateway, Master resolves the destination and routes a correlated Medusa message to the target session, and the reply returns the same way. Master coordinates routing and transport and is never authority. It also records the contract review D1 to D7: Master is the Project Master session backed by a durable server-side gateway, the default destination is Master itself, and an unavailable Master queues a message instead of falling back to the Architect. The re-review R1 to R6 is recorded too: a generation-bound `master` principal scoped to bridge routing, a structured `tc bridge` surface, Master releasing every answer, one pending notice after 5 minutes, operator-only global aliases, and a bridge that is off until the operator enables it. The ADR is accepted for architecture only. That does not activate cutover, authorizes no implementation merge, and assigns no schema number.
+  - **`docs/discord-operator-notifications.md`** separates the interim procedure in force today (the Architect is the sole Discord sender, under Rule #145) from the future Master-mediated path, and says the first is retired at cutover and not merged into the second. Cutover needs Rule #145 replaced with the operator's approval and a verified live round trip.
+
 ## [5.30.0] - 2026-10-04
 
 ### Added
