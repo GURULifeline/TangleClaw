@@ -4,6 +4,8 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+## [5.30.0] - 2026-10-04
+
 ### Added
 
 - **A Codex coordinator can clear its context without coming back unoriented** (#2032). Before this, a `/clear`ed Codex Architect or ProjectManager stayed bound to its old thread. Its mail stopped waking it, and nothing held it back from dispatching before it had rechecked anything. A managed rotation makes the clear a recorded transition:
