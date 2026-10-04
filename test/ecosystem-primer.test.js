@@ -147,7 +147,9 @@ describe('lib/ecosystem-primer (#1122)', () => {
     // Every verb a project pane can use is named. A verb only the Project
     // Master can use (#2031) is deliberately not: it would be refused in every
     // pane this line is read in.
-    const forPanes = VERB_ROSTER.filter((v) => v.audience !== 'master');
+    const { verbsFor } = require('../lib/tc-verbs');
+    const forPanes = verbsFor('pane');
+    assert.equal(forPanes.length + verbsFor('master').length, VERB_ROSTER.length, 'every roster entry belongs to exactly one audience');
     assert.ok(forPanes.length > 0);
     for (const v of forPanes) {
       assert.ok(md.includes(`\`${v.id}\``), `md form names ${v.id}`);

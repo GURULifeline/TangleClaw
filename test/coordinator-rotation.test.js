@@ -1570,6 +1570,9 @@ describe('coordinator context rotation (#2032)', () => {
     });
   });
 
+  /** The schema version that added the rotation tables (#2032, ruling A17). Later migrations own later numbers. */
+  const COORDINATOR_ROTATION_SCHEMA_VERSION = 51;
+
   describe('schema v51 migration', () => {
     it('upgrades a v50 store directly to v51: the tables and their one-open indexes appear', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-mig-'));
@@ -1583,8 +1586,8 @@ describe('coordinator context rotation (#2032)', () => {
         const db = new DatabaseSync(dbPath);
         db.exec('DROP TABLE coordinator_rotations');
         db.exec('DROP TABLE coordinator_roles');
-        db.exec('DELETE FROM schema_version WHERE version >= 51');
-        db.exec('INSERT INTO schema_version (version) VALUES (50)');
+        db.exec(`DELETE FROM schema_version WHERE version >= ${COORDINATOR_ROTATION_SCHEMA_VERSION}`);
+        db.exec(`INSERT INTO schema_version (version) VALUES (${COORDINATOR_ROTATION_SCHEMA_VERSION - 1})`);
         db.close();
 
         store._setBasePath(dir);
@@ -1592,8 +1595,14 @@ describe('coordinator context rotation (#2032)', () => {
         store.close();
         const after = new DatabaseSync(dbPath);
         try {
-          assert.equal(after.prepare('SELECT MAX(version) v FROM schema_version').get().v, store.CURRENT_SCHEMA_VERSION);
-          assert.ok(store.CURRENT_SCHEMA_VERSION >= 51, 'v51 is this migration: #2032 lands first (ruling A17)');
+          // The store was stamped one below this migration, so reaching the
+          // current version means the v50→v51 step ran and every later one too.
+          const versions = after.prepare('SELECT version FROM schema_version ORDER BY version').all().map((r) => r.version);
+          assert.equal(versions[0], COORDINATOR_ROTATION_SCHEMA_VERSION - 1, 'the store started below the rotation migration');
+          assert.equal(versions[versions.length - 1], store.CURRENT_SCHEMA_VERSION);
+          for (const name of ['coordinator_rotations', 'coordinator_roles']) {
+            assert.ok(after.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name), `${name} exists after the migration`);
+          }
           const index = after.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_coordinator_rotations_open'").get();
           assert.match(index.sql, /UNIQUE/);
           assert.match(index.sql, /WHERE state IN/);

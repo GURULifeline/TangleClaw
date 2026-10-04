@@ -257,6 +257,17 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     assert.match(rule, /permits no other mutating call/);
   });
 
+  it('names every Master-only verb to the Master, and tc --help names every verb', () => {
+    const { VERB_ROSTER, verbsFor, renderUsage } = require('../lib/tc-verbs');
+    const masterVerbs = verbsFor('master');
+    assert.ok(masterVerbs.some((v) => v.id === 'bridge'));
+    const md = master.buildMasterClaudeMd(store.config.load());
+    for (const v of masterVerbs) assert.ok(md.includes(v.usage), `the Master identity names ${v.id}`);
+    const usage = renderUsage();
+    for (const v of VERB_ROSTER) assert.ok(usage.includes(v.usage), `tc --help names ${v.id}`);
+    assert.throws(() => verbsFor('everyone'), /unknown audience/);
+  });
+
   it('tells every Master how to treat the bridge, whatever its rules say', () => {
     const custom = master.buildMasterClaudeMd(store.config.load(), { rules: [{ id: 7, content: 'An operator-written rule.' }] });
     const md = master.buildMasterClaudeMd(store.config.load());
