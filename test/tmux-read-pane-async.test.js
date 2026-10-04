@@ -175,3 +175,19 @@ describe('readPaneAsync — a wedged tmux', () => {
     assert.ok(await eventually(() => pids.every((p) => !alive(p)), 5000), 'a wedged child outlived its read');
   });
 });
+
+describe('probeSessionAsync — the three answers', () => {
+  it('says live for a session tmux has', async () => {
+    assert.deepEqual(await tmux.probeSessionAsync('proj', 2000), { live: true, answered: true, cause: null });
+  });
+
+  it('says not live, and answered, for one tmux says is absent', async () => {
+    mode('absent');
+    assert.deepEqual(await tmux.probeSessionAsync('gone', 2000), { live: false, answered: true, cause: null });
+  });
+
+  it('says not answered when tmux says nothing in time', async () => {
+    mode('hang');
+    assert.deepEqual(await tmux.probeSessionAsync('proj', 300), { live: false, answered: false, cause: 'read-timed-out' });
+  });
+});
