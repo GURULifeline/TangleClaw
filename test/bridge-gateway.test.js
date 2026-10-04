@@ -1305,6 +1305,16 @@ describe('bridge gateway (#2031)', () => {
       const ordinary = await hub.sessionSends(alpha, { to: beta.workspaceId, text: 'for beta', deliver: false });
       const ordinaryId = store.medusaExchanges.getByHubId(ordinary.body.id, 'send').exchange_id;
 
+      // A system send that is not the gateway's: verified system provenance, and
+      // nothing that makes it anyone's own. The watchdog watches it like any other.
+      const stray = exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: 'some-other-system-send-0001' }, { kind: 'system' }, null, {}),
+        sender: { projectId: null, sessionId: 'some-component', workspaceId: 'component-ws' },
+        recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
+      });
+      exchanges.bindHubId(stray.exchange_id, 'hub-stray-0001', { hubStatus: 'received' });
+      assert.deepEqual([exchanges.isSystemOrigin(stray), exchanges.systemOwnerOf(stray)], [true, null]);
+
       // Far past every threshold the watchdog has.
       for (const minutes of [31, 61, 6 * 60, 48 * 60]) {
         later(minutes * 60 * 1000);
@@ -1317,16 +1327,22 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(sendOf(sent.hub_id).terminal_at, null, 'and it is still open: the route still waits on it');
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
 
+      // The exemption is the gateway's own sends, not system mail: the other system send climbed.
+      assert.ok(ladder(stray.exchange_id).includes('aged') && ladder(stray.exchange_id).includes('operator_alerted'),
+        `a system send nobody declared is watched like any other: ${ladder(stray.exchange_id)}`);
+
       // The ordinary one climbed, and the bridge told the operator of it once, saying what is true of it.
       assert.ok(ladder(ordinaryId).includes('operator_alerted'), 'precondition: the watchdog does raise ordinary normal mail');
       const alert = store.medusaExchanges.facts(ordinaryId).find((f) => f.fact === 'operator_alerted');
       const about = notices().filter((n) => n.notify_type === 'operator-needed');
-      assert.deepEqual(about.map((n) => n.idem_key), [`notify:operator-needed:exchange:${ordinaryId}`], 'one notice, for the ordinary exchange only');
+      assert.deepEqual(about.map((n) => n.idem_key).sort(), [`notify:operator-needed:exchange:${ordinaryId}`, `notify:operator-needed:exchange:${stray.exchange_id}`].sort(),
+        'one notice each for the two that are not the gateway\'s, and none for the gateway\'s');
+      const ordinaryNotice = about.find((n) => n.idem_key.endsWith(ordinaryId));
       // Why it was raised depends on what is holding it; the sentence is the one for that reason.
       assert.ok(['prolonged-unread', 'prolonged-actionable', 'configuration-hold'].includes(alert.code), alert.code);
-      assert.equal(about[0].text, bridgeNotify.TEMPLATES['operator-needed']({ project: 'Beta', why: alert.code }));
-      assert.ok(!/unanswered/.test(about[0].text), `nobody read it, so it is not called unanswered: ${about[0].text}`);
-      assert.notEqual(about[0].text, 'A message to Beta needs you.', 'and the reason has a sentence of its own');
+      assert.equal(ordinaryNotice.text, bridgeNotify.TEMPLATES['operator-needed']({ project: 'Beta', why: alert.code }));
+      assert.ok(!/unanswered/.test(ordinaryNotice.text), `nobody read it, so it is not called unanswered: ${ordinaryNotice.text}`);
+      assert.notEqual(ordinaryNotice.text, 'A message to Beta needs you.', 'and the reason has a sentence of its own');
       // The route got its one status notice and nothing else.
       const forRoute = store.getDb().prepare('SELECT idem_key FROM bridge_outbound WHERE route_id = ?').all(r.body.routeId).map((x) => x.idem_key);
       assert.deepEqual(forRoute, [`route:${r.body.routeId}:pending`]);
@@ -1390,6 +1406,28 @@ describe('bridge gateway (#2031)', () => {
         change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: beta.project.id, resolved_generation: 1, failure_code: null } })
       });
       assert.equal(reroute.outcome, 'applied');
+      /**
+       * One of the gateway's own sends, open, as a crash or a lost write could leave it.
+       * @param {string} requestId - Its request id.
+       * @returns {object} The exchange row.
+       */
+      const leftOpen = (requestId) => exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId }, { kind: 'system' }, null, {}),
+        sender: { projectId: null, sessionId: gateway.GATEWAY_KEY, workspaceId: GATEWAY_WS },
+        recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
+      });
+      // The route is accepted again and its next attempt is send3. An earlier
+      // attempt still open is not the one it waits on; neither is a send for a
+      // route that no longer exists, or one whose request id names no route.
+      const superseded = leftOpen(`bridge:${route.routeId}:send2`);
+      const orphaned = leftOpen('bridge:rt_no_such_route:send1');
+      const nameless = leftOpen('bridge:not-a-send');
+      assert.equal(gateway.settleSends(route.routeId), 1, 'for this route, only its superseded attempt');
+      assert.equal(store.medusaExchanges.get(superseded.exchange_id).terminal_code, 'system-owner-closed');
+      assert.equal(store.medusaExchanges.get(orphaned.exchange_id).terminal_at, null, 'another route\'s is not touched by a settle for this one');
+      assert.equal(gateway.settleSends(), 2, 'a pass over all of them closes the two nothing waits on');
+      assert.deepEqual([store.medusaExchanges.get(orphaned.exchange_id).terminal_code, store.medusaExchanges.get(nameless.exchange_id).terminal_code],
+        ['system-owner-closed', 'system-owner-closed']);
       await gateway.advance(route.routeId);
       assert.equal(bridgeStore.routes.get(route.routeId).state, 'routed');
       // Every settled attempt takes a number, the one that failed included.
@@ -1464,7 +1502,17 @@ describe('bridge gateway (#2031)', () => {
       const theirs = await hub.sessionSends(alpha, { to: beta.workspaceId, text: 'between sessions', deliver: false });
       const theirsRow = store.medusaExchanges.getByHubId(theirs.body.id, 'send');
       refused(theirsRow.exchange_id, OWNER, 'NOT_SYSTEM_OWNER');
-      assert.equal(exchanges.systemOwnerOf(theirsRow), null);
+      assert.deepEqual([exchanges.isSystemOrigin(theirsRow), exchanges.systemOwnerOf(theirsRow)], [false, null], 'a verified session is not the system');
+      // A session's send dressed as the gateway's, with the gateway's key and a
+      // gateway-shaped request id: it has a project and a launch's proof, so it is still the session's.
+      const dressed = exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: 'bridge:rt_dressed:send1' },
+          { kind: 'project', projectId: alpha.project.id, launchId: alpha.launchId }, alpha.project.id, {}),
+        sender: { projectId: alpha.project.id, sessionId: gateway.GATEWAY_KEY, workspaceId: alpha.workspaceId },
+        recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
+      });
+      assert.deepEqual([dressed.sender_verified ? 1 : 0, exchanges.isSystemOrigin(dressed), exchanges.systemOwnerOf(dressed)], [1, false, null]);
+      refused(dressed.exchange_id, OWNER, 'NOT_SYSTEM_OWNER');
       // A system send that is not the gateway's is nobody's to close this way, and is watched like any other.
       const stray = exchanges.createSendIntent({
         meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: 'other-system-send-0001' }, { kind: 'system' }, null, {}),
