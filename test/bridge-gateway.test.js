@@ -905,11 +905,13 @@ describe('bridge gateway (#2031)', () => {
       assert.ok(alpha.sessionId);
     });
 
-    it('does nothing at all while disabled', async () => {
+    it('sends, starts and resolves nothing while disabled', async () => {
       bridgeStore.routes.accept({ routeId: 'rt_x', externalId: 'm9', ...ALLOWED, text: 'hello', digest: 'a'.repeat(64), at: clock });
       bridgeStore.settings.set('enabled', 'false');
       later(60 * 60 * 1000);
-      assert.deepEqual(await gateway.tick(), { advanced: 0, failed: 0, pendingNotices: 0 });
+      // The one thing a disabled pass does beyond retention is end a send of its
+      // own that no route waits on; here there is none.
+      assert.deepEqual(await gateway.tick(), { advanced: 0, failed: 0, pendingNotices: 0, settled: 0 });
       assert.equal(bridgeStore.routes.get('rt_x').state, 'accepted');
       assert.equal(hub.system.length + hub.fromGateway().length + masterState.ensures, 0);
     });
@@ -1346,6 +1348,59 @@ describe('bridge gateway (#2031)', () => {
       // The route got its one status notice and nothing else.
       const forRoute = store.getDb().prepare('SELECT idem_key FROM bridge_outbound WHERE route_id = ?').all(r.body.routeId).map((x) => x.idem_key);
       assert.deepEqual(forRoute, [`route:${r.body.routeId}:pending`]);
+    });
+
+    it('only its normal mail is exempt: a blocking or critical send it owned would climb like anyone\'s', async () => {
+      const beta = liveProject('Beta');
+      /**
+       * A send that is the gateway's by every proof, at a given priority, on the Hub and unread.
+       * @param {string} priority - Its priority.
+       * @returns {object} The exchange row.
+       */
+      const owned = (priority) => {
+        const row = exchanges.createSendIntent({
+          meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: `bridge:rt_${priority}:send1`, priority }, { kind: 'system' }, null),
+          sender: { projectId: null, sessionId: gateway.GATEWAY_KEY, workspaceId: GATEWAY_WS },
+          recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
+        });
+        exchanges.bindHubId(row.exchange_id, `hub-owned-${priority}`, { hubStatus: 'received' });
+        return row;
+      };
+      const rows = { normal: owned('normal'), blocking: owned('blocking'), critical: owned('critical') };
+      for (const row of Object.values(rows)) assert.equal(exchanges.systemOwnerOf(row), gateway.GATEWAY_KEY);
+      later(3 * 60 * 60 * 1000);
+      await watchdogPass();
+      assert.deepEqual(ladder(rows.normal.exchange_id), [], 'normal: no rung at all');
+      assert.ok(ladder(rows.blocking.exchange_id).includes('aged') && ladder(rows.blocking.exchange_id).includes('operator_alerted'), `blocking climbs: ${ladder(rows.blocking.exchange_id)}`);
+      assert.ok(ladder(rows.critical.exchange_id).includes('operator_alerted'), `critical climbs: ${ladder(rows.critical.exchange_id)}`);
+    });
+
+    it('a pass while the bridge is disabled still ends a send no route waits on, and keeps one a route does', async () => {
+      const alpha = liveProject('Alpha');
+      liveProject('Beta');
+      const waiting = await operatorSays('m1', '@alpha one');
+      const done = await operatorSays('m2', '@beta two');
+      const waitingHub = hub.fromGateway()[0].hubId;
+      const doneHub = hub.fromGateway()[1].hubId;
+      bridgeStore.settings.set('enabled', 'false');
+      // With the bridge off, one route is closed by a write that settles nothing itself.
+      const route = bridgeStore.routes.get(done.body.routeId);
+      assert.equal(bridgeStore.applyRouteWrite({
+        op: 'close', requestId: 'req-close-while-off-0001', routeId: route.routeId, expectedVersion: route.version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1, at: clock,
+        change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: clock }, clearBodies: true })
+      }).outcome, 'applied');
+      assert.equal(sendOf(doneHub).terminal_at, null, 'precondition: its send is still open');
+
+      const pass = await gateway.tick();
+      assert.equal(pass.settled, 1);
+      assert.deepEqual([sendOf(doneHub).state, sendOf(doneHub).terminal_code], ['closed', 'system-owner-closed']);
+      assert.equal(sendOf(waitingHub).terminal_at, null, 'the route still routed keeps its send, disabled or not');
+      assert.equal(bridgeStore.routes.get(waiting.body.routeId).state, 'routed');
+      assert.equal(exchanges.pendingWakeCount(alpha.workspaceId), 1);
+      // Disabled still means nothing else happens on the pass.
+      assert.deepEqual([pass.advanced, pass.failed, pass.notifications], [0, 0, undefined]);
+      assert.equal((await gateway.tick()).settled, 0);
     });
 
     it('a fact an earlier build recorded for the gateway\'s own send is not turned into a notice', async () => {

@@ -307,9 +307,9 @@
         <div class="gs-section-sublabel">Allowlist</div>
         ${line('Now', allow ? `author ${escapeHtml(allow.authorId)}, server ${escapeHtml(allow.spaceId)}, channel ${escapeHtml(allow.channelId)}` : '<strong>not set</strong>')}
         <div class="ob-form">
-          <input type="text" class="form-input" id="obAuthorId" inputmode="numeric" autocomplete="off" placeholder="Discord author id">
-          <input type="text" class="form-input" id="obSpaceId" inputmode="numeric" autocomplete="off" placeholder="Discord server id">
-          <input type="text" class="form-input" id="obChannelId" inputmode="numeric" autocomplete="off" placeholder="Discord channel id">
+          <input type="text" class="form-input" id="obAuthorId" inputmode="numeric" autocomplete="off" aria-label="Discord author id" placeholder="Discord author id">
+          <input type="text" class="form-input" id="obSpaceId" inputmode="numeric" autocomplete="off" aria-label="Discord server id" placeholder="Discord server id">
+          <input type="text" class="form-input" id="obChannelId" inputmode="numeric" autocomplete="off" aria-label="Discord channel id" placeholder="Discord channel id">
           ${button('allowlist', 'Set the allowlist')}
         </div>
 

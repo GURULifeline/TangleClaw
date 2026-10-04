@@ -150,7 +150,7 @@ carry anything anybody typed.
 
 The Medusa message the gateway sends to the project gets no notice of its own. The gateway
 declares the exchanges it sends as its own (`lib/medusa-exchanges.js#declareSystemOwner`), and
-the delivery watchdog does not raise a declared owner's send to any rung: no aged notice, no
+the delivery watchdog does not raise a declared owner's normal-priority send to any rung: no aged notice, no
 escalation, no operator alert, no dashboard entry, however long it waits. It is still an
 ordinary open message in every other way, which is what delivers it: the wake monitor nudges the
 target session for it, and a target whose session ends is recorded on it, which is how the
@@ -160,7 +160,10 @@ The gateway ends that exchange itself, since no session can. It stays open exact
 route is waiting on that send: the route is `routed` on that message, or is still `accepted`
 and that send is the attempt being resolved, whose Hub id may yet bind. It is closed the moment
 the route moves on (its reply is held, the Master answers, reroutes or closes it), and on every
-pass for any that a crash left open. Closing changes nothing about what it was: a later reply
+pass for any that a crash left open. That pass runs while the bridge is disabled too, so a route
+closed or let go while it is off does not leave its exchange open. A route that is still
+`routed` when the bridge is disabled keeps its exchange until the Master closes the route, which
+the rollback runbook has it do. Closing changes nothing about what it was: a later reply
 that names the message still finds it, and is then refused for where the route is, by name.
 
 ## The Project Master's credential

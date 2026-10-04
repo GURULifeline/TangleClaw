@@ -292,13 +292,14 @@ bridge's own message. Three things hold the cap now:
 
 - **The gateway owns the exchanges it sends, and says so.** A send is the gateway's when it has
   verified system provenance, the gateway's listener as its sender, and a request id the gateway
-  makes. The watchdog does not raise such a send to any rung. This is not an exemption for
+  makes. The watchdog does not raise such a send, at normal priority, to any rung; a blocking or
+  critical one is escalated like anyone's. This is not an exemption for
   system mail in general: a system send from anything that has not declared ownership, or
   without all three proofs, is watched like any other message.
 - **The exchange stays open while the route waits on it, and no longer.** Open is what lets the
   wake monitor nudge the target and what records a target that retired, so it cannot be closed
   when it is sent. The gateway closes it when the route stops waiting on that attempt, and
-  reconciles on every pass. An attempt whose outcome is unknown stays open, because its Hub id
+  reconciles on every pass, with the bridge enabled or not. An attempt whose outcome is unknown stays open, because its Hub id
   may still bind. The close is in-process, for the declared owner only; who may close an
   exchange over HTTP is unchanged.
 - **The bridge does not forward an alert about its own send,** even one recorded before any of

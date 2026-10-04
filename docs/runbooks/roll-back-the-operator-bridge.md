@@ -27,6 +27,14 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    would tell every newly launched session of `tc candidate` before the controlled checks.
    → If the Operator cannot be reached: go to step 2 now. It stops everything reaching Discord.
 
+1b. The Master closes every route still open: `tc bridge routes`, then for each one
+   `tc bridge close <route-id> --version <n>`.
+   → Expected: `tc bridge routes` lists nothing.
+   Why: a route still waiting on a project keeps its message to that project open, and with the
+   bridge off nothing will ever answer the operator for it. Closing the route ends that message
+   at once and clears its text. Answering is refused while the bridge is disabled, so close.
+   → If the Master cannot be reached: go on. Close them when it can.
+
 2. Stop the helper and remove its job:
    `launchctl bootout gui/$(id -u)/com.tangleclaw.bridge-helper`
    `bin/tc-bridge-helper uninstall-launchd`

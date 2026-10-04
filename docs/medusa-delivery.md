@@ -384,7 +384,8 @@ Such a component can declare that it owns what it sends
 hold together: it has verified system provenance and no sending project, its sender is the
 component's listener, and its request id begins with the prefix the component declared.
 
-- **The watchdog does not raise it.** No aged notice, no escalation, no operator alert. The
+- **The watchdog does not raise it, at normal priority.** No aged notice, no escalation, no
+  operator alert. A blocking or critical send is escalated like anyone's. The
   component decides what happens when it goes unread or unanswered. It is still re-armed, still
   woken for, and still ended when its recipient retires.
 - **The component closes it,** in-process, and only its own

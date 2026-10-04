@@ -369,6 +369,11 @@ describe('the Operator Bridge panel (#2031)', () => {
       assert.match(drawn, /Allowlist[\s\S]*<strong>not set<\/strong>/);
       assert.match(drawn, /Helper token[\s\S]*<strong>none<\/strong>/);
       assert.match(drawn, /Nothing is set aside\./);
+      // Each allowlist input says what it is to someone who cannot see its placeholder.
+      for (const [id, name] of [['obAuthorId', 'Discord author id'], ['obSpaceId', 'Discord server id'], ['obChannelId', 'Discord channel id']]) {
+        assert.match(drawn, new RegExp(`<input [^>]*id="${id}"[^>]*aria-label="${name}"`), `${id} is named "${name}"`);
+      }
+      assert.equal((drawn.match(/<input /g) || []).length, 3, 'and there is no input without a name');
       assert.match(drawn, /data-bridge-action="primer-on" disabled/, 'the primer cannot be switched on while the bridge is off');
       // Enabling is refused by the server until the allowlist and a token exist, and the panel says why.
       assert.equal(await panel.act('enable'), 'failed');
