@@ -70,6 +70,7 @@ The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cl
 **The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
 
 **Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
+
 ## 2026-10-04 — Inline handlers in every page script take their values through jsArg (#1902)
 
 <!-- prawduct: type=bugfix | scope=inline-handler-jsarg-1902 -->
