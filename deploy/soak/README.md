@@ -615,6 +615,33 @@ judgeable by design, because it was built before `soak bundle` recorded a candid
 `soak run` held the log open to its horizon. The judge is the authority from the first candidate
 whose bundle is produced by the tooling described here.
 
+## The stub hub
+
+The guest has no network, so no real Medusa hub can run in it. Without a hub, no session's switchboard
+listener ever reaches `listening`. `deploy/soak/medusa-stub/medusa-stub.js` is a hub that speaks only the
+part of the protocol the candidate uses, so `engine.session.medusa-cycle` exercises the candidate's own
+listener, send route, inbox and read path from end to end. **It certifies TangleClaw's side of the
+switchboard, not Medusa.**
+
+- **Loopback only, by construction.** It binds `127.0.0.1` and `::1`, because `localhost` can resolve to
+  either, and it refuses to bind anything else.
+- **What it serves:**
+  - HTTP: `POST /messages/direct`, `GET /workspaces` and `GET /health`.
+  - WebSocket: `register`, answered with `registered`; heartbeats; `new_message` pushes; and `ack`,
+    answered with `ack_response`.
+- **Message ids and delivery:**
+  - One id names a message everywhere: the send's answer, the pushed envelope and the message itself.
+    That id is what the cycle's delivery check matches.
+  - A message stays queued until its recipient acknowledges it. A workspace that registers again is sent
+    everything still queued. A workspace that never registered answers 404.
+- **It needs no credentials,** because the candidate sends none. Nothing persists: a restart forgets
+  every queue.
+- **It uses Node built-ins only.** Node 22 has no WebSocket server, so the handshake and framing (RFC
+  6455) are written out in the script. Client frames must be masked, and fragmented frames are refused.
+- **Setup runs it as a LaunchAgent** in the workload user's GUI session (setup step 6), so launchd
+  restarts it if it dies during a run and loads it again at login. It logs to
+  `~/Library/Logs/soak-medusa-stub.log`.
+
 ## The stub engine
 
 The guest has no network access and holds no vendor credentials, so the `engine` load uses
