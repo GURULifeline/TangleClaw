@@ -662,15 +662,16 @@ describe('soak judge — the disposition proposal', () => {
     assert.equal(two.disposition.state, 'covers', 'any file the manifest binds may be cited');
   });
 
-  it('refuses evidence reached through a symlinked directory, even one the manifest lists', async () => {
+  it('reads no proposal from a bundle with a symlinked directory: the bundle itself fails first', async () => {
     const { out, run, plain } = await withFindings();
     // Move the snapshot's directory aside and leave a symlink in its place:
-    // the listed path still resolves to the same bytes.
+    // the listed path still resolves to the same bytes. The bundle's own
+    // integrity check refuses it, so evidence can never be reached this way.
     fs.renameSync(path.join(out, 'db'), path.join(dir, 'db-real'));
     fs.symlinkSync(path.join(dir, 'db-real'), path.join(out, 'db'));
     const db = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8')).files.find((f) => f.path === path.join('db', 'tangleclaw.db'));
     const j = judge.judgeBundle({ bundleDir: out, run, disposition: proposal(plain, (d) => { d.events[0].evidence = [{ path: db.path, sha256: db.sha256 }]; }) });
-    assert.notEqual(j.disposition.state, 'covers');
+    assert.deepEqual([j.verdict, j.reasons, j.disposition.state], ['fail', [{ file: 'db', code: 'FILE_UNLISTED', class: 'terminal' }], 'not-applied']);
   });
 
   it('is refused when there is nothing to dispose of, so it cannot ride along with a clean pass', async () => {
