@@ -441,7 +441,16 @@ age.
 dropped. Something is let go when it has waited strictly longer than its limit. Each one is
 audited by itself, with the reason `expired` and its own id. Nothing let go is raised again:
 its row and its idempotency key stay until retention removes them, so the event that caused it
-remains accounted for. A route's status notice that expired is not raised a second time. A closed route takes its outbound items with
+remains accounted for.
+
+Three things keep that true however long anything lasts:
+
+- A route records, on the route itself, that it has had its status notice. The notice's own row
+  can be let go and removed; the route still refuses a second.
+- A settled item of a route that is still open stays with its route. It is removed once the
+  route is closed and past its own retention.
+- A decided candidate is removed only after every item made from it has gone by its own rule.
+  Removing a candidate removes its items, so the candidate waits for them. A closed route takes its outbound items with
 it in any state: a route closes only once its answer has been relayed or abandoned. An audit row of a route that is still open is never compacted, and
 neither is any row written after it.
 

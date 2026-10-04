@@ -165,6 +165,64 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
     assert.deepEqual([bridgeStore.candidates.get(news).state, bridgeStore.candidates.get(action).state], ['rejected', 'submitted']);
   });
 
+  it('every kind that can wait has a limit: the table covers the whole vocabulary', () => {
+    const schema = require('../lib/bridge-schema');
+    assert.deepEqual(Object.keys(bridgeStore.EXPIRY_MS.notification).sort(), [...schema.NOTIFICATION_TYPES].sort());
+    assert.deepEqual(Object.keys(bridgeStore.EXPIRY_MS.candidate).sort(), [...schema.CANDIDATE_KINDS].sort());
+  });
+
+  it('a route has one status notice in its life, however long it stays open and whatever retention removes', () => {
+    route('rt_1');
+    const first = bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: T0 });
+    assert.equal(first.created, true);
+    bridgeStore.expire({ now: at(DAY + 1) });
+    for (const days of [31, 62, 93, 400]) {
+      const removed = bridgeStore.prune({ now: at(days * DAY) });
+      assert.equal(removed.routes, 0, 'the route is still open');
+      const again = bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: at(days * DAY) });
+      assert.equal(again.created, false, `no second notice after ${days} days`);
+    }
+    assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE kind = 'status'").get().n, 1,
+      'and the notice of an open route is not removed from under it');
+    // Even with the row gone, the route's own record refuses a second.
+    store.getDb().exec("DELETE FROM bridge_outbound WHERE kind = 'status'");
+    assert.deepEqual(bridgeStore.outbound.enqueueStatus('rt_1', 'master-unavailable', { at: at(500 * DAY) }), { created: false, item: null });
+  });
+
+  it('a delivered status notice is not raised again either', () => {
+    route('rt_1');
+    const id = bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: T0 }).item.outboundId;
+    bridgeStore.outbound.markDelivered(id, 'posted-1', { at: at(1000) });
+    bridgeStore.prune({ now: at(90 * DAY) });
+    assert.equal(bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: at(91 * DAY) }).created, false);
+  });
+
+  it('retention removes a candidate only after its item has left by its own rule', () => {
+    const itemId = approved(candidate('operator-action-required', 'cd_action'));
+    // The candidate was decided at T0, so its own 30 days and its item's limit end together.
+    assert.equal(bridgeStore.prune({ now: at(30 * DAY + 1) }).candidates, 0, 'its item is still waiting: the candidate stays');
+    assert.equal(itemState(itemId), 'ready', 'and the item was not removed as a side effect');
+    assert.equal(bridgeStore.expire({ now: at(30 * DAY + 1) }).outbound, 1);
+    assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'expire'").get().n, 1, 'it left by its own rule, audited');
+
+    // The dropped item is kept its 30 days, then goes; only then does the candidate.
+    assert.deepEqual([bridgeStore.prune({ now: at(45 * DAY) }).outbound, bridgeStore.candidates.get('cd_action') !== null], [0, true]);
+    const later = bridgeStore.prune({ now: at(61 * DAY) });
+    assert.deepEqual([later.outbound, later.candidates], [1, 1]);
+    assert.equal(bridgeStore.candidates.get('cd_action'), null);
+  });
+
+  it('an expired candidate cannot be approved afterwards', () => {
+    const id = candidate('milestone', 'cd_1');
+    bridgeStore.expire({ now: at(7 * DAY + 1) });
+    const result = bridgeStore.applyCandidateWrite({
+      op: 'candidate-approve', requestId: 'req-late-approve-1', candidateId: id, expectedVersion: 2, masterGeneration: 1,
+      change: (c) => (c.state !== 'submitted' ? { refuse: 'already-decided' } : { state: 'approved' })
+    });
+    assert.equal(result.outcome, 'already-decided');
+    assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_outbound').get().n, 0);
+  });
+
   it('never lets go of a reply or a failure notice, whatever its age', () => {
     route('rt_1');
     bridgeStore.applyRouteWrite({
