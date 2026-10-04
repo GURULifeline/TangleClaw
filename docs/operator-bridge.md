@@ -410,8 +410,8 @@ and when it lapses. The window is two minutes.
   exactly what it sealed (anything else is `409 ACK_MISMATCH`), and only to its own token. A
   lapsed lease is removed after a day.
 - **A claim is named by its nonce.** Repeating a claim with the same nonce, token and request
-  returns the leases it issued the first time, each in its present state, and issues nothing.
-  A lease that is no longer live comes back without its text. The same nonce with a different
+  returns the leases it issued the first time and issues nothing. A lease that is no longer
+  live comes back as its id and `leaseState` alone: no text, no posted parts, no count. The same nonce with a different
   request or token, or one another helper write has used, is `409 NONCE_REUSED`. This is the
   one helper write whose nonce may be seen twice.
 - **A live lease holds its item past its retention limit.** See Retention.

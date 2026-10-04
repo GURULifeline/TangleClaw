@@ -9,7 +9,7 @@ const http = require('node:http');
 
 /**
  * Start a fake Discord REST API.
- * @returns {Promise<{api: string, posts: object[], reactions: string[], script: object[], close: function(): Promise<void>}>}
+ * @returns {Promise<{api: string, posts: object[], reactions: string[], script: object[], calls: function(): number, close: function(): Promise<void>}>}
  *   `posts` is every message made, in order. `script` is consumed one entry
  *   per POST: `{status, body}` answers without posting, and `{status, lands:
  *   true}` posts and then answers with that status, which is what a timeout
@@ -20,6 +20,7 @@ async function startFakeDiscord() {
   const reactions = [];
   const script = [];
   const byNonce = new Map();
+  let postCalls = 0;
   let nextId = 400000000000000000n;
 
   /**
@@ -50,6 +51,7 @@ async function startFakeDiscord() {
       };
       const post = /^\/channels\/(\d+)\/messages$/.exec(req.url);
       if (req.method === 'POST' && post) {
+        postCalls += 1;
         const body = JSON.parse(raw);
         const scripted = script.shift();
         if (scripted) {
@@ -69,6 +71,8 @@ async function startFakeDiscord() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
     api: `http://127.0.0.1:${server.address().port}`, posts, reactions, script,
+    /** @returns {number} How many times a post was asked for, whatever the answer. */
+    calls: () => postCalls,
     close: () => new Promise((resolve) => server.close(resolve))
   };
 }

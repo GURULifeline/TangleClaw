@@ -28,7 +28,7 @@ const { startFakeDiscord, fakeWebSocket } = require('./_fake-discord');
 const { createBridgeClient, BridgeError } = require('../lib/bridge-helper/bridge-client');
 const { createDiscordRest } = require('../lib/bridge-helper/discord-rest');
 const { createInbound, REFUSAL_TEXT } = require('../lib/bridge-helper/inbound');
-const { createOutbound, settleHeld, configurationReason, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
+const { createOutbound, settleHeld, configurationReason, replyTargetMayBeMissing, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
 const { openState, nonceFor } = require('../lib/bridge-helper/state');
 const { main, EXIT } = require('../lib/bridge-helper/cli');
 const { paths, writeConfig } = require('../lib/bridge-helper/config');
@@ -607,28 +607,86 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual([atBridge(one.outboundId)[0], atBridge(two.outboundId)[0]], ['delivered', 'delivered']);
     });
 
-    it('believes only a code Discord gave: a bare 403 or 404 is a passing failure, and opens nothing', async () => {
+    it('a bare 403 is the bot not being allowed: it opens the circuit, code or no code', async () => {
       const one = await answered('first');
-      for (const refusal of [{ status: 403, body: {} }, { status: 404, body: { code: 0 } }]) {
-        discord.script.push(refusal);
-        assert.deepEqual(await outbound().pass(), { ok: false, posted: 0, acked: 0, held: 0 }, String(refusal.status));
-        assert.deepEqual([atBridge(one.outboundId)[0], bridgeStore.circuit.open()], ['ready', null]);
-      }
-      assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 });
-      assert.deepEqual([configurationReason({ status: 401, discordCode: 0 }), configurationReason({ status: 404, discordCode: 10003 }),
-        configurationReason({ status: 404, discordCode: 10004 }), configurationReason({ status: 403, discordCode: 50001 }),
-        configurationReason({ status: 404, discordCode: 10008 }), configurationReason({ status: 429, discordCode: null })],
-      ['chat-auth-refused', 'chat-channel-missing', 'chat-guild-missing', 'chat-permission-denied', null, null]);
+      discord.script.push({ status: 403, body: {} });
+      assert.deepEqual(await outbound().pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.deepEqual([atBridge(one.outboundId)[0], bridgeStore.outbound.get(one.outboundId).blockCode, bridgeStore.circuit.open().reason],
+        ['blocked', 'chat-permission-denied', 'chat-permission-denied']);
+      assert.deepEqual(discord.posts, []);
     });
 
-    it('an answer whose reply target is gone is posted by itself; that is not a broken channel', async () => {
-      const { messageId, outboundId } = await answered('the answer');
-      discord.script.push({ status: 404, body: { code: 10008 } });
+    it('a 404 for an answer is tried once more by itself; only if that fails too is the channel taken to be gone', async () => {
+      // The message it answers is gone, by Discord's code or with none: one retry, unthreaded, and it posts.
+      for (const refusal of [{ status: 404, body: { code: 10008 } }, { status: 400, body: { code: 160002 } }, { status: 404, body: {} }]) {
+        discord.posts.length = 0;
+        const { outboundId } = await answered('the answer');
+        discord.script.push(refusal);
+        const calls = discord.calls();
+        assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 }, JSON.stringify(refusal));
+        assert.equal(discord.calls() - calls, 2, 'the threaded attempt, and exactly one more');
+        assert.deepEqual(discord.posts.map((p) => [p.content, p.replyTo]), [['**Project Master**\nthe answer', null]]);
+        assert.deepEqual([atBridge(outboundId)[0], bridgeStore.circuit.open()], ['delivered', null]);
+      }
+      assert.equal(logged().filter((c) => c === 'outbound-reply-target-missing').length, 3);
+
+      // Threaded and unthreaded both 404: it is the channel. One retry, no more, and the circuit opens.
+      discord.posts.length = 0;
+      const gone = await answered('into the void');
+      discord.script.push({ status: 404, body: {} }, { status: 404, body: {} });
+      const calls = discord.calls();
+      assert.deepEqual(await outbound().pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.calls() - calls, 2);
+      assert.deepEqual([atBridge(gone.outboundId)[0], bridgeStore.outbound.get(gone.outboundId).blockCode, bridgeStore.circuit.open().reason],
+        ['blocked', 'chat-channel-missing', 'chat-channel-missing']);
+      assert.deepEqual(discord.posts, []);
+    });
+
+    it('a 404 for a post that answers nothing is the channel itself, and is not retried', async () => {
+      const text = 'A session needs the operator.';
+      const id = bridgeStore.outbound.enqueue({
+        idemKey: `notify:operator-needed:void-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw',
+        text, digest: bridgeStore.digest(text), at: new Date(clock).toISOString()
+      }).outboundId;
+      discord.script.push({ status: 404, body: {} });
+      const calls = discord.calls();
+      assert.deepEqual(await outbound().pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.calls() - calls, 1, 'there is no reply target to drop, so nothing to retry');
+      assert.deepEqual([atBridge(id)[0], bridgeStore.outbound.get(id).blockCode, bridgeStore.circuit.open().reason], ['blocked', 'chat-channel-missing', 'chat-channel-missing']);
+    });
+
+    it('a refusal it cannot place, or an answer with no message in it, is never taken for a post', async () => {
+      const odd = await answered('first');
+      const next = await answered('second');
+      discord.script.push({ status: 418, body: {} });
       assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 });
-      assert.deepEqual(discord.posts.map((p) => [p.content, p.replyTo]), [['**Project Master**\nthe answer', null]]);
-      assert.ok(messageId);
-      assert.deepEqual([atBridge(outboundId)[0], bridgeStore.circuit.open()], ['delivered', null]);
-      assert.ok(logged().includes('outbound-reply-target-missing'));
+      assert.deepEqual([atBridge(odd.outboundId)[0], bridgeStore.outbound.get(odd.outboundId).blockCode], ['blocked', 'outcome-unverifiable'], 'set aside, not retried on a guess');
+      assert.deepEqual([atBridge(next.outboundId)[0], bridgeStore.circuit.open()], ['delivered', null], 'the next item moves, and the channel is not blamed');
+
+      // Discord answers 200 with nothing that is a message id.
+      store.getDb().exec("DELETE FROM bridge_outbound WHERE state = 'ready'");
+      const blank = await answered('third');
+      discord.script.push({ status: 200, body: { id: 'not-an-id' } });
+      const relay = outbound();
+      await relay.pass();
+      assert.deepEqual(atBridge(blank.outboundId), ['ready', null], 'it is not delivered');
+      assert.deepEqual(bridgeStore.parts.forItem(blank.outboundId), [], 'and no part is recorded for it');
+      assert.ok(relay.state.get(blank.outboundId).since, 'the attempt stays on record as in doubt');
+    });
+
+    it('classifies each refusal by what it can only mean for a post to one fixed channel', () => {
+      const reason = (status, discordCode, unthreaded) => configurationReason({ status, discordCode }, unthreaded);
+      assert.deepEqual([
+        reason(401, 0, true), reason(404, 10003, false), reason(404, 10004, false), reason(403, 50001, false), reason(403, 50013, true),
+        reason(403, null, false), reason(403, 0, true), reason(404, null, true), reason(404, 10008, true)
+      ], ['chat-auth-refused', 'chat-channel-missing', 'chat-guild-missing', 'chat-permission-denied', 'chat-permission-denied',
+        'chat-permission-denied', 'chat-permission-denied', 'chat-channel-missing', 'chat-channel-missing']);
+      assert.deepEqual([reason(404, null, false), reason(404, 10008, false), reason(429, null, true), reason(400, 50035, true), reason(500, null, true), reason(0, null, true)],
+        [null, null, null, null, null, null], 'a threaded 404 is not judged before its one retry; nothing else is the channel');
+      const retry = (status, discordCode, sent = 'no') => replyTargetMayBeMissing({ status, discordCode, sent });
+      assert.deepEqual([retry(404, 10008), retry(400, 160002), retry(404, null), retry(404, 0)], [true, true, true, true]);
+      assert.deepEqual([retry(404, 10003), retry(404, 10004), retry(403, null), retry(400, 50035), retry(404, null, 'unknown'), retry(502, null, 'unknown')],
+        [false, false, false, false, false, false], 'a missing channel or server, a refusal of the content, or a post that may have landed is not retried this way');
     });
 
     it('a refusal a retry may fix holds nothing and sets nothing aside', async () => {
@@ -831,6 +889,42 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.equal(answersPosted().length, 1, 'the answer is not posted again, and not sealed on a record that is not the helper\'s');
       assert.ok(logged().includes('outbound-part-conflict'));
       assert.deepEqual(relay.state.entries(), [], 'the bridge holds the item now; the helper keeps nothing');
+    });
+
+    it('stops asking under a lease that is spent, when the item will never come back', async () => {
+      // An answer that takes exactly two messages.
+      const long = Array.from({ length: 60 }, (_, i) => `line ${i} ${'y'.repeat(40)}`).join('\n');
+      const { routeId, outboundId } = await answered(long);
+      // Both parts post, but the bridge is never told of the second, nor of the whole.
+      let reports = 0;
+      const total = () => bridgeStore.parts.forItem(outboundId).length;
+      const deaf = { ...bridge,
+        part: async (...args) => { reports += 1; if (reports > 1) throw new BridgeError(0, null); return bridge.part(...args); },
+        ack: async () => { throw new BridgeError(0, null); } };
+      const relay = outbound({ bridge: deaf });
+      assert.equal((await relay.pass()).ok, false);
+      assert.deepEqual([total(), discord.posts.length], [1, 2], 'two parts are in the channel; the bridge knows of one');
+      assert.deepEqual([relay.state.get(outboundId).status, relay.state.get(outboundId).parts.length], ['posted', 2]);
+
+      // The Master closes the route once the lease has lapsed: the item is withdrawn and will never be handed over again.
+      clock += bridgeStore.LEASE_MS + 1000;
+      const res = await fetch(`${origin}/api/bridge/master/routes/${routeId}/close`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-tangleclaw-bridge-credential': masterCredential },
+        body: JSON.stringify({ requestId: `req-close-${++seq}-0000`, expectedVersion: bridgeStore.routes.get(routeId).version })
+      });
+      assert.equal(res.status, 200);
+      assert.equal(atBridge(outboundId)[0], 'dropped');
+
+      const later = outbound();
+      codes.length = 0;
+      await later.pass();
+      assert.equal(logged().filter((c) => c === 'outbound-ack-failed').length, 1, 'it asks once more, and is told only that its lease is not live');
+      assert.equal(later.state.get(outboundId).leaseId, undefined, 'so it puts that lease down');
+      codes.length = 0;
+      for (let i = 0; i < 3; i++) await later.pass();
+      assert.deepEqual(logged().filter((c) => c.startsWith('outbound')), [], 'and does not ask again, pass after pass');
+      assert.equal(later.state.get(outboundId).parts.length, 2, 'what it posted stays on its record');
+      assert.equal(discord.posts.length, 2, 'and nothing more is posted');
     });
 
     it('lets go of its record when the bridge has let the item go', async () => {

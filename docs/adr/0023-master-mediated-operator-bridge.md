@@ -333,7 +333,9 @@ nothing recorded the fetch. These rulings close it.
   sealed the complete ordered delivery may replay that acknowledgement, while its token remains
   authorised. It is exposed through the acknowledgement's idempotency alone, not as state on
   the part or failure routes. That lease is kept for as long as the item is, so lease pruning
-  never leaves a valid helper asking forever. Every other old lease fails uniformly.
+  never leaves a valid helper asking forever. Every other old lease fails uniformly. A claim
+  repeated under its nonce is held to the same rule: a lease that is no longer live comes back
+  as its id and state alone.
 - **A hand-over is counted.** `attempts` rises by one for each lease issued for an item, and
   never for a claim repeated under its nonce.
 - **A live lease is the one thing that holds an item past its retention limit,** and no lease
@@ -403,8 +405,13 @@ have the reply reach the Master as a reply to that milestone.
   was blocked. Nothing clears it by time alone.
 - **Only the chat's own verdict opens it.** An item-specific permanent refusal blocks only that
   item. A transient, network, rate-limit or server failure is retried with bounded backoff and
-  never opens the circuit. A missing reply target is not a broken channel: the answer is posted
-  unthreaded.
+  never opens the circuit.
+- **A bare 403 or 404 is neither success nor passed over.** For the fixed-channel
+  create-message call, a 403 without a code is configuration or permission and opens the
+  circuit. For a threaded post, Discord's codes for a missing reply target, or a bare 404, allow
+  exactly one unthreaded retry. If that retry is 404, or the original post was unthreaded and
+  is 404, it is the channel, and the circuit opens. An outcome that cannot be placed safely is
+  `outcome-unverifiable` and fails closed: it is never marked delivered.
 - **The episode's record does not recurse.** It is not delivered through the chat that is
   closed; it is visible through the operator's local status and, until cutover, the interim
   route.

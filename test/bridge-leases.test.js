@@ -194,12 +194,13 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
     assert.deepEqual([stale.status, stale.body.code], [409, 'LEASE_LAPSED']);
     assert.equal(bridgeStore.outbound.get(id).state, 'ready');
 
-    // Asking the first claim again says what became of its lease, and gives no text to post.
-    const replay = claim({ nonce: n }).body;
-    assert.deepEqual(replay.items.map((i) => [i.leaseId, i.leaseState, i.text]), [[held.leaseId, 'lapsed', null]]);
+    // Asking the first claim again says that its lease lapsed, and nothing else: no text, no parts, no count.
+    const lapsed = [{ outboundId: id, leaseId: held.leaseId, leaseState: 'lapsed' }];
+    assert.deepEqual(claim({ nonce: n }).body.items, lapsed);
 
     assert.equal(ack(again, 'posted-1').status, 200);
     assert.deepEqual(leasesOf(id).map((l) => l[0]), ['lapsed', 'used']);
+    assert.deepEqual(claim({ nonce: n }).body.items, lapsed, 'and the same once another lease has delivered the item');
   });
 
   it('an acknowledgement is good up to the end of the lease window and not after', () => {
