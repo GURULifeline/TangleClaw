@@ -149,7 +149,11 @@ describe('lib/ecosystem-primer (#1122)', () => {
     // pane this line is read in.
     const { verbsFor } = require('../lib/tc-verbs');
     const forPanes = verbsFor('pane');
-    assert.equal(forPanes.length + verbsFor('master').length, VERB_ROSTER.length, 'every roster entry belongs to exactly one audience');
+    assert.equal(forPanes.length + verbsFor('master').length + verbsFor('unprimed').length, VERB_ROSTER.length,
+      'every roster entry belongs to exactly one audience');
+    for (const v of verbsFor('unprimed')) {
+      assert.ok(!md.includes(`\`${v.id}\``), `md form does not yet name the unprimed ${v.id}`);
+    }
     assert.ok(forPanes.length > 0);
     for (const v of forPanes) {
       assert.ok(md.includes(`\`${v.id}\``), `md form names ${v.id}`);

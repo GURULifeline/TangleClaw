@@ -275,6 +275,7 @@ const workload = require('./lib/workload');
 const coordinatorRotation = require('./lib/coordinator-rotation');
 const bridgeApi = require('./lib/bridge-api');
 const bridgeGateway = require('./lib/bridge-gateway');
+const bridgeNotify = require('./lib/bridge-notify');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
 const sessionFinalize = require('./lib/session-finalize');
@@ -12235,6 +12236,20 @@ if (require.main === module) {
     master.reconcileBridgeCredential();
     // The gateway listens exactly while the bridge is enabled, and its pass
     // carries on any route a restart interrupted. Both do nothing while it is off.
+    // The fleet-idle notification reads the same lane composition the fleet
+    // roster does, so the two cannot disagree about whether a lane is clear.
+    bridgeNotify.setLaneReader(() => store.sessions.listLiveAll().map((session) => {
+      const project = store.projects.get(session.projectId);
+      const lane = _composedLane(session, project ? project.name : null);
+      const sequence = store.launchSequences.getBySession(session.id);
+      const receipt = lane.workload && lane.workload.receipt;
+      return {
+        sessionId: session.id,
+        launchId: sequence ? sequence.launchId : null,
+        receiptSeq: receipt ? receipt.seq : null,
+        availability: lane.composed ? lane.composed.availability : 'UNKNOWN'
+      };
+    }));
     try {
       bridgeGateway.syncListener();
     } catch (err) {

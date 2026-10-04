@@ -637,16 +637,51 @@ describe('bridge gateway (#2031)', () => {
     });
 
     it('a recipient that retires does not make an unconfirmed send sendable again', async () => {
-      liveProject('Alpha');
+      const alpha = liveProject('Alpha');
       hub.failSend = 'unknown';
       const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
       hub.failSend = null;
-      // The session ends. That says nothing about whether the first send arrived.
-      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'recipient_retired' WHERE request_id = ?").run(`bridge:${routeId}:send1`);
+      // The session ends, by the path production takes. That says nothing
+      // about whether the first send arrived.
+      exchanges.markRecipientRetired(alpha.workspaceId);
+      assert.equal(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`).state, 'recipient_retired');
       for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
       const route = bridgeStore.routes.get(routeId);
       assert.deepEqual([route.state, route.failureCode], ['accepted', 'send-unconfirmed']);
       assert.equal(hub.fromGateway().length, 0);
+    });
+
+    it('a routed message whose recipient retires goes back to the Master, and is not resent on its own', async () => {
+      const alpha = liveProject('Alpha');
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      exchanges.markRecipientRetired(alpha.workspaceId);
+      for (let i = 0; i < 3; i++) await gateway.tick();
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'exchange-recipient-retired']);
+      assert.equal(hub.fromGateway().length, 1, 'only the Master\'s explicit route makes another send');
+    });
+
+    it('a Hub answer the exchange could never store is noted once, not on every pass', async () => {
+      liveProject('Alpha');
+      const medusa = require('../lib/medusa');
+      const realSend = medusa.sendMessage;
+      medusa.sendMessage = async (args) => {
+        const out = await realSend(args);
+        return { ...out, id: 'not a storable id!' };
+      };
+      let routeId;
+      try {
+        routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      } finally {
+        medusa.sendMessage = realSend;
+      }
+      const exchange = store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`);
+      const facts = () => store.medusaExchanges.facts(exchange.exchange_id).length;
+      const before = facts();
+      for (let i = 0; i < 5; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(facts(), before, 'no further fact is appended by later passes');
+      assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'hub-answer').length, 0, 'an unstorable id is not kept');
+      assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed']);
     });
 
     it('a send the Hub refused is proven undelivered, and only then may the Master route it again', async () => {

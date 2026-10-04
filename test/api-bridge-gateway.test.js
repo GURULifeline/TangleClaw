@@ -266,7 +266,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const version = () => bridgeStore.routes.get(routeId).version;
     assert.equal((await masterWrites(routeId, 'release', { expectedVersion: version() })).body.code, 'NO_REPLY_HELD');
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: '  ' })).body.code, 'ANSWER_REQUIRED');
-    assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'safe‮evil' })).body.code, 'ANSWER_NOT_DISPLAY_SAFE');
+    assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'safe\u202Eevil' })).body.code, 'ANSWER_NOT_DISPLAY_SAFE');
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'x'.repeat(8001) })).body.code, 'ANSWER_TOO_LONG');
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'fine' })).status, 200);
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'again' })).body.code, 'NOT_ANSWERABLE');
@@ -439,7 +439,7 @@ describe('bridge API: the round trip (#2031)', () => {
     it('every declared route refuses a caller with no proof, before its handler runs', async () => {
       assert.equal(new Set(bridgeApi.ROUTES.map((r) => `${r.method} ${r.path}`)).size, bridgeApi.ROUTES.length);
       for (const entry of bridgeApi.ROUTES) {
-        assert.ok(['master', 'helper', 'operator'].includes(entry.principal), `${entry.method} ${entry.path} declares its principal`);
+        assert.ok(['master', 'helper', 'operator', 'session'].includes(entry.principal), `${entry.method} ${entry.path} declares its principal`);
         let reached = false;
         const guarded = { ...entry, handler: () => { reached = true; return { status: 200, body: {} }; } };
         const refused = await bridgeApi.handle(guarded, { req: { headers: {} }, headers: {}, params: {}, body: {} });
@@ -453,10 +453,14 @@ describe('bridge API: the round trip (#2031)', () => {
     });
 
     it('a principal\'s proof opens only that principal\'s routes', async () => {
+      // A verified project launch: the fourth principal.
+      const project = store.projects.create({ name: `Caller${++seq}`, path: path.join(tmpDir, `Caller${seq}`) });
+      const sessionHeaders = require('./_shared-docs-callers').bindProject(project).headers;
       const proofs = {
         master: { headers: asMaster(), req: { headers: {} } },
         helper: { headers: asHelper(), req: { headers: {} } },
-        operator: { headers: {}, req: SIGNED_IN }
+        operator: { headers: {}, req: SIGNED_IN },
+        session: { headers: sessionHeaders, req: { headers: sessionHeaders } }
       };
       for (const entry of bridgeApi.ROUTES) {
         for (const [who, proof] of Object.entries(proofs)) {

@@ -12,6 +12,11 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **Sessions can offer the Master news for the operator, and the bridge has its three server notifications** (#2031, ADR 0023). Still off by default, with no Discord helper built. `docs/operator-bridge.md` has the detail.
+  - **Candidates.** `tc candidate submit` lets any verified session offer the Project Master a milestone or an operator action, resting on its own workload receipts. A session cannot post: the Master approves, rejects or merges through `tc bridge`, and only an approval creates something for the operator. Each receipt is verified when the candidate is offered and again when it is approved, by a digest of the stored row.
+  - **Notifications.** `work-blocked`, `operator-needed` and `fleet-idle` go straight to the helper's mailbox from fixed templates. Each is found from the record that caused it and made once; nothing from before the bridge was enabled, or while it was off, is notified. `fleet-idle` requires every live lane to be finished and clear.
+  - `tc candidate` is not yet in the verb list panes are primed with.
+
 - **The operator bridge can carry a message to a session and hold the answer for the Master** (#2031, ADR 0023). Still off by default, and with no Discord helper built, enabling it connects to nothing. Cutover and Rule #145 are untouched. `docs/operator-bridge.md` has the detail.
   - **The gateway.** It accepts an operator message from the helper only when the bridge is enabled and the message is from the one allowlisted author, space and channel. It resolves the destination mechanically: a leading `@name` that names exactly one destination, the route of the message being replied to, a pin, or the default, which is the Project Master. Anything it cannot resolve exactly waits for the Master. A project destination gets an ordinary tracked Medusa message whose first line says it is conversation and approves nothing.
   - **Held replies.** A reply is accepted only from the exact project, workspace, session and launch the message was sent to, as the sender's own exchange record proves. Another session of the same project does not qualify. A held reply is posted nowhere until the Master releases it, unchanged or in its own words.
