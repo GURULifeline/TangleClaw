@@ -89,11 +89,22 @@ closed, before cutover; it is not solved here.
 
 ### Sending exactly once
 
-One route is advanced by one caller at a time. Before a message is sent, the gateway looks for
-an exchange already made for that attempt: if the message is on the Hub it is adopted, if the
-send is still unconfirmed it is waited on for up to two minutes, and only then is it handed
-back to the Master. A send interrupted by a restart is found again under the same request id
-and is never made twice.
+A message is sent to its destination once. One route is advanced by one caller at a time, and
+before a message is sent the gateway looks for an exchange already made for that attempt. What
+it finds decides what happens:
+
+| What is found | What happens |
+|---|---|
+| No exchange, and the send is refused before the Hub is called | Nothing was sent. The route goes back to the Master to route again. |
+| An exchange with the Hub's message id | The message is on the Hub. It is recorded and the route is `routed`. |
+| The Hub answered with a message id, but the exchange row could not be updated | The Hub's own answer is used. The route is `routed`; this is not a failure. |
+| An exchange proven undelivered (`undeliverable`, `recipient_retired`) | The route goes back to the Master. |
+| Anything else: still pending, or the outcome unknown | The route stays where it is. After two minutes it is marked `send-unconfirmed`, the operator gets one notice saying so, and the Master is told. |
+
+**An unconfirmed send is never sent again**, by a later pass, after a restart, or by the Master
+routing it: the request id of an attempt changes only when the attempt is recorded as sent or
+proven undelivered, so the existing exchange is always found first. The Master can answer an
+unconfirmed route in its own words or close it. Only a proven failure reopens routing.
 
 ### Addresses
 
@@ -113,9 +124,10 @@ default does not redirect a message that is still waiting.
 
 ### When something does not arrive
 
-- **The target has no live session, or the send fails:** the route goes back to the Master to
-  route again, and the operator gets one failure notice.
-- **The exchange later fails** (undeliverable, recipient retired, send unknown): the same.
+- **The target has no live session, or the send is refused before it leaves:** the route goes
+  back to the Master to route again, and the operator gets one failure notice.
+- **The exchange later fails** (undeliverable, recipient retired): the same.
+- **Nobody knows whether it arrived:** see "Sending exactly once". It is not sent again.
 - **The Master is not running:** the gateway starts it, at most once per backoff window (15
   seconds, doubling to 10 minutes). If it cannot, the route is queued. Nothing falls back to
   the Architect.
@@ -231,7 +243,7 @@ Every write:
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
 | `409 REQUEST_ID_REUSED` | The request id was already used for a different route. |
 | `409 NOT_AWAITING_MASTER` | `route` on a route that is not waiting for the Master. |
-| `409 NOT_ANSWERABLE` | `answer` on a route that is not waiting for one: it is still being resolved or sent, already has an answer, or is closed. |
+| `409 NOT_ANSWERABLE` | `answer` on a route that is not waiting for one: it is still being resolved or sent, already has an answer, or is closed. A route marked `send-unconfirmed` can be answered. |
 | `409 NO_REPLY_HELD` | `release` on a route with no held reply. |
 | `409 REPLY_NOT_DISPLAY_SAFE` | The held reply contains control or text-direction characters. Answer in your own words instead. |
 | `400 UNKNOWN_DESTINATION` | The destination is not `master`, a project id or an exact project name. |

@@ -19,6 +19,7 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const gateway = require('../lib/bridge-gateway');
+const exchanges = require('../lib/medusa-exchanges');
 const { install, GATEWAY_WS, MASTER_WS } = require('./_bridge-hub');
 
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
@@ -28,6 +29,7 @@ let clock;
 let hub;
 let masterState;
 let realDeps;
+let realExchangeNow;
 
 /**
  * A project with a live, launch-bound session and a workspace.
@@ -90,6 +92,9 @@ describe('bridge gateway (#2031)', () => {
       now: () => clock,
       id: (prefix) => `${prefix}_${++n}`
     });
+    // One clock for the gateway and for the exchange rows it reads the age of.
+    realExchangeNow = exchanges._internal.now;
+    exchanges._internal.now = () => new Date(clock);
     gateway._reset();
     bridgeStore.settings.set('enabled', 'true');
     bridgeStore.settings.set('allow.author', ALLOWED.authorId);
@@ -99,6 +104,7 @@ describe('bridge gateway (#2031)', () => {
 
   afterEach(() => {
     Object.assign(gateway._deps, realDeps);
+    exchanges._internal.now = realExchangeNow;
     hub.restore();
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -380,6 +386,40 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(bridgeStore.routes.body(waiting.routeId, 'reply').text, 'answer to the new one');
     });
 
+    it('drops a second reply once one is held, an empty reply, and a row naming another project', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      const r = await operatorSays('m1', '@alpha status?');
+      const asked = hub.fromGateway()[0].hubId;
+
+      // The Hub delivers a reply whose text is blank.
+      const blank = await hub.sessionSends(alpha, { inReplyTo: asked, text: 'placeholder', deliver: false });
+      hub.inbox.push({ id: blank.body.id, from: alpha.workspaceId, message: '   ' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+
+      // A row the Medusa layer would never write: the right session, another project's id.
+      const bridgeExchange = bridgeStore.proofs.byHubId(asked).exchangeId;
+      const row = {
+        exchange_id: 'mx_forged_project', request_id: 'req-forged-project', hub_id: 'forged-project', origin: 'send', tracking: 'untracked',
+        sender_project_id: beta.project.id, sender_session_id: String(alpha.sessionId), sender_workspace_id: alpha.workspaceId,
+        sender_verified: 1, sender_proof: 'launch', recipient_workspace_id: GATEWAY_WS, priority: 'normal', reply_required: 0,
+        in_reply_to: bridgeExchange, created_at: clock, state: 'untracked', updated_at: clock
+      };
+      const columns = Object.keys(row);
+      store.getDb().prepare(`INSERT INTO medusa_exchanges (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+        .run(...columns.map((c) => row[c]));
+      hub.inbox.push({ id: 'forged-project', from: alpha.workspaceId, message: 'forged' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+
+      await hub.sessionSends(alpha, { inReplyTo: asked, text: 'the real answer' });
+      assert.equal(gateway.drainInbox().held, 1);
+      await hub.sessionSends(alpha, { inReplyTo: asked, text: 'and another' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+
+      assert.deepEqual(dropReasons(), ['empty-reply', 'sender-is-another-project', 'route-not-awaiting-a-reply']);
+      assert.equal(bridgeStore.routes.body(r.body.routeId, 'reply').text, 'the real answer');
+    });
+
     it('waits for a reply whose sender row has not been written yet, then gives up in bounded time', async () => {
       const alpha = liveProject('Alpha');
       await operatorSays('m1', '@alpha status?');
@@ -450,17 +490,120 @@ describe('bridge gateway (#2031)', () => {
       assert.ok(alpha.sessionId);
     });
 
-    it('a send the Hub never confirmed is waited on, then handed back, and never duplicated', async () => {
+    it('a send whose outcome is unknown is never sent again, by a pass, a restart or the Master', async () => {
       liveProject('Alpha');
       hub.failSend = 'unknown';
       const r = await operatorSays('m1', '@alpha hello');
-      assert.equal(hub.fromGateway().length, 0);
-      const route = bridgeStore.routes.get(r.body.routeId);
-      assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'send-send-unknown']);
+      const routeId = r.body.routeId;
       hub.failSend = null;
+      let route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode, route.destination.kind], ['accepted', 'send-unconfirmed', 'project'],
+        'it keeps its destination and its place: unknown is not failed');
+
+      gateway._reset();
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(hub.fromGateway().length, 0, 'no pass and no restart sends it');
+      route = bridgeStore.routes.get(routeId);
+      assert.equal(route.state, 'accepted');
+      assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed').length, 1, 'marked once');
+      assert.deepEqual(gateway.outboundForHelper().map((i) => i.kind).sort(), ['failure', 'status']);
+      assert.match(hub.system[0].message, new RegExp(`route ${routeId} is waiting for you`), 'the Master is told');
+
+      // The Master cannot route it again: only a proven failure reopens routing.
+      const reroute = bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-0002', routeId, expectedVersion: route.version, actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: (current) => (current.state !== 'awaiting-master' ? { refuse: 'not-awaiting-master' } : { set: {} })
+      });
+      assert.equal(reroute.outcome, 'not-awaiting-master');
+    });
+
+    it('waits on a send still in flight, then marks it unconfirmed after two minutes, and never sends a second', async () => {
+      const alpha = liveProject('Alpha');
+      bridgeStore.routes.accept({ routeId: 'rt_flight', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      // The Hub holds the request open: the exchange exists, pending, with no id yet.
+      const medusa = require('../lib/medusa');
+      const realSend = medusa.sendMessage;
+      let release;
+      medusa.sendMessage = async (args) => {
+        args.beforeHub({ from: 'operator-bridge-ws' });
+        await new Promise((resolve) => { release = resolve; });
+        throw Object.assign(new Error('the server stopped waiting'), { httpStatus: 502, code: 'BRIDGE_UNREACHABLE' });
+      };
+      const first = gateway.advance('rt_flight');
+      await new Promise((resolve) => setImmediate(resolve));
+      medusa.sendMessage = realSend;
+
+      // A restart loses the in-memory lock; the pending exchange is what stops a second send.
+      gateway._reset();
+      later(gateway.SEND_PENDING_MS - 1000);
       await gateway.tick();
-      assert.equal(hub.fromGateway().length, 0, 'it waits for Master to route it again');
-      assert.deepEqual(gateway.outboundForHelper().map((i) => i.kind), ['failure']);
+      assert.deepEqual([bridgeStore.routes.get('rt_flight').state, bridgeStore.routes.get('rt_flight').failureCode], ['accepted', null]);
+      assert.equal(hub.fromGateway().length, 0, 'still inside the wait: nothing is sent and nothing is declared');
+
+      later(2000);
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get('rt_flight').failureCode, 'send-unconfirmed');
+      for (let i = 0; i < 3; i++) { later(60 * 60 * 1000); await gateway.tick(); }
+      assert.equal(hub.fromGateway().length, 0, 'expiry raises a notice; it does not authorise another send');
+      release();
+      await first;
+      assert.equal(hub.fromGateway().length, 0);
+      assert.ok(alpha.sessionId);
+    });
+
+    it('when the Hub takes the message and the exchange row cannot be updated, the Hub\'s answer is adopted: one send, one delivery', async () => {
+      const alpha = liveProject('Alpha');
+      const realBind = exchanges.bindHubId;
+      exchanges.bindHubId = () => { throw new Error('database is locked'); };
+      let r;
+      try {
+        r = await operatorSays('m1', '@alpha hello');
+      } finally {
+        exchanges.bindHubId = realBind;
+      }
+      const routeId = r.body.routeId;
+      const sent = hub.fromGateway();
+      assert.equal(sent.length, 1);
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode], ['routed', null], 'not a failure: the message is on the Hub');
+      const proof = bridgeStore.proofs.latestToTarget(routeId);
+      assert.equal(proof.hubId, sent[0].hubId, 'the Hub id comes from the Hub\'s own answer');
+      assert.equal(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`).hub_id, null, 'the exchange row never learned it');
+      assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'dispatch').detail.hubIdFrom, 'hub-answer');
+
+      gateway._reset();
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(hub.fromGateway().length, 1, 'one Hub send, however many passes and restarts follow');
+      assert.equal(hub.fromGateway().filter((m) => m.to === alpha.workspaceId).length, 1, 'and one delivery to the target');
+      assert.ok(!gateway.outboundForHelper().some((i) => i.kind === 'failure'), 'the operator is not told it failed');
+    });
+
+    it('when the row cannot be updated and the server stops before recording it, the send stays unconfirmed and is not repeated', async () => {
+      liveProject('Alpha');
+      const realBind = exchanges.bindHubId;
+      exchanges.bindHubId = () => { throw new Error('database is locked'); };
+      bridgeStore.routes.accept({ routeId: 'rt_crash', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      // The server stops between the Hub's answer and the gateway's record of it.
+      const realStep = bridgeStore.applyRouteWrite;
+      bridgeStore.applyRouteWrite = (write) => {
+        if (write.op === 'dispatch') throw new Error('the server stopped here');
+        return realStep(write);
+      };
+      try {
+        await gateway.advance('rt_crash').catch(() => {});
+      } finally {
+        exchanges.bindHubId = realBind;
+        bridgeStore.applyRouteWrite = realStep;
+      }
+      assert.equal(hub.fromGateway().length, 1, 'the message did reach the Hub');
+      assert.equal(bridgeStore.routes.get('rt_crash').state, 'accepted');
+
+      gateway._reset();
+      for (let i = 0; i < 4; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(hub.fromGateway().length, 1, 'no second send after the restart');
+      assert.equal(bridgeStore.routes.get('rt_crash').failureCode, 'send-unconfirmed');
+      assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM medusa_exchanges WHERE request_id LIKE 'bridge:rt_crash:%'").get().n, 1,
+        'one request id for the attempt, for good');
     });
   });
 
@@ -592,6 +735,27 @@ describe('bridge gateway (#2031)', () => {
       masterState.listening = true;
       await gateway.tick();
       assert.match(hub.system[0].message, /has a reply held for your release/);
+    });
+
+    it('says once per route state that the Master has no listener, not on every pass', async () => {
+      masterState.listening = false;
+      const logger = require('../lib/logger');
+      const lines = [];
+      const realWrite = process.stderr.write.bind(process.stderr);
+      const realOut = process.stdout.write.bind(process.stdout);
+      const capture = (chunk) => { lines.push(String(chunk)); return true; };
+      logger.setLevel('warn');
+      process.stderr.write = capture;
+      process.stdout.write = capture;
+      try {
+        await operatorSays('m1', 'for the Master');
+        for (let i = 0; i < 4; i++) await gateway.tick();
+      } finally {
+        process.stderr.write = realWrite;
+        process.stdout.write = realOut;
+        logger.setLevel('error');
+      }
+      assert.equal(lines.filter((l) => l.includes('it has no Medusa listener')).length, 1);
     });
 
     it('one route that fails does not hold up the others', async () => {
