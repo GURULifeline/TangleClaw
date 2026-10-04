@@ -28,7 +28,7 @@ const { startFakeDiscord, fakeWebSocket } = require('./_fake-discord');
 const { createBridgeClient, BridgeError } = require('../lib/bridge-helper/bridge-client');
 const { createDiscordRest } = require('../lib/bridge-helper/discord-rest');
 const { createInbound, REFUSAL_TEXT } = require('../lib/bridge-helper/inbound');
-const { createOutbound, settleHeld, classifyAttempt, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
+const { createOutbound, settleHeld, classifyAttempt, split, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
 const { openState, nonceFor } = require('../lib/bridge-helper/state');
 const { main, EXIT } = require('../lib/bridge-helper/cli');
 const { paths, writeConfig } = require('../lib/bridge-helper/config');
@@ -982,6 +982,25 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
       assert.equal(discord.posts[0].replyTo, messageId);
       assert.equal(bridgeStore.outbound.get(outboundId).attempts, 2, 'handed over twice');
+    });
+
+    it('an attempt in doubt is forgotten once the bridge has that part: it does not hold up the parts after it', async () => {
+      const long = Array.from({ length: 150 }, (_, i) => `line ${i} ${'y'.repeat(40)}`).join('\n');
+      const { outboundId } = await answered(long);
+      // The first part lands, its answer is lost, and the helper stops with the attempt in doubt.
+      discord.script.push({ status: 502, lands: true });
+      const relay = outbound();
+      assert.equal((await relay.pass()).ok, false);
+      const since = relay.state.get(outboundId).since;
+      assert.ok(since);
+      // Meanwhile the part is recorded at the bridge (an operator settled it, or another holder reported it).
+      bridgeStore.parts.insert(outboundId, 0, split(`**Project Master**\n${long}`).length, discord.posts[0].id, new Date(clock).toISOString());
+
+      // Long after the nonce window, the item comes round again. The old mark is not about the next part.
+      clock += NONCE_WINDOW_MS + bridgeStore.LEASE_MS + 1000;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 }, 'not held as uncertain on a mark that was already settled');
+      assert.equal(discord.posts.map((p) => p.content).join(''), `**Project Master**\n${long}`, 'every part once');
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
     });
 
     it('a part the helper posted and could not report is reported before anything more is posted', async () => {

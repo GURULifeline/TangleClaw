@@ -773,6 +773,13 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
         const after = await asOperator('GET', '/api/bridge/operator/status');
         assert.deepEqual(after.body.masterListener, { enabled: true, state: 'listening' });
+        // Counts and the oldest arrival, without a word of anything anyone wrote.
+        const waiting = await operatorSays(`m${++seq}`, 'a message whose text status never shows');
+        const now = await asOperator('GET', '/api/bridge/operator/status');
+        assert.equal(Object.values(now.body.openRoutesByState).reduce((a, b) => a + b, 0), now.body.openRoutes);
+        assert.ok(now.body.openRoutesByState[bridgeStore.routes.get(waiting.body.routeId).state] >= 1);
+        assert.match(now.body.oldestOpenRouteAt, /^20\d\d-\d\d-\d\dT/);
+        assert.ok(!JSON.stringify(now.body).includes('status never shows'));
         assert.equal(Number.isInteger(after.body.routesMasterNotTold), true);
       } finally {
         gateway._deps.master = () => master;

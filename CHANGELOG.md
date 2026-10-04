@@ -27,6 +27,8 @@ All notable changes to TangleClaw are documented in this file.
   - **`tc-bridge-helper preflight`** checks the config, both Keychain items, the record's permissions, the lock, the helper token, the allowlist, the circuit, the bot token and the channel, without posting or claiming. What it cannot prove without posting it reports as unproven.
   - **Rate limits** on the helper's routes and on a session's candidate submissions.
   - The helper reads the Discord bot token from the Keychain item the install already has.
+  - The operator's status shows how many routes are open in each state and when the oldest arrived, without their text. A route is still closed only by the Master.
+  - Runbooks for switching the bridge on and for rolling it back: `docs/runbooks/activate-the-operator-bridge.md`, `docs/runbooks/roll-back-the-operator-bridge.md`. Two of their steps are marked unverified until someone other than their author runs them.
   - **Telling sessions of `tc candidate` is an operator switch,** off by default and available only while the bridge is enabled. It reaches each session at its next launch.
 
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
