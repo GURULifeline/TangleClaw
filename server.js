@@ -12202,6 +12202,9 @@ if (require.main === module) {
     // a TangleClaw restart would otherwise drop off the switchboard until its
     // next ensure. Probes tmux and starts nothing when tmux does not answer.
     master.resyncMasterMedusa();
+    // The Master's bridge credential (ADR 0023): a handoff the restart
+    // interrupted is revoked, and so is a credential whose Master is gone.
+    master.reconcileBridgeCredential();
     // Resolve the operator's login PATH once, here, so no request ever pays for
     // it. launchd hands this service `/usr/bin:/bin:/usr/sbin:/sbin`, which
     // contains none of the places an engine CLI actually installs (#346) — and

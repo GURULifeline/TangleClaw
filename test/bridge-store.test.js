@@ -80,14 +80,16 @@ describe('bridge store (#2031)', () => {
   it('keeps one live Master generation and revokes the one before it', () => {
     const g1 = bridgeStore.masterCredentials.mint('b'.repeat(64));
     assert.equal(bridgeStore.masterCredentials.findActive('b'.repeat(64)), null, 'pending is not active');
-    assert.equal(bridgeStore.masterCredentials.activate(g1), true);
+    assert.equal(bridgeStore.masterCredentials.activate(g1, 'b'.repeat(64)), true);
     assert.equal(bridgeStore.masterCredentials.findActive('b'.repeat(64)).generation, g1);
 
     const g2 = bridgeStore.masterCredentials.mint('c'.repeat(64));
     assert.equal(g2, g1 + 1);
     assert.equal(bridgeStore.masterCredentials.findActive('b'.repeat(64)), null, 'the earlier generation is revoked');
-    assert.equal(bridgeStore.masterCredentials.activate(g1), false, 'a revoked generation cannot be activated');
-    assert.equal(bridgeStore.masterCredentials.activate(g2), true);
+    assert.equal(bridgeStore.masterCredentials.activate(g1, 'b'.repeat(64)), false, 'a revoked generation cannot be activated');
+    assert.equal(bridgeStore.masterCredentials.activate(g2, 'c'.repeat(64)), true);
+    assert.equal(bridgeStore.masterCredentials.revoke('handoff-failed', { generation: g2, credentialHash: 'e'.repeat(64) }), 0,
+      'a late handoff naming another credential cannot revoke this one');
 
     assert.equal(bridgeStore.masterCredentials.revoke('master-killed'), 1);
     assert.equal(bridgeStore.masterCredentials.findActive('c'.repeat(64)), null);
