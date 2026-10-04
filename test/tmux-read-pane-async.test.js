@@ -190,4 +190,10 @@ describe('probeSessionAsync — the three answers', () => {
     mode('hang');
     assert.deepEqual(await tmux.probeSessionAsync('proj', 300), { live: false, answered: false, cause: 'read-timed-out' });
   });
+
+  it('says not answered when tmux cannot be run at all, never that the session is absent', async () => {
+    tmux._async.bin = path.join(dir, 'no-such-program');
+    assert.deepEqual(await tmux.probeSessionAsync('proj', 2000), { live: false, answered: false, cause: 'probe-failed' });
+    await assert.rejects(tmux.readPaneAsync('proj'), (err) => err.tcTimedOut === true && /no answer/.test(err.message));
+  });
 });

@@ -180,8 +180,11 @@ same time, and returns. Each answer is judged when it arrives:
 - **One read per session at a time**, and none is acted on after the monitor
   stops.
 - **A tick that got no look at a pane is not an observation of it.** A
-  timeout, a failed read and a backoff each end the idle streak, and a nudge
-  needs two fresh at-rest observations.
+  timeout, a failed read, a backoff and an answer that took 3 seconds or more
+  each end the idle streak, and a nudge needs two fresh at-rest observations
+  at least 4 seconds apart.
+- **Judging an answer asks tmux nothing**, so a wedged tmux server cannot hold
+  the server through it.
 
 None of this types anything a tick would not have typed. The measurements are
 in [medusa-wake-measurements.md](medusa-wake-measurements.md).

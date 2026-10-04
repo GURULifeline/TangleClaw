@@ -142,7 +142,10 @@ A read's answer arrives after the tick that asked for it, so nothing that tick d
   read standing in for the pane capture. A wrap or rotation that began, mail already read, a
   listener that dropped, a withdrawn opt-in or a wake recorded meanwhile refuses the nudge.
 - **The read is dropped** when the monitor was stopped since, when the session is no longer live,
-  when its id now names another pane, or when its workspace changed.
+  when its id now names another project, pane or start time, or when its workspace changed.
+- **Judging an answer asks tmux nothing.** A project session is re-read from the store. The Master
+  has no store row, and its record is rebuilt without probing its pane again: the read that just
+  answered probed that exact pane itself, without blocking.
 - **Assessment and injection happen in the same turn** as the answer, so the pane is as fresh
   when it is typed into as it was on the blocking path.
 - **One read per session at a time.** A tick that finds a read still in flight starts no second
@@ -150,7 +153,14 @@ A read's answer arrives after the tick that asked for it, so nothing that tick d
 - **A tick that got no look at a pane is not an observation of it.** A timeout, a failed read, a
   read still in flight and a backoff each end the idle streak, and a nudge then needs two fresh
   at-rest observations on consecutive ticks.
+- **A slow answer is not an observation either.** A read that took 3 s or more is seconds old
+  when it arrives. Nothing is assessed from it, the streak ends, and the pane is backed off.
+- **Two observations must be 4 s apart.** An answer late in one tick and early in the next can be
+  a second or two apart, and a pane that only paused is not at rest.
 - **A read is bounded.** tmux is run without a shell, and a read that outlives 4 s is killed.
+
+What still blocks, as it did before: a tick probes the Master's pane once with one tmux command,
+and typing a nudge is synchronous.
 
 ## What the first measurement got wrong
 

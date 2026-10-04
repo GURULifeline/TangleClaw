@@ -63,8 +63,15 @@ const DEFAULT_COSTS = Object.freeze({
   // on the development host each took about a second, so every read already
   // in flight adds a share of that.
   asyncRead: 74,
-  asyncContention: 35
+  asyncContention: 35,
+  // `masterWakeRecord` probes the Master's pane with one blocking tmux command.
+  masterProbe: 18.5,
+  // The live-session roster is one indexed store read.
+  listLiveAll: 0.3
 });
+
+/** The synthetic Project Master's session id and workspace. */
+const MASTER_ID = 'syn-master';
 
 /** How long the monitor waits for one non-blocking pane read. */
 const READ_TIMEOUT_MS = wake.PANE_READ_TIMEOUT_MS;
@@ -96,6 +103,7 @@ function makeSession(id, state, opts = {}) {
       projectId: id,
       sessionMode: 'tmux',
       tmuxSession: `syn-${id}`,
+      startedAt: '2026-10-04 00:00:00',
       engineId: state === 'unprofiled' ? 'no-such-engine' : engine,
       ...(state === 'ended' ? { status: 'ended' } : {})
     },
@@ -110,6 +118,29 @@ function makeSession(id, state, opts = {}) {
     pane: state === 'busy' ? panes.busy : state === 'draft' ? panes.draft : panes.idle,
     slowReadsLeft: state === 'slow' ? (opts.slowReads ?? Infinity) : 0
   };
+}
+
+/**
+ * The Project Master as the monitor scans it: no project and no store row, an
+ * opt-in carried on its record, and its own injector.
+ * @param {object} [opts]
+ * @param {string} [opts.state='idle-mail'] - As `makeSession`
+ * @returns {object} An entry to pass as `install`'s `master`
+ */
+function makeMaster(opts = {}) {
+  const entry = makeSession(MASTER_ID, opts.state || 'idle-mail');
+  entry.record = {
+    id: MASTER_ID,
+    isMaster: true,
+    name: 'Project Master',
+    tmuxSession: 'syn-master-pane',
+    engineId: 'claude',
+    sessionMode: 'tmux',
+    status: 'active',
+    medusaWake: true,
+    apiBase: '/api/master/medusa'
+  };
+  return entry;
 }
 
 /**
@@ -143,6 +174,9 @@ function buildFleet(opts) {
  * @param {() => number} [opts.clock] - Replaces the meter's clock, to show the meter cannot change a tick
  * @param {boolean} [opts.durableUnreadable=false] - The durable attempt record throws when read
  * @param {number} [opts.realScale] - When set, each cost also blocks the thread for `cost / realScale` real ms
+ * @param {object} [opts.master] - A `makeMaster` entry: the Project Master joins the scan
+ * @param {boolean} [opts.forbidBlockingOnAnswer=false] - A blocking tmux seam throws when
+ *   reached while an answer is being judged
  * @returns {object} The world: its clock, what was injected and recorded, and `restore()`
  */
 function install(fleet, opts = {}) {
@@ -152,9 +186,10 @@ function install(fleet, opts = {}) {
   // Looked up live, newest first, so a replacement session that joins the
   // fleet later is the one its project's name and pane resolve to.
   const find = (pred) => world.fleet.slice().reverse().find((x) => !x.gone && pred(x)) || world.fleet.find(pred);
-  const byId = { get: (id) => world.fleet.find((x) => x.record.id === id) };
+  const everyone = () => (world.master ? world.fleet.concat([world.master]) : world.fleet);
+  const byId = { get: (id) => everyone().find((x) => x.record.id === id) };
   const byProject = { get: (name) => find((x) => x.project.name === name) };
-  const byTmux = { get: (name) => find((x) => x.record.tmuxSession === name) };
+  const byTmux = { get: (name) => (world.master && world.master.record.tmuxSession === name ? world.master : find((x) => x.record.tmuxSession === name)) };
   const world = {
     clockMs: 0,
     fleet,
@@ -165,6 +200,11 @@ function install(fleet, opts = {}) {
     scans: [],
     paneReads: [],
     pending: [],
+    // Every blocking tmux call, with whether it came from a tick or from the
+    // judging of a pane read's answer.
+    blockingTmux: [],
+    phase: 'tick',
+    master: opts.master || null,
     restore: () => { wake.stop(); Object.assign(wake._internal, saved); }
   };
   // In real mode every cost also holds the thread for a scaled-down real
@@ -172,6 +212,15 @@ function install(fleet, opts = {}) {
   // deadline rather than sleeping: a sleep overshoots by about a millisecond,
   // which is larger than most of the costs being modelled.
   let realDeadline = null;
+  // Every blocking tmux seam reports here. With `forbidBlockingOnAnswer`, one
+  // reached while a pane read's answer is being judged throws, so a test fails
+  // on the call itself and not on a count taken afterwards.
+  const blocking = (seam) => {
+    world.blockingTmux.push({ seam, phase: world.phase });
+    if (opts.forbidBlockingOnAnswer && world.phase === 'answer') {
+      throw new Error(`synthetic: blocking tmux seam ${seam} reached while judging a pane read`);
+    }
+  };
   const spend = (ms) => {
     world.clockMs += ms;
     if (!opts.realScale) return;
@@ -183,8 +232,18 @@ function install(fleet, opts = {}) {
 
   s.clock = opts.clock || (() => world.clockMs);
   s.now = () => 1_700_000_000_000 + Math.round(world.clockMs);
-  s.listLiveAll = () => world.fleet.filter((x) => !x.gone).map((x) => x.record);
-  s.masterWakeRecord = () => null;
+  s.listLiveAll = () => { spend(costs.listLiveAll); return world.fleet.filter((x) => !x.gone).map((x) => x.record); };
+  // The real one probes the Master's pane with a blocking tmux command unless
+  // it is handed a stand-in for the tmux module.
+  s.masterWakeRecord = (options) => {
+    if (!(options && options.tmuxLib)) {
+      blocking('masterWakeRecord');
+      spend(costs.masterProbe);
+    }
+    const m = world.master;
+    return m && !m.gone ? { ...m.record } : null;
+  };
+  s.masterKey = () => MASTER_ID;
   s.getProject = (projectId) => { spend(costs.getProject); return find((x) => x.project.id === projectId).project; };
   s.wrapRunning = () => { spend(costs.wrapRunning); return false; };
   s.rotationOpen = () => { spend(costs.rotationOpen); return false; };
@@ -200,6 +259,7 @@ function install(fleet, opts = {}) {
   s.getMessages = (sessionId) => { spend(costs.getMessages); return byId.get(sessionId).inbox; };
   s.capturePane = (tmuxName) => {
     const x = byTmux.get(tmuxName);
+    blocking('capturePane');
     world.paneReads.push({ sessionId: x.record.id, at: world.clockMs });
     if (x.slowReadsLeft > 0) {
       x.slowReadsLeft -= 1;
@@ -218,7 +278,7 @@ function install(fleet, opts = {}) {
     world.scans.push({ sessionId: x.record.id, at: world.clockMs });
     return { lines: x.pane };
   };
-  s.cursorInfo = () => { spend(costs.cursorInfo); return null; };
+  s.cursorInfo = () => { blocking('cursorInfo'); spend(costs.cursorInfo); return null; };
   // The non-blocking read. It answers later on the virtual clock, when
   // `advance` reaches its time, with the pane as it is THEN.
   s.readPaneAsync = (tmuxName) => {
@@ -237,7 +297,9 @@ function install(fleet, opts = {}) {
       } else {
         const slowAnswer = x.slowAnswersLeft > 0;
         if (slowAnswer) x.slowAnswersLeft -= 1;
-        entry.at = world.clockMs + (slowAnswer ? slowMs : costs.asyncRead + costs.asyncContention * world.pending.length);
+        // `readDelays` scripts how long successive reads of this pane take.
+        const scripted = x.readDelays && x.readDelays.length ? x.readDelays.shift() : null;
+        entry.at = world.clockMs + (slowAnswer ? slowMs : scripted ?? costs.asyncRead + costs.asyncContention * world.pending.length);
         entry.settle = () => resolve({ cap: { lines: x.pane, alternateScreen: false }, cursor: null });
       }
       world.pending.push(entry);
@@ -248,7 +310,12 @@ function install(fleet, opts = {}) {
     world.injected.push({ sessionId: byProject.get(projectName).record.id, at: world.clockMs, command, options });
     return { ok: true, error: null };
   };
-  s.injectMaster = () => ({ ok: false, error: 'no master in a synthetic fleet' });
+  s.injectMaster = (command) => {
+    if (!world.master) return { ok: false, error: 'no master in a synthetic fleet' };
+    spend(costs.injectCommand);
+    world.injected.push({ sessionId: MASTER_ID, at: world.clockMs, command });
+    return { ok: true, error: null };
+  };
   s.recordDelivery = (entry) => { world.recorded.push({ ...entry, at: world.clockMs }); };
   s.recordWakeFacts = (workspaceId, fact, o) => {
     spend(costs.durable);
@@ -314,8 +381,10 @@ async function advance(world, toMs) {
     if (!next || next.at > toMs) break;
     world.pending.shift();
     if (world.clockMs < next.at) world.clockMs = next.at;
+    world.phase = 'answer';
     next.settle();
     await flush();
+    world.phase = 'tick';
   }
   if (world.clockMs < toMs) world.clockMs = toMs;
 }
@@ -508,7 +577,7 @@ const SIZES = Object.freeze([1, 2, 5, 10, 20, 30]);
 
 module.exports = {
   SIZES, INTERVAL_MS, DEFAULT_COSTS, P95_COSTS, FILLER_STATES,
-  READ_TIMEOUT_MS,
-  makeSession, buildFleet, install, runTicks, runCell, runRestart, runDeparture,
+  READ_TIMEOUT_MS, MASTER_ID,
+  makeSession, makeMaster, buildFleet, install, runTicks, runCell, runRestart, runDeparture,
   advance, flush, runTicksAsync, runCellAsync
 };

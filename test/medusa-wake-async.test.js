@@ -19,6 +19,7 @@
  */
 
 const { describe, it, after } = require('node:test');
+const { performance } = require('node:perf_hooks');
 const assert = require('node:assert/strict');
 const { setLevel } = require('../lib/logger');
 const { useThrowawayStore } = require('./_engine-store');
@@ -213,6 +214,16 @@ describe('async pane reads — an answer is judged against the session as it is 
     assert.equal(r.nudges, 0);
   });
 
+  it('a session row restarted during the read is not typed into', async () => {
+    const r = await changeDuringRead((world, s) => { s.record = { ...s.record, startedAt: '2026-10-04 09:09:09' }; });
+    assert.equal(r.nudges, 0);
+  });
+
+  it('a session id that now belongs to another project is not typed into', async () => {
+    const r = await changeDuringRead((world, s) => { s.record = { ...s.record, projectId: 999 }; });
+    assert.equal(r.nudges, 0);
+  });
+
   it('a workspace that changed during the read discards it, and the next nudge needs two fresh observations', async () => {
     const session = matrix.makeSession(1, 'idle-mail');
     await withFleet([session], {}, async (world) => {
@@ -280,6 +291,25 @@ describe('async pane reads — a tick that got no look at a pane is not an obser
       while (ticks < 12 && world.injected.length === 0) { await tickAndSettle(world); ticks += 1; }
       assert.equal(world.injected.length, 1);
       assert.equal(world.paneReads.filter((r) => r.at < world.injected[0].at).length, 1 + wake.IDLE_TICKS_REQUIRED);
+    });
+  });
+
+  it('a slow answer as the second observation types nothing: its capture is seconds old', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    // The second read answers after the slow line and before the timeout, with the pane at rest.
+    session.readDelays = [100, wake.SLOW_PANE_READ_MS + 200];
+    assert.ok(wake.SLOW_PANE_READ_MS + 200 < matrix.READ_TIMEOUT_MS);
+    await withFleet([session], {}, async (world) => {
+      await tickAndSettle(world);
+      await tickAndSettle(world);
+      assert.equal(world.injected.length, 0, 'the at-rest pane was not typed into from a slow capture');
+      assert.equal(wake.peerReachability(session.status.workspaceId).reason, 'pane-read-backoff');
+      let ticks = 0;
+      while (ticks < 10 && world.injected.length === 0) { await tickAndSettle(world); ticks += 1; }
+      assert.equal(world.injected.length, 1);
+      const before = world.paneReads.filter((r) => r.at < world.injected[0].at);
+      assert.equal(before.length, 4, 'at rest, the slow answer, then two fresh ones');
+      assert.equal(before[3].at - before[2].at, matrix.INTERVAL_MS);
     });
   });
 
@@ -358,6 +388,164 @@ describe('async pane reads — stopping and restarting (#2086)', () => {
       assert.equal(nudged(world, 1), 0);
       assert.equal(wake.peerReachability(a.status.workspaceId).reason, 'pane-capture-failed');
     });
+  });
+});
+
+describe('async pane reads — judging an answer never blocks on tmux (#2086)', () => {
+  it('no blocking tmux call is made while answers are judged, with the Master in the scan', async () => {
+    const fleet = matrix.buildFleet({ size: 30, fillers: ['busy', 'draft'] });
+    // Every blocking tmux seam throws if it is reached while an answer is judged.
+    await withFleet(fleet, { master: matrix.makeMaster(), forbidBlockingOnAnswer: true }, async (world) => {
+      for (let i = 0; i < 3; i++) await tickAndSettle(world);
+      const onAnswer = world.blockingTmux.filter((c) => c.phase === 'answer');
+      assert.deepEqual(onAnswer, [], 'a blocking tmux call was made on the answer path');
+      // And the answers were judged to the end: both recipients at rest were nudged, once.
+      assert.equal(nudged(world, fleet[29].record.id), 1);
+      assert.equal(nudged(world, matrix.MASTER_ID), 1);
+      assert.equal(world.injected.length, 2);
+      // What a tick still does: one probe of the Master's pane, as before.
+      assert.deepEqual(world.blockingTmux, new Array(3).fill({ seam: 'masterWakeRecord', phase: 'tick' }));
+      assert.equal(world.paneReads.length >= 31, true, 'the Master and every session holding mail were read');
+    });
+  });
+
+  it('the Master is nudged through its own injector on its second observation, once', async () => {
+    await withFleet([matrix.makeSession(1, 'busy')], { master: matrix.makeMaster(), forbidBlockingOnAnswer: true }, async (world) => {
+      await tickAndSettle(world);
+      assert.equal(nudged(world, matrix.MASTER_ID), 0);
+      await tickAndSettle(world);
+      assert.equal(nudged(world, matrix.MASTER_ID), 1);
+      for (let i = 0; i < 4; i++) await tickAndSettle(world);
+      assert.equal(nudged(world, matrix.MASTER_ID), 1);
+      assert.equal(world.injected.length, 1, 'and nothing was typed into the busy project session');
+    });
+  });
+
+  it('the Master\'s opt-in withdrawn during its read refuses the nudge', async () => {
+    const master = matrix.makeMaster();
+    await withFleet([], { master }, async (world) => {
+      await tickAndSettle(world);
+      await matrix.runTicksAsync(world, 1);
+      master.record = { ...master.record, medusaWake: false };
+      await matrix.advance(world, world.clockMs + matrix.READ_TIMEOUT_MS);
+      assert.equal(world.injected.length, 0);
+      assert.equal(wake.peerReachability(master.status.workspaceId).reason, 'wake-not-opted-in');
+    });
+  });
+
+  it('a Master whose read fails is recorded as unreadable and never typed into, without a probe', async () => {
+    const master = matrix.makeMaster();
+    await withFleet([], { master, forbidBlockingOnAnswer: true }, async (world) => {
+      await tickAndSettle(world);
+      master.slowReadsLeft = 1;
+      await tickAndSettle(world);
+      assert.equal(world.injected.length, 0);
+      assert.equal(wake.peerReachability(master.status.workspaceId).reason, 'pane-capture-failed');
+      await tickAndSettle(world);
+      assert.equal(wake.peerReachability(master.status.workspaceId).reason, 'pane-read-backoff');
+      assert.deepEqual(world.blockingTmux.filter((c) => c.phase === 'answer'), []);
+    });
+  });
+
+  it('thirty wedged reads answering together leave the event loop turning, with real child processes', async () => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const tmux = require('../lib/tmux');
+    const logger = require('../lib/logger');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-wedged-'));
+    const savedBin = tmux._async.bin;
+    const fleet = matrix.buildFleet({ size: 30, fillers: ['busy', 'draft'] });
+    try {
+      // A stand-in for a wedged tmux: it never answers.
+      fs.writeFileSync(path.join(dir, 'wedged'), '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+      tmux._async.bin = path.join(dir, 'wedged');
+      logger.setConsoleStream({ write: () => {} });
+      await withFleet(fleet, { master: matrix.makeMaster(), forbidBlockingOnAnswer: true }, async (world) => {
+        wake._internal.readPaneAsync = (name) => tmux.readPaneAsync(name, { timeout: 500 });
+        // The monitor's own clock, so a real timeout is seen as one.
+        wake._internal.clock = () => performance.now();
+        wake._internal.tick({ async: true });
+        world.phase = 'answer';
+        let turns = 0;
+        const timer = setInterval(() => { turns += 1; }, 10);
+        const settled = () => fleet.every((x) => {
+          try { return wake.peerReachability(x.status.workspaceId).reason === 'pane-capture-failed'; } catch { return false; }
+        });
+        const until = Date.now() + 20000;
+        while (!settled() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 25));
+        clearInterval(timer);
+        assert.ok(settled(), 'every wedged read was judged as an unreadable pane');
+        assert.ok(turns >= 10, `the event loop turned ${turns} times while thirty-one reads were wedged`);
+        assert.equal(world.injected.length, 0);
+        assert.deepEqual(world.blockingTmux.filter((c) => c.phase === 'answer'), []);
+      });
+    } finally {
+      logger.setConsoleStream(null);
+      tmux._async.bin = savedBin;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a Master that stopped during its read is not typed into', async () => {
+    const master = matrix.makeMaster();
+    await withFleet([], { master }, async (world) => {
+      await tickAndSettle(world);
+      await matrix.runTicksAsync(world, 1);
+      master.gone = true;
+      await matrix.advance(world, world.clockMs + matrix.READ_TIMEOUT_MS);
+      assert.equal(world.injected.length, 0);
+    });
+  });
+
+  it('a store failure while judging an answer is contained: nothing is typed and no rejection goes unhandled', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    await withFleet([session], {}, async (world) => {
+      const unhandled = [];
+      const onUnhandled = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        await matrix.runTicksAsync(world, 1);
+        // The store read the answer path makes fails.
+        wake._internal.listLiveAll = () => { throw new Error('store locked'); };
+        await matrix.advance(world, world.clockMs + matrix.READ_TIMEOUT_MS);
+        await matrix.flush();
+        assert.deepEqual(unhandled, []);
+        assert.equal(world.injected.length, 0);
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+    });
+  });
+});
+
+describe('async pane reads — two observations must be a tick apart (#2086)', () => {
+  it('an answer late in one tick and early in the next are too close together to count as two', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    // The first read answers 2.9 s into its tick, the second 0.1 s into the next: 2.2 s apart.
+    session.readDelays = [2900, 100, 100];
+    await withFleet([session], {}, async (world) => {
+      await tickAndSettle(world);
+      await tickAndSettle(world);
+      assert.equal(world.injected.length, 0, 'the pane was seen at rest twice, 2.2 s apart, and is not nudged');
+      await tickAndSettle(world);
+      assert.equal(world.injected.length, 1, 'a third observation, a full tick after the second, nudges');
+    });
+  });
+
+  it('control: two answers a tick apart nudge on the second', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    session.readDelays = [100, 100];
+    await withFleet([session], {}, async (world) => {
+      await tickAndSettle(world);
+      await tickAndSettle(world);
+      assert.equal(world.injected.length, 1);
+    });
+  });
+
+  it('the least gap is under the tick interval and well over a pause in output', () => {
+    assert.ok(wake.MIN_OBSERVATION_GAP_MS < matrix.INTERVAL_MS);
+    assert.ok(wake.MIN_OBSERVATION_GAP_MS >= 0.5 * matrix.INTERVAL_MS);
   });
 });
 
