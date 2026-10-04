@@ -6,6 +6,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Fixed
 
+- **Folding a Ports, Groups or OpenClaw row keeps keyboard focus on its toggle** (#1946). Each toggle re-rendered its whole panel, which replaced the pressed button, so focus fell back to the page and a screen reader lost its place. A toggle now flips its own `aria-expanded`, arrow and content in place; a group opened this way still loads its details. The panels' 30-second polling re-renders put focus back on the same toggle, found by a new `data-fold-key`.
 - **The setup wizard's project checkbox works for a project name with an apostrophe** (#1902). #1384 fixed the inline handlers in `ui.js`. The same broken form (`fn('${esc(v)}')`, whose apostrophe the HTML parser turns back into a quote that ends the string) was still in `setup.js`, `session.js`, `landing.js` and `history-drawer.js`. Every inline handler in `public/*.js` now takes its values through `jsArg`, and the scan test covers every page script. `session.html` does not load `landing.js`, so `session.js` carries its own `jsArg`, held identical by a test until #1605 gives the encoders one owner.
 
 ### Internal

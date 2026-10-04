@@ -35,6 +35,30 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
+
+<!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->
+
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane D), and the Architect's overnight drain directive carried it to completion. It re-lands PR #1972 on a fresh branch off main, taken after #1902 merged because both touch `public/landing.js` and `test/inline-handler-args.test.js`. The old diff applied cleanly on top of #1902, and its three toggles already pass their keys through `jsArg`. It follows up #1906/#1915.
+
+**Problem.** `togglePortGroup`, `toggleGroupItem` and `toggleOpenclawItem` flipped state and re-rendered the whole panel. `innerHTML` replaced the pressed button, so keyboard focus fell to `<body>`. The same happened every 30 s when the polling loaders (`loadPorts`, `loadGroups`, `loadOpenclawConnections`) re-rendered.
+
+**The change** (`public/ui.js`, `public/landing.js`):
+- `foldToggleInPlace(button, open)` flips `aria-expanded`, the arrow and the row's content (`.toggle-row` then its next sibling) with no re-render. Each toggle takes the pressed button (`onclick="…(key, this)"`) and falls back to the old re-render when there's no button or row. Opening a group in place still calls `loadGroupDetail`.
+- `renderKeepingFoldFocus(container, render)` wraps the three polling renders: if focus was on a toggle inside the panel, it is returned to the new toggle with the same `data-fold-key` (added to each toggle). Focus elsewhere is never moved. The restore passes `preventScroll`, which #1972 did not: without it, an operator who focused a toggle and scrolled away would be pulled back on every poll. The Critic raised this as an observation and it was fixed before the first commit.
+- The render functions themselves are unchanged apart from the new attribute and handler argument.
+
+**Tests.** `test/panel-toggle-rows.test.js` runs the shipped functions against small fakes:
+- each toggle folds in place and never re-renders;
+- each still falls back to a re-render without a button;
+- a group opened in place loads its details, and closing loads nothing;
+- the rendered toggles carry `data-fold-key` and pass `this`;
+- focus is restored after a re-render without scrolling the page, left alone when it wasn't on a toggle, and not stolen when the toggle is gone;
+- all three loaders call the wrapper;
+- each panel's real rendered HTML puts the content element immediately after the toggle row, which is the adjacency in-place folding relies on.
+
+Against current main's `ui.js` and `landing.js`, 14 of the file's tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
+
 ## 2026-10-04 — Inline handlers in every page script take their values through jsArg (#1902)
 
 <!-- prawduct: type=bugfix | scope=inline-handler-jsarg-1902 -->

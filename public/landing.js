@@ -1253,7 +1253,7 @@ async function loadPorts() {
   if (!data) return;
   state.ports = data.leases || [];
   document.getElementById('portsCount').textContent = state.ports.length;
-  renderPorts();
+  renderKeepingFoldFocus(document.getElementById('portsGrid'), renderPorts);
 }
 
 /**
@@ -1384,7 +1384,7 @@ async function loadGroups() {
   if (!data) return;
   state.groups = data.groups || [];
   document.getElementById('groupsCount').textContent = state.groups.length;
-  renderGroups();
+  renderKeepingFoldFocus(document.getElementById('groupsPanel'), renderGroups);
 }
 
 /**
@@ -1404,7 +1404,7 @@ async function loadOpenclawConnections() {
   });
   await Promise.all(statusPromises);
 
-  renderOpenclawConnections();
+  renderKeepingFoldFocus(document.getElementById('openclawPanel'), renderOpenclawConnections);
 }
 
 /**
