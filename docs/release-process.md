@@ -42,7 +42,8 @@ the tag is pushed, so a body GitHub refuses would leave a tag with no Release. T
 measures the exact UTF-8 bytes of the extracted notes first (`scripts/release-notes-gate.js`), and
 refuses red, before any tag, push or release, when they are empty or over **120,000 bytes**. That
 ceiling is conservatively below GitHub's limit and counts bytes, not characters. The notes are never
-truncated. An oversized section is fixed by shortening it in `CHANGELOG.md` and re-running.
+truncated. An oversized section is fixed by shortening it in `CHANGELOG.md`; "If a release did not
+go out" below has the steps, because the fix is a new commit and touches the released-section lock.
 
 That refusal should never be the first warning. `test/changelog-unreleased-size.test.js` fails the
 suite once `[Unreleased]` would publish more than **110,000 bytes**, measured through the same
@@ -145,7 +146,7 @@ How to recover depends on whether the failed run **pushed the tag**. Step 3 abov
 the tag is on origin or it is not.
 
 **The tag is NOT on origin** (the run stopped before tagging: a red `test` job, a missing
-`CHANGELOG.md` section, a network error):
+`CHANGELOG.md` section, release notes refused as empty or oversized, a network error):
 
 - **The fix is a new commit** (the usual case: a promoted CHANGELOG section, a test fix). Land it
   on `main`, then run the manual trigger (`workflow_dispatch`) **from `main`**. This is a **new
@@ -153,6 +154,14 @@ the tag is on origin or it is not.
   current head and creates the still-absent tag on that commit, which carries the same
   `version.json`. Do not re-run the original run: it checks out the old commit, which still lacks
   the fix, and fails again.
+- **The notes were refused as oversized.** This is the new-commit case with one extra step. The
+  version's section is already in `test/fixtures/changelog-released-sections.lock.json`, added by
+  the cut, so shortening it fails `test/changelog-released-immutable.test.js`. That test's rule
+  against relocking protects sections that were *published*. This one never was: no tag and no
+  Release exist. So shorten the section, regenerate its lock line in the same commit (the command
+  is in that test's failure message), land the commit on `main`, and dispatch from `main`. If
+  step 3 shows the tag on origin, the section may already be published: do not relock, and
+  escalate to the Operator.
 - **Nothing needed fixing** (a flaky test, a network error): open the original run and choose
   **Re-run all jobs**. That is the default. A dispatch from `main` is equivalent only while main's
   head is still that run's commit. If `main` has moved on, a dispatch releases a *different*
