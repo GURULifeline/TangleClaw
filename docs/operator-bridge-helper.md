@@ -51,7 +51,8 @@ because this page exists.
   at every login, so the bot can be online while the bridge is disabled. `tc bridge status`
   answers in the Project Master's pane only.
 - **Messages sent while the helper is down are not caught up.** The Gateway does not replay
-  them. Send them again once `status` shows the Gateway `ready`. Answers and notifications are
+  them. Send them again once `status` shows the Gateway `ready`; `status` shows what the helper
+  last wrote down, once a pass, so allow it up to a poll interval to catch up. Answers and notifications are
   different: they wait at the bridge, so none is lost while the helper or Discord is down.
 
 ## Setting it up

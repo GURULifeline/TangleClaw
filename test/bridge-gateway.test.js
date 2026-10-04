@@ -300,6 +300,45 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([proof.direction, proof.senderProof], ['from-target', 'launch']);
     });
 
+    it('a reply whose route moved as it was being stored is kept and judged again; one the store will not take is dropped for that reason', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId, text: 'All green.' });
+      const realApply = bridgeStore.applyRouteWrite;
+      let answers = ['version-conflict', 'refused'];
+      bridgeStore.applyRouteWrite = (write) => (write.op === 'reply-held' && answers.length
+        ? { outcome: answers.shift(), replayed: false, route: bridgeStore.routes.get(write.routeId) }
+        : realApply(write));
+      try {
+        // The route moved under it: nothing is lost, and nothing is handled yet.
+        assert.deepEqual(gateway.drainInbox(), { held: 0, dropped: 0, waiting: 1 });
+        assert.deepEqual([hub.handled.length, dropReasons()], [0, []]);
+        assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+        // The store will not take it, for a reason of its own: that is a drop, and it says why.
+        assert.deepEqual(gateway.drainInbox(), { held: 0, dropped: 1, waiting: 0 });
+        assert.deepEqual(dropReasons(), ['not-applied:refused']);
+        assert.equal(gateway.droppedArrivals().recent[0].routeId, r.body.routeId);
+      } finally {
+        bridgeStore.applyRouteWrite = realApply;
+      }
+      // Asked again with nothing in the way, a reply that waited is held.
+      const beta = liveProject('Beta');
+      const second = await operatorSays('m2', '@beta status?');
+      await hub.sessionSends(beta, { inReplyTo: hub.fromGateway()[1].hubId, text: 'Also green.' });
+      answers = ['version-conflict'];
+      bridgeStore.applyRouteWrite = (write) => (write.op === 'reply-held' && answers.length
+        ? { outcome: answers.shift(), replayed: false, route: bridgeStore.routes.get(write.routeId) }
+        : realApply(write));
+      try {
+        assert.equal(gateway.drainInbox().waiting, 1);
+        assert.equal(gateway.drainInbox().held, 1);
+      } finally {
+        bridgeStore.applyRouteWrite = realApply;
+      }
+      assert.equal(bridgeStore.routes.get(second.body.routeId).state, 'reply-held');
+      assert.equal(bridgeStore.routes.body(second.body.routeId, 'reply').text, 'Also green.');
+    });
+
     it('captures a reply once, however often it is seen', async () => {
       const alpha = liveProject('Alpha');
       const r = await operatorSays('m1', '@alpha status?');
@@ -628,6 +667,8 @@ describe('bridge gateway (#2031)', () => {
         routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
         assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed'],
           'not routed: nothing could reply to it yet');
+        assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'send-unconfirmed').detail.cause, 'outcome-unknown');
+        assert.match(store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = ?").get(`route:${routeId}:send-unconfirmed`).text, /^It is not known whether your message reached its destination\./);
         gateway._reset();
         later(10 * 60 * 1000);
         await gateway.tick();
@@ -647,6 +688,41 @@ describe('bridge gateway (#2031)', () => {
       await hub.sessionSends(alpha, { inReplyTo: hubId, text: 'got it' });
       assert.equal(gateway.drainInbox().held, 1);
       assert.equal(hub.fromGateway().length, 1, 'one Hub send and one target delivery, through a failure and two restarts');
+    });
+
+    it('a send that reached the Hub for a session nobody can name any more is not routed, not resent, and said so', async () => {
+      const alpha = liveProject('Alpha');
+      bridgeStore.routes.accept({ routeId: 'rt_gone', externalId: 'm8', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      // The server stops after the Hub took the message and before the route recorded it.
+      const realApply = bridgeStore.applyRouteWrite;
+      bridgeStore.applyRouteWrite = (write) => {
+        if (write.op === 'dispatch') throw new Error('the server stopped here');
+        return realApply(write);
+      };
+      try {
+        await gateway.advance('rt_gone').catch(() => {});
+      } finally {
+        bridgeStore.applyRouteWrite = realApply;
+      }
+      const hubId = hub.fromGateway()[0].hubId;
+      assert.equal(store.medusaExchanges.getByRequestId('bridge:rt_gone:send1').hub_id, hubId, 'the message is on the Hub');
+      assert.equal(bridgeStore.routes.get('rt_gone').state, 'accepted');
+
+      // By the time it comes back the session it went to has ended and its launch is gone.
+      store.getDb().prepare('DELETE FROM launch_sequences WHERE session_id = ?').run(alpha.sessionId);
+      gateway._reset();
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+
+      const route = bridgeStore.routes.get('rt_gone');
+      assert.deepEqual([route.state, route.failureCode], ['accepted', 'send-unconfirmed'], 'not routed: no reply could be matched to its sender');
+      assert.equal(hub.fromGateway().length, 1, 'and not sent a second time');
+      const audit = bridgeStore.audit.forRoute('rt_gone').filter((a) => a.op === 'send-unconfirmed');
+      assert.deepEqual(audit.map((a) => [a.outcome, a.detail.cause]), [['applied', 'recipient-unknown']], 'once, with its cause');
+      const notices = store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = 'route:rt_gone:send-unconfirmed'").all();
+      assert.deepEqual(notices.map((n) => n.text), [
+        'Your message was handed over, but the session it went to can no longer be identified, so its reply could not be accepted. '
+        + 'It has not been sent again. The Project Master will follow up.'
+      ], 'the operator is told what is known, not that nothing is');
     });
 
     it('when the server stops before the Hub\'s answer is kept, the send stays unconfirmed and is not repeated', async () => {
@@ -850,8 +926,9 @@ describe('bridge gateway (#2031)', () => {
 
       // A route handed back to the Master after a failure is a new reason.
       const routed = await operatorSays('m2', '@alpha hello');
-      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'recipient_retired' WHERE hub_id = ? AND origin = 'send'")
-        .run(hub.fromGateway()[0].hubId);
+      // The session ends, by the path production takes.
+      exchanges.markRecipientRetired(alpha.workspaceId);
+      assert.equal(store.getDb().prepare("SELECT state FROM medusa_exchanges WHERE hub_id = ? AND origin = 'send'").get(hub.fromGateway()[0].hubId).state, 'recipient_retired');
       await gateway.tick();
       assert.equal(bridgeStore.routes.get(routed.body.routeId).state, 'awaiting-master');
       assert.equal(hub.system.length, 2);

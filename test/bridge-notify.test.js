@@ -291,6 +291,10 @@ describe('bridge notifications (#2031)', () => {
       assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'found idle on the first reading that says anything: not announced');
       assert.equal(notifications().length, 1);
       assert.deepEqual(bridgeNotify.episode(), { open: true, resumed: true }, 'the episode its notice recorded, resumed');
+      // A resumed episode ends like any other, and is then no longer anything resumed.
+      lanes = [busy(1, 'launch-a')];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+      assert.deepEqual(bridgeNotify.episode(), { open: false, resumed: false });
 
       // A different fleet found idle after a start is taken as it is too, but it is not that episode.
       bridgeNotify._reset();
@@ -413,6 +417,45 @@ describe('bridge notifications (#2031)', () => {
       assert.deepEqual([of(silent).availability, of(silent).receiptSeq], ['UNKNOWN', null], 'a lane that never reported is unknown');
       // The same finished lane with an engine nobody has observed at rest is not clear.
       assert.equal(bridgeNotify.readLanes(compose(unobserved)).find((l) => l.sessionId === done.sessionId).availability, 'COMPLETE_NOT_CLEAR');
+    });
+
+    it('a lane is not AVAILABLE on an expired receipt, a receipt from an earlier launch, a busy engine or a session with no launch', () => {
+      const workloadFleet = require('../lib/workload-fleet');
+      const observer = (activity) => ({ get: () => ({ activity }) });
+      const compose = (activity) => (session, projectName) => workloadFleet.laneFor(session, {
+        observer: observer(activity), projectName, nowMs: Date.parse(clock), wrap: { wrapRun: () => null }
+      });
+      const read = (activity, s) => bridgeNotify.readLanes(compose(activity)).find((l) => l.sessionId === s.sessionId);
+      const current = liveSession('Current');
+      const seq = reports(current, 'complete');
+      const relaunched = liveSession('Relaunched');
+      reports(relaunched, 'complete');
+      const unlaunched = liveSession('Unlaunched');
+      reports(unlaunched, 'complete');
+      assert.equal(read('at-rest', relaunched).availability, 'AVAILABLE', 'precondition: each would be clear as it stands');
+      assert.equal(read('at-rest', unlaunched).availability, 'AVAILABLE');
+
+      // The session was launched again: what the earlier launch reported is not this one's.
+      store.getDb().prepare('UPDATE launch_sequences SET launch_id = ? WHERE session_id = ?').run('a-newer-launch', relaunched.sessionId);
+      assert.deepEqual(read('at-rest', relaunched), { sessionId: relaunched.sessionId, launchId: 'a-newer-launch', receiptSeq: null, availability: 'UNKNOWN' });
+      // A session with no launch on record has nothing a receipt could be bound to.
+      store.getDb().prepare('DELETE FROM launch_sequences WHERE session_id = ?').run(unlaunched.sessionId);
+      assert.deepEqual(read('at-rest', unlaunched), { sessionId: unlaunched.sessionId, launchId: null, receiptSeq: null, availability: 'UNKNOWN' });
+      // An engine seen working outranks a receipt that says finished.
+      assert.deepEqual(read('busy', current), { sessionId: current.sessionId, launchId: current.launchId, receiptSeq: seq, availability: 'WORKING' });
+      assert.equal(read('at-rest', current).availability, 'AVAILABLE');
+      // A finished receipt is believed for two hours, and then it is not.
+      later(120 * 60 * 1000 - 5000);
+      assert.equal(read('at-rest', current).availability, 'AVAILABLE');
+      later(10000);
+      assert.deepEqual(read('at-rest', current), { sessionId: current.sessionId, launchId: current.launchId, receiptSeq: seq, availability: 'UNKNOWN' });
+
+      // None of them makes the fleet idle.
+      enable();
+      bridgeNotify._deps.lanes = () => bridgeNotify.readLanes(compose('at-rest'));
+      bridgeNotify.reconcile();
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+      assert.deepEqual(notifications().filter((x) => x.type === 'fleet-idle'), []);
     });
 
     it('the server wires that reader in, so a real fleet is read without anything being supplied', () => {

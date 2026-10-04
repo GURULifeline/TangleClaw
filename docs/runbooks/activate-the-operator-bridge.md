@@ -64,8 +64,9 @@ the Architect.
 
 7. Start the helper: `bin/tc-bridge-helper install-launchd`, then `bin/tc-bridge-helper status`
    → Expected: `helper: running`, `gateway: ready`, `held: nothing`. `status` shows what the
-   helper last wrote down, once a pass: if it says `connecting`, run it again after 30 seconds,
-   for up to five minutes, before treating it as failed. In Discord the bot shows as an online
+   helper last wrote down, once a pass: if it says anything else (`connecting`, `reconnecting`,
+   `no snapshot yet`, `helper: not running`), run it again after 30 seconds, for up to five
+   minutes, before treating it as failed. In Discord the bot shows as an online
    member of the server: the online count is one more than before the helper started (from 1
    to 2 when only the Operator is online).
    Online proves the helper's Gateway connection only. The bridge is operational when it is
@@ -106,7 +107,8 @@ the Architect.
 
 ## Done when
 
-Step 11's answer is in Discord, `tc bridge status` shows the bridge enabled with no circuit open,
+Step 11's answer is in Discord, `tc bridge status` (run by the Master in its own pane) shows the
+bridge enabled with no circuit open,
 and `bin/tc-bridge-helper status` shows `held: nothing`.
 
 ## If this doesn't work

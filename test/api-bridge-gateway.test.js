@@ -343,6 +343,70 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
   });
 
+  it('withdrawing a route\'s answer before it is posted closes the route and clears its text', async () => {
+    /**
+     * The operator writes, and the Master answers: a released route and its one unposted answer.
+     * @param {string} text - The answer.
+     * @returns {Promise<{routeId: string, itemId: number}>}
+     */
+    const answered = async (text) => {
+      const routeId = (await operatorSays(`m${++seq}`, 'a question for the Master')).body.routeId;
+      const done = await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text });
+      assert.equal(done.body.route.state, 'released');
+      const item = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE route_id = ? AND kind = 'reply'").get(routeId);
+      return { routeId, itemId: item.outbound_id };
+    };
+    const closures = (routeId) => bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'answer-withdrawn');
+
+    // By the Master, with its command.
+    const one = await answered('An answer the Master thinks better of.');
+    assert.ok(bridgeStore.routes.body(one.routeId, 'answer').text, 'precondition: the answer\'s text is held');
+    const gone = await tc(['bridge', 'withdraw', String(one.itemId)]);
+    assert.equal(gone.code, 0, gone.stderr);
+    const route = bridgeStore.routes.get(one.routeId);
+    assert.deepEqual([route.state, route.closedBy], ['closed', 'master'], 'nothing more is coming for it, so it does not stay released');
+    for (const role of ['inbound', 'answer']) {
+      const body = bridgeStore.routes.body(one.routeId, role);
+      assert.ok(!body || body.text === null, `${role} text is cleared`);
+    }
+    assert.deepEqual(closures(one.routeId).map((a) => [a.actor, a.outcome, a.detail.outboundId, a.masterGeneration]), [['master', 'applied', one.itemId, masterGeneration]]);
+    assert.deepEqual([bridgeStore.outbound.get(one.itemId).state, bridgeStore.outbound.get(one.itemId).dropCode], ['dropped', 'withdrawn']);
+    // The Master cannot answer it again: the operator writes again to be answered.
+    const late = await masterWrites(one.routeId, 'answer', { expectedVersion: route.version, text: 'second thoughts' });
+    assert.equal(late.status, 409);
+
+    // By the signed-in operator, the same.
+    const two = await answered('An answer the operator stops.');
+    const stopped = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/outbound/:outboundId/withdraw'),
+      { req: SIGNED_IN, headers: SIGNED_IN.headers, params: { outboundId: String(two.itemId) }, body: { requestId: `req-op-withdraw-${++seq}-00` } });
+    assert.equal(stopped.status, 200);
+    assert.deepEqual([bridgeStore.routes.get(two.routeId).state, bridgeStore.routes.get(two.routeId).closedBy], ['closed', 'operator']);
+    assert.deepEqual(closures(two.routeId).map((a) => [a.actor, a.proof, a.detail.user]), [['operator', 'verified-session', 'rosie']], 'on the record with who did it');
+
+    // Withdrawing something that is not a route's answer closes no route.
+    const three = await answered('An answer that is left alone.');
+    const text = 'a notice of its own';
+    const notice = bridgeStore.outbound.enqueue({
+      idemKey: `notify:operator-needed:lone-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text)
+    }).outboundId;
+    assert.equal((await tc(['bridge', 'withdraw', String(notice)])).code, 0);
+    assert.equal(bridgeStore.routes.get(three.routeId).state, 'released');
+    assert.deepEqual(closures(three.routeId), []);
+
+    // A circuit reset that withdraws what it caught closes the routes of the answers among them.
+    const claimed = (await claim()).body.items.find((i) => i.outboundId === three.itemId);
+    const reported = await call('POST', `/api/bridge/helper/outbound/${three.itemId}/failure`, { headers: asHelper(), body: { leaseId: claimed.leaseId, reason: 'chat-channel-missing' } });
+    assert.equal(reported.body.circuit.opened, true);
+    assert.equal((await tc(['bridge', 'reset', '--withdraw'])).code, 0);
+    assert.deepEqual([bridgeStore.routes.get(three.routeId).state, bridgeStore.routes.get(three.routeId).closedBy, closures(three.routeId).length], ['closed', 'master', 1]);
+    // And one that puts them back leaves the route waiting for its answer to post.
+    const four = await answered('An answer that is put back.');
+    const again = (await claim()).body.items.find((i) => i.outboundId === four.itemId);
+    await call('POST', `/api/bridge/helper/outbound/${four.itemId}/failure`, { headers: asHelper(), body: { leaseId: again.leaseId, reason: 'chat-channel-missing' } });
+    assert.equal((await tc(['bridge', 'reset', '--requeue'])).code, 0);
+    assert.equal(bridgeStore.routes.get(four.routeId).state, 'released');
+  });
+
   it('a send that could not be confirmed is the Master\'s to answer, and cannot be routed again', async () => {
     const name = liveProject(`Alpha${++seq}`).project.name;
     hub.failSend = 'unknown';

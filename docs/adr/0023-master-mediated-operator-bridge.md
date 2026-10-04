@@ -428,7 +428,9 @@ have the reply reach the Master as a reply to that milestone.
   acknowledgement were added in Phase 5.) The acknowledgement is what one Master generation
   knows, not a fact about the episode: a Master launched later is told as one that never
   acknowledged, acknowledges for itself, and only a later generation's acknowledgement
-  replaces an earlier one.
+  replaces an earlier one. The telling is bound the same way: the episode records which
+  generation was told, a newly live generation is told on the next pass whatever its
+  predecessor was told, and the five-minute interval paces only repeats to the same one.
 - **The episode's record does not recurse.** It is not delivered through the chat that is
   closed; it is visible through the operator's local status and, until cutover, the interim
   route.
@@ -535,6 +537,10 @@ Against the schema `main` actually has:
   of adding a version nobody could be upgrading from. That holds only until the stack merges:
   from then on 53 and 54 are shipped versions, and a shipped version is never edited. If `main`
   takes either number first, the stack renumbers before it merges.
+- **A shipped object is retired by a later version, never erased from the one that made it.**
+  v52 created `idx_bridge_routes_conversation` for a lookup that was never written; nothing
+  reads it. The upgrade into v54 drops it by name, a fresh v54 store is never given it, and from
+  v54 on its presence fails the shape check. v52's own record of what it required is unchanged.
 - **Routing adds** the route record of P1, separately clearable bodies, conversation-scoped
   pins, operator-managed global aliases and pins, the Master principal's verification material,
   and the audit of every `tc bridge` write.

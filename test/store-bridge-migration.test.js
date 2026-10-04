@@ -265,7 +265,53 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
   function restoreIndexesBeforeV54(db) {
     db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/)
       .filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context|bridge_config_circuit/.test(stmt)).join(';\n'));
+    // And what those versions had that v54 retired, by the statement that made it.
+    for (const object of bridgeSchema.RETIRED_SCHEMA_OBJECTS.filter((o) => o.retiredAt === 54)) db.exec(object.madeBy);
   }
+
+  /**
+   * Whether the open store has the conversation index v52 created.
+   * @returns {boolean}
+   */
+  const hasConversationIndex = () => Boolean(store.getDb().prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_bridge_routes_conversation'").get());
+
+  it('v54 retires the conversation index v52 created: a fresh store, a v52 store and a v53 store all end without it, in one shape', () => {
+    assert.deepEqual(bridgeSchema.RETIRED_SCHEMA_OBJECTS.map((o) => [o.type, o.name, o.madeAt, o.retiredAt]), [['index', 'idx_bridge_routes_conversation', 52, 54]]);
+    assert.ok(!bridgeSchema.bridgeIndexDdl().includes('idx_bridge_routes_conversation'), 'a fresh store is never given it');
+    freshStore('retired-fresh');
+    assert.equal(hasConversationIndex(), false);
+    const fresh = [...bridgeObjects()];
+    store.close();
+
+    for (const [label, rewind] of [['v52', rewindToV52], ['v53', rewindToV53]]) {
+      freshStore(`retired-${label}`);
+      let had = null;
+      rewind((db) => {
+        had = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_bridge_routes_conversation'").get());
+        db.prepare(
+          "INSERT INTO bridge_routes (route_id, external_id, author_id, space_id, channel_id, body_digest, state, created_at, updated_at) VALUES ('r1', 'ext-r1', 'a', 's', 'c', ?, 'accepted', ?, ?)"
+        ).run('a'.repeat(64), '2026-10-04T00:00:00.000Z', '2026-10-04T00:00:00.000Z');
+      });
+      assert.equal(had, true, `precondition: a ${label} store has the index`);
+      reopen();
+      assert.equal(hasConversationIndex(), false, `${label}: the upgrade dropped it`);
+      assert.deepEqual([...bridgeObjects()], fresh, `${label}: exactly the shape of a fresh store`);
+      assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_routes').get().n, 1, `${label}: its routes are kept`);
+      assert.equal(store.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 54);
+      assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb()), []);
+      // The version that made it still required nothing of it, and its own check still passes.
+      assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 52), []);
+      store.close();
+    }
+
+    // At v54 its presence is a shape problem: a store that has it is refused, not quietly kept.
+    freshStore('retired-present');
+    store.getDb().exec(bridgeSchema.RETIRED_SCHEMA_OBJECTS[0].madeBy);
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb()), ['index idx_bridge_routes_conversation was retired in v54 and is still present']);
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 53), [], 'and it was no problem before v54');
+    store.close();
+    assert.throws(() => reopen(), /idx_bridge_routes_conversation was retired in v54 and is still present/);
+  });
 
   /**
    * Give the open store's bridge tables the shape schema v53 left them in:

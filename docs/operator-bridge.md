@@ -104,6 +104,7 @@ it finds decides what happens:
 | An exchange with the Hub's message id | The message is on the Hub. It is recorded and the route is `routed`. |
 | The Hub answered with a message id, but the exchange row could not take it | The id is kept in the audit and the gateway binds the row itself, on this pass and every later one. Until it binds, the route waits as unconfirmed; once it does, the route is `routed`. A route is never `routed` on an exchange without its Hub id, because the target's reply is found through that id. |
 | The Hub refused the message (`undeliverable`) | Proven undelivered. The route goes back to the Master. |
+| On the Hub, but for a session that can no longer be named | The route is marked `send-unconfirmed` and is not sent again. The operator's one notice says the message was handed over and that its reply could not be accepted, not that nothing is known. |
 | Anything else: still pending, or the outcome unknown | The route stays where it is. After two minutes it is marked `send-unconfirmed`, the operator gets one notice saying so, and the Master is told. |
 
 **An unconfirmed send is never sent again**, by a later pass, after a restart, or by the Master
@@ -210,7 +211,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge close <route-id> --version <n>` | Closes a route, clears its text and withdraws anything released for it and not yet posted. |
 | `tc bridge blocked` | Lists the items the helper could not post and the bridge set aside, without their text. |
 | `tc bridge requeue <item-id>` | Puts a set-aside item back for the helper. |
-| `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. |
+| `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. When the item is a route's answer, the route is closed and its text cleared with it: nothing more is coming for that route. |
 | `tc bridge circuit ack <episode>` | Says the Master has taken up the open configuration episode. The gateway then stops telling it. The episode stays open. |
 | `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. |
 
@@ -530,8 +531,11 @@ procedure is also still in force.
 
 The gateway tells the Project Master of an open episode through the Master's Medusa listener,
 at once and then every five minutes, until the Master acknowledges it with
-`tc bridge circuit ack <episode>`. The acknowledgement belongs to the Master that gave it: a
-Master launched afterwards is told at once and until it acknowledges for itself. The notice is a fixed sentence naming the episode and its
+`tc bridge circuit ack <episode>`. Both the telling and the acknowledgement belong to one Master
+generation, and the episode records which. A Master launched afterwards is told on the
+gateway's next pass, whether or not the one before it acknowledged, and until it acknowledges
+for itself; the five minutes pace only repeats to the same Master. The record is in the store,
+so a restart changes none of this. The notice is a fixed sentence naming the episode and its
 reason. Acknowledging does not close the episode. The Master's own rules tell it to report the
 episode to the operator at the workstation and that, while it is open, **a release is not a
 delivery receipt**: what it answers or releases only queues. A Master with no listener cannot
@@ -637,8 +641,8 @@ starts, before any helper request is heard. Revoked pins and helper tokens leave
 | The record of which posted message belonged to which item | Never removed. It holds ids and no text. |
 | What an inbound message answers | With that message's own route |
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
-| Delivered or dropped outbound items | 30 days |
-| Decided candidates | 30 days |
+| Delivered or dropped outbound items | 30 days, except an item of a route that is still open, which stays with its route; and the record of which chat messages an item was posted as, which is never removed |
+| Decided candidates | 30 days, except one that still has an item made from it, which waits for that item to go by its own rule |
 | A reply | Never let go while it waits |
 | A delivery-failure notice | Let go after 30 days, then kept 30 days |
 | An undecided or uncollected `milestone` candidate | Let go after 7 days, then kept 30 days |
@@ -684,9 +688,11 @@ Three things keep that true however long anything lasts:
 - A settled item of a route that is still open stays with its route. It is removed once the
   route is closed and past its own retention.
 - A decided candidate is removed only after every item made from it has gone by its own rule.
-  Removing a candidate removes its items, so the candidate waits for them. A closed route takes its outbound items with
-it in any state: a route closes only once its answer has been relayed or abandoned. An audit row of a route that is still open is never compacted, and
-neither is any row written after it.
+  Removing a candidate removes its items, so the candidate waits for them.
+
+A closed route takes its outbound items with it in any state: a route closes only once its
+answer has been relayed or abandoned. An audit row of a route that is still open is never
+compacted, and neither is any row written after it.
 
 After a compaction a request id older than the retention is no longer remembered, so it could
 be accepted again.
