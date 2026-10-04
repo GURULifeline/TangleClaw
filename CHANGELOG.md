@@ -17,7 +17,7 @@ All notable changes to TangleClaw are documented in this file.
   - **Out.** It claims what the Master released, posts it to its one configured channel, and acknowledges under the item's lease only after Discord confirms the post.
   - **Never twice.** The bridge's record of the parts already posted, an owner-only local record and a per-post nonce make a lost acknowledgement, a lapsed lease, a restart and a lost claim safe. A post whose outcome cannot be known is held for the operator, not retried.
   - **Secrets.** The bot token and the helper token live only in the Keychain and are stored from standard input. Neither is in a command line, an environment variable, a file or a log.
-  - **No redirects.** Neither client follows one, so neither token reaches a host that was not configured. Plain `http` is accepted for this machine only.
+  - **No redirects.** Neither client follows one, so neither token reaches a host that was not configured. The helper's token is sent to this machine only.
   - **launchd.** `install-launchd` writes a job that carries paths and a label only.
 
 - **The bridge's credentials stay on this machine, and the helper can be checked before it is started** (#2031, ADR 0023). Still off by default.
@@ -25,11 +25,13 @@ All notable changes to TangleClaw are documented in this file.
   - **A Master that is gone has no credential.** When tmux says there is no Master, its bridge credential is revoked on the request that finds out.
   - **Not enabled without a way to tell the Master.** Enabling the bridge is refused while the Master is not a switchboard participant.
   - **`tc-bridge-helper preflight`** checks the config, both Keychain items, the record's permissions, the lock, the helper token, the allowlist, the circuit, the bot token and the channel, without posting or claiming. What it cannot prove without posting it reports as unproven.
-  - **Rate limits** on the helper's routes and on a session's candidate submissions.
+  - **Rate limits** on the helper's routes and on a session's candidate submissions. A request over the limit writes nothing and spends no nonce, the operator's inbound messages are counted apart from the helper's outbound traffic, and the helper offers a rate-limited message again and never tells the operator it was refused.
   - The helper reads the Discord bot token from the Keychain item the install already has.
   - The operator's status shows how many routes are open in each state and when the oldest arrived, without their text. A route is still closed only by the Master.
   - Runbooks for switching the bridge on and for rolling it back: `docs/runbooks/activate-the-operator-bridge.md`, `docs/runbooks/roll-back-the-operator-bridge.md`. Two of their steps are marked unverified until someone other than their author runs them.
-  - **Telling sessions of `tc candidate` is an operator switch,** off by default and available only while the bridge is enabled. It reaches each session at its next launch.
+  - **Telling sessions of `tc candidate` is an operator switch,** off by default and available only while the bridge is enabled. It reaches each session at its next launch. It changes the session's opening context only: no file TangleClaw writes into a project follows it. A session whose context has no room for the verb is not told of it, which is logged and shown in the operator's status (`candidatePrimerOmitted`).
+  - **A Master launched while the chat is closed is told so.** The acknowledgement of an open configuration episode belongs to the Master that gave it. Its successor is told at once and acknowledges for itself, and `tc bridge status` says when the Master was last told and whether the Master asking has acknowledged.
+  - The operator's count of routes the Master has not been told of includes a route told of an earlier state and not of the one it is in now.
 
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
   - **Every posted message is recorded, as it is posted.** The helper reports each message the chat makes for an item straight away, and the acknowledgement seals the complete ordered set. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.

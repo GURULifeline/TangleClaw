@@ -55,7 +55,10 @@ In the Discord Developer Portal, for the application:
 
 1. **Bot → Privileged Gateway Intents: turn on Message Content Intent.** Without it Discord
    refuses the connection (close code 4014), and `status` says so.
-2. **Bot → Reset Token**, and keep the token for step 3. It is shown once.
+2. **Leave the bot's token as it is.** The install already keeps it in the Keychain (step 3), and
+   the interim procedure posts with that same item. Resetting the token in the portal
+   invalidates it for both. Reset it only if the Keychain holds no such item, and then store the
+   new one as step 3 says.
 3. **Invite the bot** to the server with these permissions in the operator's channel: View
    Channel, Send Messages, Read Message History and Add Reactions.
 4. **In Discord, User Settings → Advanced → Developer Mode.** Then right-click to copy three
@@ -329,7 +332,8 @@ Discord account, and belong to the live verification before cutover:
 - `lib/bridge-helper/cli.js`: the commands.
 - `lib/bridge-helper/config.js`, `secrets.js`, `state.js`, `log.js`: the config, the Keychain,
   the record of posts and the closed-code log.
-- `lib/bridge-helper/bridge-client.js`: the five bridge routes, and nothing else.
+- `lib/bridge-helper/bridge-client.js`: the helper routes listed in
+  [operator-bridge.md](operator-bridge.md), and nothing else.
 - `lib/bridge-helper/discord-rest.js`, `discord-gateway.js`: Discord's REST API and Gateway.
   `discord-gateway.js` is carried over from the helper written for #1799, which never merged.
   That is this project's own earlier work, kept because it speaks only Discord's protocol. It

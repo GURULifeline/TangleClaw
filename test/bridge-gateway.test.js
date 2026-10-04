@@ -856,6 +856,20 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(bridgeStore.routes.get(routed.body.routeId).state, 'awaiting-master');
       assert.equal(hub.system.length, 2);
       assert.ok(alpha.sessionId);
+      assert.equal(gateway.routesMasterNotTold(), 0, 'both routes were told of the state they are in');
+
+      // A route told once and since moved on is untold of where it is now,
+      // and is counted so until the Master is told again.
+      masterState.listening = false;
+      later(1000);
+      store.getDb().prepare('UPDATE bridge_routes SET version = version + 1, updated_at = ? WHERE route_id = ?').run(clock, routed.body.routeId);
+      await gateway.tick();
+      assert.equal(hub.system.length, 2);
+      assert.ok(bridgeStore.routes.get(routed.body.routeId).masterWakeAt, 'it was told once');
+      assert.equal(gateway.routesMasterNotTold(), 1, 'having been told of an earlier state does not count');
+      masterState.listening = true;
+      await gateway.tick();
+      assert.deepEqual([hub.system.length, gateway.routesMasterNotTold()], [3, 0]);
     });
 
     it('keeps trying to tell a Master that was away when a reply was held', async () => {
@@ -942,6 +956,17 @@ describe('bridge gateway (#2031)', () => {
         return gateway.reportFailure(id, { leaseId: item.leaseId, tokenId: helper().tokenId, reason: 'chat-permission-denied' }).body.circuit.episodeId;
       };
       const aboutCircuit = () => hub.system.filter((m) => m.message.includes('configuration circuit'));
+      /**
+       * A Master is launched: a new generation, live from now.
+       * @param {string} c - One hex digit, to make its credential's hash.
+       * @returns {number} The generation.
+       */
+      const masterLaunched = (c) => {
+        const generation = bridgeStore.masterCredentials.mint(c.repeat(64), { at: clock });
+        bridgeStore.masterCredentials.activate(generation, c.repeat(64), { at: clock });
+        return generation;
+      };
+      const first = masterLaunched('a');
       const episode = chatCloses('first');
 
       assert.equal((await gateway.tick()).circuitTold, true);
@@ -957,23 +982,52 @@ describe('bridge gateway (#2031)', () => {
       assert.equal((await gateway.tick()).circuitTold, true);
       assert.equal(aboutCircuit().length, 2);
 
-      assert.deepEqual(bridgeStore.circuit.ack(episode + 1, 7, { at: clock }).outcome, 'not-open', 'only the open episode can be acknowledged');
-      const acked = bridgeStore.circuit.ack(episode, 7, { at: clock });
-      assert.deepEqual([acked.outcome, acked.episode.masterAckedAt], ['acked', clock]);
-      assert.equal(bridgeStore.circuit.ack(episode, 8, { at: clock }).outcome, 'already-acked');
-      const audit = store.getDb().prepare("SELECT actor, master_generation, detail_json FROM bridge_audit WHERE op = 'circuit-ack'").all();
-      assert.deepEqual(audit.map((r) => [r.actor, r.master_generation, JSON.parse(r.detail_json).episodeId]), [['master', 7, episode]], 'acknowledged once, on the record');
+      assert.deepEqual(bridgeStore.circuit.ack(episode + 1, first, { at: clock }).outcome, 'not-open', 'only the open episode can be acknowledged');
+      const acked = bridgeStore.circuit.ack(episode, first, { at: clock });
+      assert.deepEqual([acked.outcome, acked.episode.masterAckedAt, acked.episode.masterAckedGeneration], ['acked', clock, first]);
+      assert.equal(bridgeStore.circuit.ack(episode, first, { at: clock }).outcome, 'already-acked');
+      const audited = () => store.getDb().prepare("SELECT actor, master_generation, detail_json FROM bridge_audit WHERE op = 'circuit-ack' ORDER BY audit_seq").all()
+        .map((r) => [r.actor, r.master_generation, JSON.parse(r.detail_json).episodeId]);
+      assert.deepEqual(audited(), [['master', first, episode]], 'acknowledged once, on the record');
       assert.throws(() => store.getDb().exec('UPDATE bridge_config_circuit SET master_acked_at = NULL, master_acked_generation = NULL'), /fixed once opened/);
       later(10 * gateway.CIRCUIT_RETELL_MS);
       assert.equal((await gateway.tick()).circuitTold, false);
-      assert.equal(aboutCircuit().length, 2, 'an acknowledged episode is not told again, however long it stays open');
+      assert.equal(aboutCircuit().length, 2, 'the Master that acknowledged is not told again, however long the episode stays open');
       assert.equal(bridgeStore.circuit.open().episodeId, episode, 'acknowledging does not close it');
 
+      // What a Master knows leaves with it. One launched since has not been
+      // told, so it is: at once, then every five minutes until it acknowledges
+      // for itself.
+      const second = masterLaunched('b');
+      assert.equal((await gateway.tick()).circuitTold, true, 'the successor is told at once');
+      assert.equal(aboutCircuit().length, 3);
+      later(gateway.CIRCUIT_RETELL_MS - 1000);
+      assert.equal((await gateway.tick()).circuitTold, false);
+      later(1000);
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.equal(aboutCircuit().length, 4);
+      assert.equal(bridgeStore.circuit.ack(episode, first, { at: clock }).outcome, 'already-acked', 'an earlier generation cannot acknowledge for the live one');
+      assert.equal(bridgeStore.circuit.open().masterAckedGeneration, first);
+      const again = bridgeStore.circuit.ack(episode, second, { at: clock });
+      assert.deepEqual([again.outcome, again.episode.masterAckedAt, again.episode.masterAckedGeneration], ['acked', clock, second]);
+      assert.deepEqual(audited(), [['master', first, episode], ['master', second, episode]]);
+      assert.throws(() => store.getDb().prepare('UPDATE bridge_config_circuit SET master_acked_generation = ?').run(first), /fixed once opened/,
+        'an acknowledgement is replaced only by a later generation\'s');
+      assert.throws(() => store.getDb().prepare("UPDATE bridge_config_circuit SET master_acked_at = '2020-01-01T00:00:00.000Z'").run(), /fixed once opened/);
+      later(10 * gateway.CIRCUIT_RETELL_MS);
+      assert.equal((await gateway.tick()).circuitTold, false);
+      assert.equal(aboutCircuit().length, 4);
+
+      // With no Master live there is nobody whose acknowledgement stands.
+      bridgeStore.masterCredentials.revoke('master-not-live', { at: clock });
+      assert.equal((await gateway.tick()).circuitTold, true);
+      masterLaunched('c');
+
       // A later episode is a new thing to be told of.
-      bridgeStore.applyCircuitReset({ requestId: 'req-reset-told-0001', decision: 'withdraw', actor: 'master', proof: 'master-launch', masterGeneration: 7, at: clock });
+      bridgeStore.applyCircuitReset({ requestId: 'req-reset-told-0001', decision: 'withdraw', actor: 'master', proof: 'master-launch', masterGeneration: second, at: clock });
       const next = chatCloses('second');
       assert.equal((await gateway.tick()).circuitTold, true);
-      assert.match(aboutCircuit()[2].message, new RegExp(`episode ${next},`));
+      assert.match(aboutCircuit()[aboutCircuit().length - 1].message, new RegExp(`episode ${next},`));
     });
 
     it('a Master with no listener cannot be told of the circuit that way; it is told once it has one', async () => {

@@ -425,7 +425,10 @@ have the reply reach the Master as a reply to that milestone.
   an open episode until the Master acknowledges it, and the Master surfaces it to the operator
   at the workstation. A release made while an episode is open queues and is not a delivery
   receipt. (Phase 4 shipped the record and its status surfaces; the telling and the
-  acknowledgement were added in Phase 5.)
+  acknowledgement were added in Phase 5.) The acknowledgement is what one Master generation
+  knows, not a fact about the episode: a Master launched later is told as one that never
+  acknowledged, acknowledges for itself, and only a later generation's acknowledgement
+  replaces an earlier one.
 - **The episode's record does not recurse.** It is not delivered through the chat that is
   closed; it is visible through the operator's local status and, until cutover, the interim
   route.
@@ -526,6 +529,12 @@ Against the schema `main` actually has:
   `hub_id` is nullable and no synthetic id exists. Every insert names its conflict target. The
   whole shape is verified at every startup. This is #2031's original requirement, written fresh.
 - **The migration takes the next free number when it lands.** An open PR does not reserve one.
+- **A version that never left the branch was revised in place.** Versions 53 and 54 were
+  written on the unmerged #2031 stack while `main` stood at 52, so no store outside a test ever
+  held either. Later phases of the same stack changed 54's shape under its own number instead
+  of adding a version nobody could be upgrading from. That holds only until the stack merges:
+  from then on 53 and 54 are shipped versions, and a shipped version is never edited. If `main`
+  takes either number first, the stack renumbers before it merges.
 - **Routing adds** the route record of P1, separately clearable bodies, conversation-scoped
   pins, operator-managed global aliases and pins, the Master principal's verification material,
   and the audit of every `tc bridge` write.

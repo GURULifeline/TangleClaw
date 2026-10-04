@@ -1,7 +1,8 @@
 # Activate the operator bridge
 
 Tier 3: it changes who may post to the operator's Discord and replaces an operator rule. Run by
-the builder who owns #2031, with the Architect; steps 3, 6 and 9 need the Operator signed in.
+the builder who owns #2031, with the Architect; the steps marked **Operator** need the Operator
+signed in.
 
 ## When to use this
 
@@ -10,8 +11,8 @@ CI is green, and the Reviewer2 security review is recorded. The bridge is still 
 
 ## When NOT to use this
 
-Any of those is missing, or the server is not running the merged commit. Stop. Until step 10
-passes, Rule #145 and [the interim procedure](../discord-operator-notifications.md) stay in force.
+Any of those is missing, or the server is not running the merged commit. Stop. Until the rule is
+replaced in the step that says so, and after any roll back, Rule #145 and [the interim procedure](../discord-operator-notifications.md) stay in force.
 
 ## Prerequisites
 
@@ -44,7 +45,7 @@ the Architect.
    (`POST /api/bridge/operator/allowlist`, then `POST /api/bridge/operator/helper-token`).
    → Expected: `200` for each; the second shows the token once.
    > 🚧 **UNVERIFIED** — there is no dashboard page for these routes. How the signed-in Operator
-   > calls them (and steps 6 and 9) has not been exercised · settle it with the Architect before
+   > calls them (and the other steps marked **Operator**) has not been exercised · settle it with the Architect before
    > this runbook is used.
 
 4. Store the helper token, then configure the helper:
@@ -77,9 +78,17 @@ the Architect.
    → `tc bridge status` shows `CONFIGURATION CIRCUIT OPEN`: the bot cannot post there. Fix its
    permissions, then `tc bridge reset --requeue`.
 
-10. **Operator:** replace Rule #145 with the text the Architect holds, and switch on the candidate
-    primer (`POST /api/bridge/operator/candidate-primer` with `{"primed": true}`).
+10. **Operator:** replace Rule #145 with the replacement text the Architect has approved, and
+    switch on the candidate primer (`POST /api/bridge/operator/candidate-primer` with
+    `{"primed": true}`).
     → Expected: `"candidatesPrimed": true`.
+
+10a. Launch one project session, then **Operator:** read `GET /api/bridge/operator/status`.
+    → Expected: `"candidatePrimerOmitted": null`, and `tc candidate` is in the verb list of that
+    session's opening context.
+    → If it names a project instead: that session's section ran over its cap and it was not
+    told of `tc candidate`. The switch is on and nothing is posted wrongly. Tell the Architect
+    the `length` and `cap` it shows, and go on: sessions can still be told by hand.
 
 11. Final acceptance. The Architect sends the final milestone through the Master. The Operator
     replies to that exact Discord message. The Master runs `tc bridge read <route-id>` on the new

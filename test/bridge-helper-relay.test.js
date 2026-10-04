@@ -342,8 +342,32 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual([calls, waits], [3, [2000, 4000]]);
       assert.deepEqual([discord.posts[0].content, discord.posts[0].replyTo], [REFUSAL_TEXT.UNREACHABLE, message.id]);
 
+      // Over the bridge's rate limit is a wait, not a refusal of the message:
+      // it is offered again, and taken when the bridge has room.
+      calls = 0;
+      waits.length = 0;
+      discord.posts.length = 0;
+      const busyOnce = { sendInbound: async (m) => { calls += 1; if (calls === 1) throw new BridgeError(429, 'RATE_LIMITED'); return bridge.sendInbound(m); } };
+      const early = operatorMessage('only early');
+      assert.equal(await inbound({ bridge: busyOnce, sleep: async (ms) => { waits.push(ms); } })(early, {}), 'inbound-accepted');
+      assert.deepEqual([calls, waits, discord.posts.length], [2, [2000], 0]);
+      assert.ok(bridgeStore.routes.getByExternalId(early.id), 'the message reached TangleClaw');
+      // One that stays over the limit is told to send again later, never to change the message.
+      calls = 0;
+      const busy = { sendInbound: async () => { calls += 1; throw new BridgeError(429, 'RATE_LIMITED'); } };
+      assert.equal(await inbound({ bridge: busy, sleep: async () => {} })(operatorMessage('hello'), {}), 'inbound-transport-failed');
+      assert.deepEqual([calls, discord.posts[0].content], [3, REFUSAL_TEXT.UNREACHABLE]);
+      // A helper that is not reaching TangleClaw directly is told what is wrong with it, once, with no retry.
+      calls = 0;
+      discord.posts.length = 0;
+      const proxied = { sendInbound: async () => { calls += 1; throw new BridgeError(403, 'LOOPBACK_REQUIRED'); } };
+      assert.equal(await inbound({ bridge: proxied })(operatorMessage('hello'), {}), 'inbound-refused');
+      assert.deepEqual([calls, discord.posts[0].content], [1, REFUSAL_TEXT.LOOPBACK_REQUIRED]);
+      assert.match(REFUSAL_TEXT.LOOPBACK_REQUIRED, /^Not delivered: the helper is not reaching TangleClaw directly/);
+
       // A redirect is not followed and not retried.
       calls = 0;
+      discord.posts.length = 0;
       const redirecting = { sendInbound: async () => { calls += 1; throw new BridgeError(302, 'REDIRECT_REFUSED'); } };
       assert.equal(await inbound({ bridge: redirecting })(operatorMessage('hello'), {}), 'inbound-transport-failed');
       assert.equal(calls, 1);

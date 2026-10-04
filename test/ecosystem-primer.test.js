@@ -149,14 +149,19 @@ describe('lib/ecosystem-primer (#1122)', () => {
       primer.setSwitchReader(() => ['bridge-candidates']);
       assert.ok(verbsFor('pane', { switches: ['bridge-candidates'] }).some((v) => v.id === 'candidate'));
       assert.deepEqual(verbsFor('unprimed', { switches: ['bridge-candidates'] }).map((v) => v.id), []);
-      assert.ok(primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
-      assert.ok(/\bcandidate\b/.test(primer.tcBootstrapLines('comment').join('\n')));
+      // The line itself follows only the switches it is handed. With none it
+      // is the same whatever this install's switch says, which is what every
+      // carrier written into a project gets.
+      assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+      assert.ok(!/\bcandidate\b/.test(primer.tcBootstrapLines('comment').join('\n')));
+      assert.ok(primer.tcBootstrapLines('md', ['bridge-candidates']).join('\n').includes('`candidate`'));
+      assert.ok(/\bcandidate\b/.test(primer.tcBootstrapLines('comment', ['bridge-candidates']).join('\n')));
       const on = primer.buildEcosystemPrimerSection(CTX).join('\n');
       assert.ok(on.length <= 2820, `with the switch on the section is ${on.length} chars; its cap is 2820`);
       assert.ok(on.includes('`candidate`'));
       // A switch nobody declared primes nothing.
       primer.setSwitchReader(() => ['something-else']);
-      assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+      assert.ok(!primer.buildEcosystemPrimerSection(CTX).join('\n').includes('`candidate`'));
     } finally {
       primer.setSwitchReader(() => []);
     }
@@ -195,9 +200,33 @@ describe('lib/ecosystem-primer (#1122)', () => {
       const atCap = raw(padded(pad), ['bridge-candidates']).length;
       const overCap = raw(padded(pad + 1), ['bridge-candidates']).length;
       assert.ok(atCap <= 2820 && overCap >= 2821, `${atCap} then ${overCap}`);
-      assert.ok(section(padded(pad)).includes('`candidate`'), 'at the cap it is still primed');
-      assert.equal(section(padded(pad + 1)), raw(padded(pad + 1), []), 'one character past it, the verb is left out and nothing else changes');
-      assert.ok(!section(padded(pad + 1)).includes('`candidate`'));
+      const logger = require('../lib/logger');
+      const level = logger.getLevel();
+      const lines = [];
+      logger.setLevel('warn');
+      logger.setConsoleStream({ write: (s) => { lines.push(String(s)); return true; } });
+      try {
+        const fellBack = primer.lastSwitchFallback();
+        assert.ok(section(padded(pad)).includes('`candidate`'), 'at the cap it is still primed');
+        assert.deepEqual([lines.length, primer.lastSwitchFallback()], [0, fellBack], 'and nothing is said: nothing was left out');
+        assert.equal(section(padded(pad + 1)), raw(padded(pad + 1), []), 'one character past it, the verb is left out and nothing else changes');
+        assert.ok(!section(padded(pad + 1)).includes('`candidate`'));
+        // Leaving it out is said aloud, in numbers: the switch still reads as on.
+        const said = lines.filter((l) => l.includes('rendered without the switch'));
+        assert.equal(said.length, 2, 'once for each launch that fell back');
+        assert.ok(said[0].includes('bridge-candidates') && said[0].includes(String(overCap)) && said[0].includes('2820') && said[0].includes('77'), said[0]);
+        assert.ok(!said[0].includes('Operating basics'), 'none of the section\'s text is logged');
+        const last = primer.lastSwitchFallback();
+        assert.deepEqual([last.projectId, last.switches, last.length, last.cap], [77, ['bridge-candidates'], overCap, 2820]);
+        // With no switch on there is nothing to leave out, however long the section is.
+        primer.setSwitchReader(() => []);
+        lines.length = 0;
+        section(padded(pad + 400));
+        assert.deepEqual([lines.length, primer.lastSwitchFallback()], [0, last]);
+      } finally {
+        logger.setConsoleStream(null);
+        logger.setLevel(level);
+      }
     } finally {
       primer.setSwitchReader(() => []);
     }

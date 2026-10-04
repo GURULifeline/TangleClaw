@@ -1,7 +1,8 @@
 # Roll the operator bridge back
 
 Tier 3: it stops the only automated path to the operator's Discord. Run by the builder who owns
-#2031 or the Architect; step 1 needs the Operator signed in.
+#2031 or the Architect; the steps marked **Operator** need the Operator signed in. Step 2 does
+not, and by itself stops everything reaching Discord.
 
 ## When to use this
 
@@ -14,8 +15,15 @@ accepting messages from anyone but the Operator.
 Do them in order. Each one alone makes things safer, so do not wait on one to start the next.
 
 1. **Operator:** disable the bridge (`POST /api/bridge/operator/disable`).
-   → Expected: `200`, `"enabled": false`. From now the bridge refuses the helper and every Master
-   write with `409 BRIDGE_DISABLED`, and no pane is told of `tc candidate`.
+   → Expected: `200`, `"enabled": false`. From now the bridge refuses the helper, every session's
+   candidate and every Master write that could lead to a post with `409 BRIDGE_DISABLED`. The
+   Master can still close a route, withdraw what is queued, and acknowledge or reset the circuit.
+
+1a. **Operator:** switch the candidate primer off
+   (`POST /api/bridge/operator/candidate-primer` with `{"primed": false}`).
+   → Expected: `200`, `"candidatesPrimed": false`.
+   Why: disabling the bridge leaves this switch as it was. Left on, enabling the bridge again
+   would tell every newly launched session of `tc candidate` before the controlled checks.
    → If the Operator cannot be reached: go to step 2 now. It stops everything reaching Discord.
 
 2. Stop the helper and remove its job:

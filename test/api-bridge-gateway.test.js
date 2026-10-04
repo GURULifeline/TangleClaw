@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { setLevel } = require('../lib/logger');
+const { setLevel, setConsoleStream } = require('../lib/logger');
 
 setLevel('error');
 
@@ -604,7 +604,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([forOperator.body.configurationCircuit.episodeId, forOperator.body.configurationCircuit.reason], [episodeId, 'chat-channel-missing']);
     const shown = await tc(['bridge', 'status']);
     assert.match(shown.stdout, new RegExp(`CONFIGURATION CIRCUIT OPEN, episode ${episodeId}, since .* \\(chat-channel-missing\\)`));
-    assert.match(shown.stdout, new RegExp(`a release is not a delivery\\. NOT YET ACKNOWLEDGED: tell the operator, then \`tc bridge circuit ack ${episodeId}\``));
+    assert.match(shown.stdout, new RegExp(`a release is not a delivery\\. You have not been told of it by message\\. NOT YET ACKNOWLEDGED: tell the operator, then \`tc bridge circuit ack ${episodeId}\``));
 
     // The Master takes it up. Nobody else can say it has.
     const ackAs = (headers) => call('POST', `/api/bridge/master/circuit/${episodeId}/ack`, { headers, body: {} });
@@ -617,6 +617,20 @@ describe('bridge API: the round trip (#2031)', () => {
     const wrong = await tc(['bridge', 'circuit', 'ack', String(episodeId + 50)]);
     assert.deepEqual([wrong.code, /CIRCUIT_NOT_OPEN/.test(wrong.stderr)], [2, true]);
     assert.match((await tc(['bridge', 'status'])).stdout, /Acknowledged 20\d\d-/);
+    // The acknowledgement was that Master's. One launched since sees the
+    // episode as its own to take up, is told so, and acknowledges for itself.
+    const firstGeneration = masterGeneration;
+    const relaunched = handoff.mintCredential();
+    masterGeneration = bridgeStore.masterCredentials.mint(relaunched.hash);
+    bridgeStore.masterCredentials.activate(masterGeneration, relaunched.hash);
+    masterCredential = relaunched.credential;
+    bridgeStore.circuit.noteMasterTold(episodeId, { at: '2026-10-04T09:00:00.000Z' });
+    const successor = (await tc(['bridge', 'status'])).stdout;
+    assert.match(successor, /You were last told 2026-10-04T09:00:00\.000Z\. NOT YET ACKNOWLEDGED by you \(an earlier Master did\): tell the operator/);
+    assert.ok(!/Acknowledged 20/.test(successor));
+    assert.match((await tc(['bridge', 'circuit', 'ack', String(episodeId)])).stdout, /^Configuration episode \d+ acknowledged\. It stays open/);
+    assert.deepEqual([bridgeStore.circuit.open().masterAckedGeneration, masterGeneration > firstGeneration], [masterGeneration, true]);
+    assert.match((await tc(['bridge', 'status'])).stdout, /You were last told 2026-10-04T09:00:00\.000Z\. Acknowledged 20\d\d-/);
     assert.equal((await claim()).body.code, 'BRIDGE_CONFIGURATION_BLOCKED', 'acknowledging it does not open the queue');
 
     // Only the Master or a signed-in operator resets it.
@@ -820,9 +834,9 @@ describe('bridge API: the round trip (#2031)', () => {
 
     it('one caller gone wrong cannot flood the bridge: each class of route has a bound', async () => {
       bridgeApi._resetRateLimits();
-      assert.deepEqual(Object.fromEntries(Object.entries(bridgeApi.RATE_LIMITS).map(([name, limit]) => [name, limit.perMinute])), { helper: 600, preflight: 6, candidate: 12 });
+      assert.deepEqual(Object.fromEntries(Object.entries(bridgeApi.RATE_LIMITS).map(([name, limit]) => [name, limit.perMinute])), { helper: 600, inbound: 120, preflight: 6, candidate: 12 });
       for (const entry of bridgeApi.ROUTES) {
-        const expected = entry.path.startsWith('/api/bridge/helper/') ? (entry.path.endsWith('/preflight') ? 'preflight' : 'helper')
+        const expected = entry.path.startsWith('/api/bridge/helper/') ? (entry.path.endsWith('/preflight') ? 'preflight' : (entry.path.endsWith('/inbound') ? 'inbound' : 'helper'))
           : (entry.principal === 'session' ? 'candidate' : undefined);
         assert.equal(entry.rate, expected, `${entry.method} ${entry.path}`);
       }
@@ -834,8 +848,62 @@ describe('bridge API: the round trip (#2031)', () => {
         const claimOnce = () => call('POST', '/api/bridge/helper/outbound/claim', { headers: asHelper(), body: {} });
         for (let i = 0; i < 600; i++) await claimOnce();
         assert.equal((await claimOnce()).status, 429);
+
+        // A request over the bound is refused before anything is written for
+        // it: no nonce is recorded, so the same request is good a minute on,
+        // and the refusals are logged once for the caller, not once each.
+        const nonces = () => store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_nonces').get().n;
+        const lines = [];
+        const nonce = crypto.randomBytes(16).toString('hex');
+        const ackOnce = () => call('POST', '/api/bridge/helper/outbound/999999/ack',
+          { headers: asHelper({ [bridgeApi.HELPER_NONCE_HEADER]: nonce }), body: { leaseId: 'l'.repeat(32), parts: ['1'], partCount: 1 } });
+        const before = nonces();
+        setLevel('warn');
+        setConsoleStream({ write: (s) => { lines.push(String(s)); return true; } });
+        try {
+          for (let i = 0; i < 3; i++) assert.deepEqual([(await ackOnce()).status, nonces()], [429, before]);
+        } finally {
+          setConsoleStream(null);
+          setLevel('error');
+        }
+        assert.equal(lines.filter((l) => l.includes('RATE_LIMITED')).length, 0, 'the 601st request was the one logged; these three were not');
+
+        // The operator's messages have a bucket of their own: the helper's other traffic cannot spend it.
+        assert.equal((await operatorSays(`m${++seq}`, 'still heard')).status, 202);
+
         t += 60001;
-        assert.equal((await claimOnce()).status, 200, 'a minute on, it is admitted again');
+        setLevel('warn');
+        setConsoleStream({ write: (s) => { lines.push(String(s)); return true; } });
+        try {
+          const unspent = nonces();
+          const taken = await ackOnce();
+          assert.ok(taken.status !== 429 && taken.body.code !== 'NONCE_REUSED', `a minute on its nonce is still its own: ${taken.status} ${taken.body.code}`);
+          assert.equal(nonces(), unspent + 1);
+          assert.equal((await ackOnce()).body.code, 'NONCE_REUSED');
+          for (let i = 0; i < 600; i++) await claimOnce();
+          assert.equal((await claimOnce()).status, 429);
+          assert.equal((await claimOnce()).status, 429);
+        } finally {
+          setConsoleStream(null);
+          setLevel('error');
+        }
+        assert.equal(lines.filter((l) => l.includes('RATE_LIMITED')).length, 1, 'a minute on, the caller is logged once more, and once only');
+
+        // The inbound bucket has its own bound.
+        t += 60001;
+        const statuses = [];
+        for (let i = 0; i < 121; i++) statuses.push((await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: 'same-one', ...ALLOWED, text: 'again' } })).status);
+        assert.deepEqual([statuses.slice(0, 120).every((s) => s !== 429), statuses[120]], [true, 429]);
+        assert.equal((await claimOnce()).status, 200, 'and spending it does not spend the other');
+
+        // A caller that has gone quiet is forgotten once the table is large.
+        t += 60001;
+        bridgeApi._resetRateLimits();
+        for (let i = 0; i < bridgeApi.ADMITTED_SWEEP_AT; i++) bridgeApi._admitted.set(`helper:gone-${i}`, [t - 60001]);
+        bridgeApi._admitted.set('helper:recent', [t - 1000]);
+        assert.equal((await claimOnce()).status, 200);
+        assert.deepEqual([...bridgeApi._admitted.keys()].filter((k) => k.startsWith('helper:gone-')), []);
+        assert.ok(bridgeApi._admitted.has('helper:recent'), 'a caller seen in the last minute is kept');
       } finally {
         gateway._deps.now = realNow;
         bridgeApi._resetRateLimits();
@@ -844,7 +912,8 @@ describe('bridge API: the round trip (#2031)', () => {
 
     it('telling every pane of `tc candidate` is the operator\'s switch, and only while the bridge is on', async () => {
       const primer = require('../lib/ecosystem-primer');
-      const named = () => primer.tcBootstrapLines('md').join('\n').includes('`candidate`');
+      const pane = { projectId: 77, projectName: 'Some-Project', apiOrigin: 'http://localhost:3102', operatorHost: 'example-host.tail0000.ts.net' };
+      const named = () => primer.buildEcosystemPrimerSection(pane).join('\n').includes('`candidate`');
       const set = (primed, req) => bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/candidate-primer'),
         { req: req || SIGNED_IN, headers: (req || SIGNED_IN).headers, body: { primed } });
       assert.deepEqual([bridgeApi.candidatesPrimed(), named()], [false, false], 'off until somebody switches it on');
@@ -858,7 +927,17 @@ describe('bridge API: the round trip (#2031)', () => {
       const on = await set(true);
       assert.deepEqual([on.status, on.body.candidatesPrimed, bridgeApi.candidatesPrimed(), named()], [200, true, true, true],
         'the server reads the switch each time a pane\'s instructions are written');
-      assert.equal((await asOperator('GET', '/api/bridge/operator/status')).body.candidatesPrimed, true);
+      const told = (await asOperator('GET', '/api/bridge/operator/status')).body;
+      assert.deepEqual([told.candidatesPrimed, told.candidatePrimerOmitted], [true, null]);
+      // The switch is what the operator asked for. A pane whose section ran
+      // over its cap was not told, and status says so: when, which project,
+      // how long and against what cap, and none of the section's text.
+      const long = { ...pane, projectId: 91, apiOrigin: `${pane.apiOrigin}/${'x'.repeat(60)}` };
+      assert.ok(!primer.buildEcosystemPrimerSection(long).join('\n').includes('`candidate`'));
+      const omitted = (await asOperator('GET', '/api/bridge/operator/status')).body.candidatePrimerOmitted;
+      assert.deepEqual([omitted.projectId, omitted.switches, omitted.cap, omitted.length > 2820, Object.keys(omitted).sort()],
+        [91, ['bridge-candidates'], 2820, true, ['at', 'cap', 'length', 'projectId', 'switches']]);
+      assert.match(omitted.at, /^20\d\d-\d\d-\d\dT/);
 
       // Switching the bridge off takes the verb out of the list with it, and switching it back on brings it back.
       await asOperator('POST', '/api/bridge/operator/disable');

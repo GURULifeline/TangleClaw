@@ -88,7 +88,9 @@ given, so the next pass sends it.
 Enabling is refused `409 MASTER_LISTENER_OFF` while the Master is not a switchboard participant.
 If the listener goes away afterwards, a route still waits and its status notice still fires;
 the operator's status shows whether the Master can be told (`masterListener`) and how many
-routes are waiting on it untold (`routesMasterNotTold`).
+routes are waiting on it untold (`routesMasterNotTold`). A route is told again for each state
+it reaches, so the count includes one told of an earlier state and not of the one it is in.
+The guard reads the Master's setting, not whether a Master is running at that moment.
 
 ### Sending exactly once
 
@@ -298,6 +300,7 @@ The Master decides, through `tc bridge`:
 
 Refusals: `403 VERIFIED_LAUNCH_REQUIRED`, `409 BRIDGE_DISABLED`, `404 RECEIPT_NOT_FOUND`,
 `400 BAD_RECEIPT`, `400 RECEIPTS_REQUIRED`, `409 REQUEST_ID_CONFLICT`, `429 CANDIDATE_LIMIT`,
+`429 RATE_LIMITED` (twelve submissions a minute from one launch, whatever becomes of them),
 `400 UNKNOWN_CANDIDATE_KIND`, `400 CANDIDATE_TEXT_REQUIRED`, `413 CANDIDATE_TOO_LONG`,
 `400 CANDIDATE_NOT_DISPLAY_SAFE`; and for the Master `404 CANDIDATE_NOT_FOUND`,
 `409 VERSION_CONFLICT`, `409 REQUEST_ID_REUSED`, `409 ALREADY_DECIDED`,
@@ -309,6 +312,17 @@ that on (`POST /api/bridge/operator/candidate-primer`, below). The switch is off
 can be turned on only while the bridge is enabled; switching the bridge off takes the verb out
 of the list again. A pane's instructions are written when it launches, so the switch reaches
 each session at its next launch.
+
+The switch changes one thing: the verb list in the `## TangleClaw Ecosystem` section of a
+session's opening context. It changes no file. The carriers TangleClaw writes into a project
+(`CLAUDE.md`, `AGENTS.md`, `.codex.yaml`, `.aider.conf.yml`) hold the same verb list whatever the
+switch says, because two of them are tracked and none may hold a fact of one install.
+
+That section has a cap of 2820 characters with the switch on (2800 without). A session whose
+section would run past it is rendered as if the switch were off, and is not told of the verb.
+That is logged as a warning with the project id, the length and the cap, and the operator's
+status shows the last time it happened (`candidatePrimerOmitted`). `candidatesPrimed` is what
+the operator asked for, not what any one pane was told.
 
 ## Server notifications
 
@@ -370,8 +384,9 @@ also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never u
 | `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, parts, partCount}`: the lease the item was claimed under, and the chat's id for every message the item was posted as, in order, with how many there are. It seals the item. Exact: repeating it changes nothing, and a different set is refused. |
 | `POST /api/bridge/helper/outbound/:id/failure` | `{leaseId, reason, parts?, partCount?}`: the helper could not post the item, why, and which parts did post. |
 
-Refusals: `403 LOOPBACK_REQUIRED`, `429 RATE_LIMITED` (600 requests a minute from one token;
-preflight six), `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
+Refusals: `403 LOOPBACK_REQUIRED`, `429 RATE_LIMITED` (from one token, a minute: 120 inbound
+messages, 600 outbound requests, six preflights, each counted apart; a request over the bound
+writes nothing and spends no nonce, so it can be sent again as it is), `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
 `413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`, `400 BAD_CLAIM`,
 `400 LEASE_REQUIRED`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`, `400 BAD_PART`,
@@ -515,11 +530,13 @@ procedure is also still in force.
 
 The gateway tells the Project Master of an open episode through the Master's Medusa listener,
 at once and then every five minutes, until the Master acknowledges it with
-`tc bridge circuit ack <episode>`. The notice is a fixed sentence naming the episode and its
+`tc bridge circuit ack <episode>`. The acknowledgement belongs to the Master that gave it: a
+Master launched afterwards is told at once and until it acknowledges for itself. The notice is a fixed sentence naming the episode and its
 reason. Acknowledging does not close the episode. The Master's own rules tell it to report the
 episode to the operator at the workstation and that, while it is open, **a release is not a
 delivery receipt**: what it answers or releases only queues. A Master with no listener cannot
-be told this way; `tc bridge status` still shows the episode, and whether it was acknowledged.
+be told this way; `tc bridge status` still shows the episode, when the Master was last told,
+and whether the Master asking has acknowledged it.
 
 An episode does not close by itself, however long it lasts. Once the chat's configuration is
 put right, the Project Master (`tc bridge reset --requeue` or `--withdraw`) or the signed-in
@@ -545,7 +562,7 @@ audit.
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), whether sessions are being told of `tc candidate` and the last launch that was not (`candidatesPrimed`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
