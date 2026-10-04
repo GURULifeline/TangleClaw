@@ -239,11 +239,71 @@ describe('delivery disposition — the fleet view', () => {
   });
 });
 
+describe('delivery disposition — a stopped monitor never tells a sender to wait', () => {
+  it('with the monitor running, the answer is the reason\'s own class', () => {
+    for (const code of ['pane-turn-in-flight', 'wake-not-opted-in', 'nudged', 'session-ended']) {
+      assert.deepEqual(d.classifyForSender(code, { monitorRunning: true }), d.classifyReason(code));
+    }
+  });
+
+  it('with the monitor stopped, every reason is configuration, to be investigated', () => {
+    for (const code of [...Object.keys(wake.PEER_REASON_MEANINGS), 'listener-connecting', 'session-ended', 'brand-new-gate']) {
+      const c = d.classifyForSender(code, { monitorRunning: false });
+      assert.deepEqual([c.class, c.nextAction], ['configuration', 'investigate'], code);
+      assert.equal(c.nextActionMeaning, d.NEXT_ACTIONS.investigate);
+      assert.doesNotMatch(c.nextActionMeaning, /retries by itself/, code);
+    }
+  });
+
+  it('anything short of a positive "running" counts as stopped', () => {
+    for (const facts of [undefined, null, {}, { monitorRunning: 'yes' }, { monitorRunning: 1 }]) {
+      assert.equal(d.classifyForSender('pane-turn-in-flight', facts).nextAction, 'investigate');
+    }
+  });
+
+  it('still says whether the reason itself is one the table knows', () => {
+    assert.equal(d.classifyForSender('pane-turn-in-flight', { monitorRunning: false }).known, true);
+    assert.equal(d.classifyForSender('brand-new-gate', { monitorRunning: false }).known, false);
+  });
+});
+
 describe('delivery disposition — the sender-facing answer uses the same classifier', () => {
+  it('peerReachability from a stopped monitor says the monitor is not running and does not promise a retry', () => {
+    const saved = { ...wake._internal };
+    try {
+      wake.stop();
+      wake._internal.listLiveAll = () => [{ id: 1, projectId: 10, sessionMode: 'tmux', tmuxSession: 'tc-1', engineId: 'claude' }];
+      wake._internal.masterWakeRecord = () => null;
+      wake._internal.getProject = () => ({ id: 10, name: 'proj-a', path: '/tmp/proj-a' });
+      wake._internal.wrapRunning = () => true;
+      wake._internal.getStatus = () => ({ state: 'listening', workspaceId: 'peer-ws', unread: 1, lastError: null });
+      wake._internal.getMessages = () => [{ id: 'm1', from: 'x', message: 'hi' }];
+      wake._internal.recordDelivery = () => {};
+      wake._internal.recordWakeFacts = () => {};
+      // A verdict the monitor would retry by itself, were it running.
+      wake._internal.tick();
+      const stale = wake.peerReachability('peer-ws');
+      assert.equal(stale.reason, 'wrap-running');
+      assert.equal(stale.monitorRunning, false);
+      assert.deepEqual([stale.class, stale.nextAction], ['configuration', 'investigate']);
+      assert.doesNotMatch(stale.nextActionMeaning, /retries by itself/);
+      // The same verdict from a running monitor is one to wait out.
+      wake.start({ intervalMs: 2 ** 30 });
+      wake._internal.tick();
+      const fresh = wake.peerReachability('peer-ws');
+      assert.equal(fresh.monitorRunning, true);
+      assert.deepEqual([fresh.reason, fresh.class, fresh.nextAction], ['wrap-running', 'actionable', 'wait']);
+    } finally {
+      wake.stop();
+      Object.assign(wake._internal, saved);
+    }
+  });
+
   it('peerReachability carries the class and next action of its reason', () => {
     const saved = { ...wake._internal };
     try {
       wake.stop();
+      wake.start({ intervalMs: 2 ** 30 });
       wake._internal.listLiveAll = () => [{ id: 1, projectId: 10, sessionMode: 'tmux', tmuxSession: 'tc-1', engineId: 'claude' }];
       wake._internal.masterWakeRecord = () => null;
       wake._internal.getProject = () => ({ id: 10, name: 'proj-a', path: '/tmp/proj-a' });

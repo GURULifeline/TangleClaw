@@ -2816,10 +2816,21 @@ describe('medusa delivery ledger (#792)', () => {
         Object.assign(wake._internal, saved);
         wake.stop();
       }
-      // With no tick to say either way, the Master's liveness is unknown: still not historical.
+    });
+
+    it('a Master the monitor has not ticked over is liveness-unknown: configuration, to be investigated, never historical', async () => {
+      const wake = require('../lib/medusa-wake');
+      const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
+      // A stopped monitor has asked nothing about the Master.
+      wake.stop();
+      assert.equal(wake.masterIsLive(), null);
       const { data } = await get('/api/medusa/deliveries');
-      const unknown = data.undelivered.find((r) => String(r.sessionId) === masterKey);
-      assert.deepEqual([unknown.class, unknown.live, unknown.nextAction], ['configuration', null, 'investigate']);
+      const item = data.undelivered.find((r) => String(r.sessionId) === masterKey);
+      assert.ok(item, 'the Master\'s row is listed');
+      assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', null, 'investigate']);
+      assert.ok(data.configuration.includes(data.configuration.find((r) => String(r.sessionId) === masterKey)));
+      assert.equal(data.historical.find((r) => String(r.sessionId) === masterKey), undefined);
+      assert.equal(data.actionable.find((r) => String(r.sessionId) === masterKey), undefined);
     });
 
     it('undelivered is still the whole list in its old order, and every old field is still there', async () => {

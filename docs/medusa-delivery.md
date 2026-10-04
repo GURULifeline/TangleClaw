@@ -227,7 +227,10 @@ use it (#2086):
 - **`tc message status <workspace-id>`** prints the class and what to do
   beside the reason. The peers route returns them as `class`, `nextAction` and
   `nextActionMeaning`. A reason that is not a held wake (`nudged`, `no-mail`)
-  has the class `none`.
+  has the class `none`. When the wake monitor is not running, nothing is
+  retrying anything and the verdict is stale, so the answer is `configuration`,
+  to be investigated, whatever the last reason was. It never tells a sender to
+  wait for a monitor that is stopped.
 - **`GET /api/medusa/deliveries`** returns every session whose newest mail was
   not nudged. `undelivered` is the whole list, as before. Each item now also
   carries `class`, `live`, `reason`, `since`, `lastAssessedAt`, `ageMs`,

@@ -22,6 +22,15 @@ All notable changes to TangleClaw are documented in this file.
   - **v5.30.0 is unchanged.** It is recorded as hand-evaluated and is not re-judged. Its bundle predates both bundle changes above, so the judge applies from the next candidate.
   - **Reference:** `deploy/soak/README.md` ("Judging the bundle"), the bundle runbook's steps 7 and 8, and ADR 0021 point 14. Supersedes #2056.
 
+### Changed
+
+- **The undelivered-mail list and `tc message status` now say whether waiting will fix a held wake** (#2086). `GET /api/medusa/deliveries` listed every session whose newest mail was not nudged, with nothing to tell a session that is busy right now from one that ended in August. One live read returned 103 rows, 5 of them for live sessions.
+  - Each held wake is now one of three classes. `actionable`: the recipient is live and the monitor retries by itself. `configuration`: the recipient is live and nothing changes until someone acts, such as turning on wake-on-mail. `historical`: the recipient session is no longer live.
+  - `tc message status <workspace-id>` prints the class and what to do beside the reason. The peers route returns `class`, `nextAction` and `nextActionMeaning`.
+  - `GET /api/medusa/deliveries` keeps `undelivered` as the whole list, in the same order, with every existing field. Each item gains its class, whether the session is live, its age, when the monitor last looked, and what to do. The response adds `actionable`, `configuration` and `historical` lists of the same items, and a `summary`.
+  - A reason code with no declared class is shown as `configuration`, to be investigated, and logged once. A row is `historical` only when its session is positively not live.
+  - Nothing is removed or expired. Old rows are classified, not deleted.
+
 ### Fixed
 
 - **A release can no longer leave a tag with no Release because its notes are too long** (#2080). v5.30.0's notes were about 191,000 characters, GitHub refused them at its 125,000-character limit, and the tag was already pushed. Before any tag, push or release, `release.yml` now measures the exact UTF-8 bytes of the notes and stops, with a message saying what to do, when they are empty or over 120,000 bytes. The notes are never truncated: shorten the version's `CHANGELOG.md` section and release again, as `docs/release-process.md` describes. A new test also fails a pull request that takes `[Unreleased]` past 110,000 bytes, so the problem shows up at merge time and not at the release.
@@ -38,12 +47,6 @@ All notable changes to TangleClaw are documented in this file.
   - A request is not a command: it runs the same scan through every wake gate, and one look never nudges. A look that was asked for and finds the pane at rest books a single second look 4 seconds later, so the nudge still follows two at-rest observations of an unchanged pane.
   - Requests are coalesced per session and dropped when they could only waste a look. A restart loses pending requests and the timer covers them.
   - A session that is mid-turn when its mail arrives is still found at rest by the timer. No engine pushes a "turn finished" event the monitor could use.
-- **The undelivered-mail list and `tc message status` now say whether waiting will fix a held wake** (#2086). `GET /api/medusa/deliveries` listed every session whose newest mail was not nudged, with nothing to tell a session that is busy right now from one that ended in August. One live read returned 103 rows, 5 of them for live sessions.
-  - Each held wake is now one of three classes. `actionable`: the recipient is live and the monitor retries by itself. `configuration`: the recipient is live and nothing changes until someone acts, such as turning on wake-on-mail. `historical`: the recipient session is no longer live.
-  - `tc message status <workspace-id>` prints the class and what to do beside the reason. The peers route returns `class`, `nextAction` and `nextActionMeaning`.
-  - `GET /api/medusa/deliveries` keeps `undelivered` as the whole list, in the same order, with every existing field. Each item gains its class, whether the session is live, its age, when the monitor last looked, and what to do. The response adds `actionable`, `configuration` and `historical` lists of the same items, and a `summary`.
-  - A reason code with no declared class is shown as `configuration`, to be investigated, and logged once. A row is `historical` only when its session is positively not live.
-  - Nothing is removed or expired. Old rows are classified, not deleted.
 
 ### Internal
 
