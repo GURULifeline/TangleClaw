@@ -1038,6 +1038,68 @@ describe('bridge gateway (#2031)', () => {
       assert.match(aboutCircuit()[aboutCircuit().length - 1].message, new RegExp(`episode ${next},`));
     });
 
+    it('a Master launched while the chat is closed is told on the next pass, whatever its predecessor was told', async () => {
+      const aboutCircuit = () => hub.system.filter((m) => m.message.includes('configuration circuit'));
+      /**
+       * A Master is launched: a new generation, live from now.
+       * @param {string} c - One hex digit, to make its credential's hash.
+       * @returns {number} The generation.
+       */
+      const masterLaunched = (c) => {
+        const generation = bridgeStore.masterCredentials.mint(c.repeat(64), { at: clock });
+        bridgeStore.masterCredentials.activate(generation, c.repeat(64), { at: clock });
+        return generation;
+      };
+      const told = () => { const e = bridgeStore.circuit.open(); return [e.masterToldAt, e.masterToldGeneration]; };
+      const first = masterLaunched('a');
+      const text = 'notice y';
+      const id = bridgeStore.outbound.enqueue({ idemKey: 'notify:operator-needed:y', kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text), at: clock }).outboundId;
+      const item = helperClaims().body.items.find((i) => i.outboundId === id);
+      const episode = gateway.reportFailure(id, { leaseId: item.leaseId, tokenId: helper().tokenId, reason: 'chat-permission-denied' }).body.circuit.episodeId;
+      assert.deepEqual(told(), [null, null]);
+
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.deepEqual(told(), [clock, first], 'who was told is on the record');
+
+      // The predecessor was told and never acknowledged. Its successor does
+      // not wait out a notice it never had: it is told on the very next pass.
+      const second = masterLaunched('b');
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.deepEqual([aboutCircuit().length, told()], [2, [clock, second]]);
+
+      // Repeats to the same generation are what the interval paces.
+      assert.equal((await gateway.tick()).circuitTold, false);
+      later(gateway.CIRCUIT_RETELL_MS - 1000);
+      assert.equal((await gateway.tick()).circuitTold, false);
+      later(1000);
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.equal(aboutCircuit().length, 3);
+
+      // A restart forgets nothing: the same Master is not told early, and a
+      // new one is still told at once.
+      gateway._reset();
+      later(1000);
+      assert.equal((await gateway.tick()).circuitTold, false, 'the store, not the process, remembers who was told and when');
+      const third = masterLaunched('c');
+      gateway._reset();
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.deepEqual([aboutCircuit().length, told()], [4, [clock, third]]);
+
+      // The predecessor acknowledged. The successor is told at once all the same.
+      assert.equal(bridgeStore.circuit.ack(episode, third, { at: clock }).outcome, 'acked');
+      assert.equal((await gateway.tick()).circuitTold, false);
+      const fourth = masterLaunched('d');
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.deepEqual([aboutCircuit().length, told()], [5, [clock, fourth]]);
+
+      // With no Master generation live the telling is recorded against none,
+      // and paced like any other repeat.
+      bridgeStore.masterCredentials.revoke('master-not-live', { at: clock });
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.deepEqual(told(), [clock, null]);
+      assert.equal((await gateway.tick()).circuitTold, false);
+    });
+
     it('a Master with no listener cannot be told of the circuit that way; it is told once it has one', async () => {
       const text = 'notice x';
       const id = bridgeStore.outbound.enqueue({ idemKey: 'notify:operator-needed:x', kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text), at: clock }).outboundId;

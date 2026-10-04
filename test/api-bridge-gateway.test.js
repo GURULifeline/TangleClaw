@@ -624,7 +624,8 @@ describe('bridge API: the round trip (#2031)', () => {
     masterGeneration = bridgeStore.masterCredentials.mint(relaunched.hash);
     bridgeStore.masterCredentials.activate(masterGeneration, relaunched.hash);
     masterCredential = relaunched.credential;
-    bridgeStore.circuit.noteMasterTold(episodeId, { at: '2026-10-04T09:00:00.000Z' });
+    assert.match((await tc(['bridge', 'status'])).stdout, /You have not been told of it by message\. NOT YET ACKNOWLEDGED by you/, 'what its predecessor was told is not what it was told');
+    bridgeStore.circuit.noteMasterTold(episodeId, masterGeneration, { at: '2026-10-04T09:00:00.000Z' });
     const successor = (await tc(['bridge', 'status'])).stdout;
     assert.match(successor, /You were last told 2026-10-04T09:00:00\.000Z\. NOT YET ACKNOWLEDGED by you \(an earlier Master did\): tell the operator/);
     assert.ok(!/Acknowledged 20/.test(successor));
