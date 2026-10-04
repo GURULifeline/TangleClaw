@@ -13,7 +13,8 @@ const http = require('node:http');
  *   `posts` is every message made, in order. `script` is consumed one entry
  *   per POST: `{status, body}` answers without posting, and `{status, lands:
  *   true}` posts and then answers with that status, which is what a timeout
- *   after the fact looks like.
+ *   after the fact looks like. `onlyThreaded: true` keeps an entry for the
+ *   next post that names a message to reply to.
  */
 async function startFakeDiscord() {
   const posts = [];
@@ -53,7 +54,9 @@ async function startFakeDiscord() {
       if (req.method === 'POST' && post) {
         postCalls += 1;
         const body = JSON.parse(raw);
-        const scripted = script.shift();
+        // An entry marked `onlyThreaded` answers a post that names a message
+        // to reply to, and waits for one: a post that names none passes it by.
+        const scripted = script[0] && script[0].onlyThreaded && !body.message_reference ? null : script.shift();
         if (scripted) {
           if (scripted.lands) make(post[1], body);
           return answer(scripted.status, scripted.body || {});

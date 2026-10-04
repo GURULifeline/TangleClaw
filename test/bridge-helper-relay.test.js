@@ -742,9 +742,13 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual([Boolean(entry.since), entry.unthreaded, entry.parts], [true, 0, []], 'the attempt is in doubt, and the part stays unthreaded');
       assert.deepEqual([atBridge(outboundId)[0], bridgeStore.circuit.open()], ['ready', null]);
 
+      // Discord would still refuse a reply to that message. The helper does not try one again.
       clock += 30000;
+      discord.script.push({ status: 404, body: {}, onlyThreaded: true });
       assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
       assert.equal(discord.calls() - calls, 3, 'one more call: by itself, not as a reply again');
+      assert.equal(discord.script.length, 1, 'the refusal waiting for a reply was never asked for');
+      discord.script.length = 0;
       assert.deepEqual(discord.posts.map((p) => [p.content, p.replyTo, p.nonce]), [['**Project Master**\nthe answer', null, nonceFor(relay.state.salt, outboundId, 0)]]);
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
     });
@@ -760,6 +764,25 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
           ['blocked', 'outcome-unverifiable', 'delivered', null]);
         assert.deepEqual(codes.filter(([c]) => c === 'outbound-unplaceable').map(([, f]) => f.status), [refusal.status]);
         store.getDb().exec("DELETE FROM bridge_outbound WHERE state = 'ready'");
+      }
+    });
+
+    it('a definite refusal of a first attempt leaves nothing in doubt, even when the bridge could not be told', async () => {
+      for (const refusal of [{ status: 418, body: {} }, { status: 400, body: { code: 50035 } }]) {
+        discord.posts.length = 0;
+        const { outboundId } = await answered('the answer');
+        discord.script.push(refusal);
+        // The refusal cannot be reported: the bridge does not answer.
+        const relay = outbound({ bridge: { ...bridge, fail: async () => { throw new BridgeError(0, null); } } });
+        await relay.pass();
+        assert.deepEqual(atBridge(outboundId), ['ready', null], 'the bridge was never told, so the item still waits');
+        assert.equal(relay.state.get(outboundId).since, undefined, `Discord refused it outright: nothing is in doubt (${refusal.status})`);
+        assert.ok(logged().includes('outbound-report-failed'));
+
+        // Much later the item is handed over again. It is a first attempt once more, and it posts.
+        clock += NONCE_WINDOW_MS + bridgeStore.LEASE_MS;
+        assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 }, 'not held as uncertain on the strength of a refusal');
+        assert.deepEqual([discord.posts.length, atBridge(outboundId)[0]], [1, 'delivered']);
       }
     });
 
