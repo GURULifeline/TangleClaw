@@ -92,7 +92,11 @@ function installWorld() {
     : Promise.resolve({ outcome: world.receipt, reason: 'proof' }));
   // The listener and the Hub.
   s.getStatus = () => ({ state: 'listening', workspaceId: RECIPIENT_WS, unread: world.inbox.length, lastError: null });
-  s.getMessages = () => world.inbox.map((id) => ({ id, from: SENDER_WS, message: 'proof' }));
+  // `envelopeIds` gives each body a `messageId` that differs from its `id`:
+  // the exchange record is keyed on `id` alone.
+  s.getMessages = () => world.inbox.map((id) => (input.envelopeIds
+    ? { id, messageId: `envelope-${id}`, from: SENDER_WS, message: 'proof' }
+    : { id, from: SENDER_WS, message: 'proof' }));
   watchdog._internal.sendSystemMessage = async (m) => {
     world.notices.push({ at: world.now, to: m.to, body: JSON.parse(m.message) });
     return { status: 'received' };

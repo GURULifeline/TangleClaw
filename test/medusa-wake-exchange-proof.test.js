@@ -293,6 +293,39 @@ describe('wakes on the real exchange record (#2086)', () => {
       }
     });
 
+    // The other order: fetched before any nudge was recorded on it (read while
+    // the pane was busy, or in the same inbox read an earlier nudge prompted).
+    // It has a read on record and no attempt, and a restart is still no reason.
+    it('fetched before it was ever nudged: no restart nudges it, and no attempt is ever recorded', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'read', hubIds: ['h1'] }]);
+      for (let i = 0; i < 4; i++) {
+        const restarted = phase([{ op: 'ticks', n: 8 }]);
+        assert.equal(restarted.injected.length, 0, `lifetime ${lifetimes}`);
+        assert.equal(nudges(restarted).length, 0);
+        const x = exchange(restarted, 'h1');
+        assert.deepEqual([x.state, attemptNonces(x).length, x.rearmCount], ['read', 0, 0]);
+      }
+    });
+
+    it('fetched before it was ever nudged, then new mail: the new message is nudged once and only it records the attempt', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'read', hubIds: ['h1'] }]);
+      phase([{ op: 'send', hubId: 'h2' }]);
+      const woken = phase([{ op: 'ticks', n: 8 }]);
+      assert.equal(woken.injected.length, 1);
+      assert.equal(attemptNonces(exchange(woken, 'h2')).length, 1);
+      assert.equal(attemptNonces(exchange(woken, 'h1')).length, 0);
+      for (let i = 0; i < 2; i++) {
+        const restarted = phase([{ op: 'ticks', n: 8 }]);
+        assert.equal(restarted.injected.length, 0);
+        assert.equal(nudges(restarted).length, 1);
+      }
+    });
+
+    it('the record is asked by the body\'s `id`, which is what it is keyed on, whatever `messageId` the body carries', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }], { envelopeIds: true });
+      for (let i = 0; i < 2; i++) assert.equal(phase([{ op: 'ticks', n: 8 }], { envelopeIds: true }).injected.length, 0);
+    });
+
     it('redelivered and fetched again after a restart, it is still one arrival and one read on record', () => {
       phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
       const again = phase([{ op: 'redeliver', hubIds: ['h1'] }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }, { op: 'ticks', n: 4 }]);

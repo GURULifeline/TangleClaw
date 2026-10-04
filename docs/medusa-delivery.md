@@ -141,11 +141,15 @@ The wake monitor still nudges once per fresh-mail edge, and now:
   treating mail as un-nudged, so a restart never sends an extra wake. It asks
   about each message in the inbox by its own Hub id (#2086). The Hub
   redelivers mail that was never marked handled, so a message the recipient
-  already fetched comes back as unread; it has a nudge on record, and a
-  restart is not a reason for another. A message the record cannot vouch for
-  (no id, no exchange, never nudged, or re-armed) makes the answer no, so new
-  mail is not hidden behind old. Untracked mail and mail with no exchange
-  record are therefore nudged once per server lifetime.
+  already fetched comes back as unread. A message is the recipient's already
+  when its exchange shows the recipient read or acknowledged it, whether or
+  not it was ever nudged, or shows a nudge with no re-arm pending; a restart
+  is not a reason for another. A message the record cannot vouch for (no id,
+  no exchange, neither read nor nudged, or re-armed) makes the answer no, so
+  new mail is not hidden behind old. Mail with no exchange record, and
+  untracked mail the recipient has not fetched, are therefore nudged once per
+  server lifetime. The record is asked by the message body's `id`, which is
+  what arrivals and reads are recorded under.
 
 The watchdog re-arms a wake only on a durable trigger newer than the attempt:
 
@@ -427,8 +431,9 @@ are stand-ins. It holds that:
 - a receipt marks only the messages whose newest nudge it names;
 - a held wake is recorded once, survives a restart and is still delivered;
 - the aged notice and the operator alert are each sent once across restarts;
-- mail that was fetched but not marked handled is not nudged again by a
-  restart, and never hides new mail.
+- mail that was fetched but not marked handled is not nudged by a restart,
+  whether it was fetched after a nudge or before one was ever recorded, and
+  never hides new mail.
 
 Limits of that proof, which are not defects:
 

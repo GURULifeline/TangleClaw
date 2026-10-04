@@ -501,6 +501,34 @@ describe('medusa-exchanges (#1839)', () => {
       assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'nor is a redelivery of mail already handled');
     });
 
+    it('a message the recipient fetched or handled is owned though it was never nudged', () => {
+      delivered('hub-1', { nudged: false });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), false, 'neither nudged nor read');
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'a read on record is enough');
+      assert.equal(store.medusaExchanges.facts(store.medusaExchanges.getByHubId('hub-1', 'send').exchange_id)
+        .filter((f) => f.fact === 'wake_attempted').length, 0);
+
+      delivered('hub-2', { nudged: false });
+      mx.recordAcknowledged(['hub-2'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-2']), true, 'so is an acknowledgement with no read before it');
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), true);
+    });
+
+    it('a look from the dashboard is not a read, so it owns nothing', () => {
+      delivered('hub-1', { nudged: false });
+      assert.equal(mx.recordRead(['hub-1'], 'builder-ws', { kind: 'operator-ui' }), 0);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), false);
+    });
+
+    it('a read of one message vouches for that message only', () => {
+      delivered('hub-1', { nudged: false });
+      delivered('hub-2', { nudged: false });
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), false);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-2']), false);
+    });
+
     it('new mail is never hidden behind old: one message never nudged makes the answer no', () => {
       delivered('hub-1');
       mx.recordRead(['hub-1'], 'builder-ws', BUILDER);

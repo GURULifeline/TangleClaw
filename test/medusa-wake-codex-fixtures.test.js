@@ -86,6 +86,30 @@ const ON_FRESH_IDLE = {
  */
 const UNPROVEN_ON_FRESH_IDLE = [['0.155.1', 'thinking']];
 
+/**
+ * Live-captured panes that say the same thing as an earlier one, in any set.
+ * Compared by content, with trailing space on each row ignored, so a pasted
+ * literal is found as well as a reused constant. Two versions that truly draw
+ * the same pane would be reported too: that is for whoever adds the set to
+ * explain here, not for this check to wave through.
+ * @param {object[]} sets - Fixture sets
+ * @returns {string[]} One line per copy, empty when there are none
+ */
+function copiedPanes(sets) {
+  const seen = new Map();
+  const copies = [];
+  for (const set of sets) {
+    for (const [name, pane] of Object.entries(set.panes)) {
+      if (pane.provenance !== 'live-capture') continue;
+      const content = pane.lines.map((row) => row.trimEnd()).join('\n');
+      const label = `${set.cliVersion} ${name}`;
+      if (seen.has(content)) copies.push(`${label} copies ${seen.get(content)}`);
+      else seen.set(content, label);
+    }
+  }
+  return copies;
+}
+
 /** Let pending observation promises settle. @returns {Promise<void>} */
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -169,14 +193,27 @@ describe('Codex wake fixtures are qualified by version (#2086)', () => {
   });
 
   it('a set is not a copy of another under a new version number', () => {
-    const seen = new Map();
-    for (const set of CODEX_FIXTURE_SETS) {
-      for (const [name, pane] of Object.entries(set.panes)) {
-        if (pane.provenance !== 'live-capture') continue;
-        assert.ok(!seen.has(pane.lines), `${set.cliVersion} ${name} reuses ${seen.get(pane.lines)}`);
-        seen.set(pane.lines, `${set.cliVersion} ${name}`);
-      }
-    }
+    assert.deepEqual(copiedPanes(CODEX_FIXTURE_SETS), []);
+  });
+
+  it('the copy check reads what a pane says, so a pasted copy is caught as surely as a reused constant', () => {
+    const [real] = CODEX_FIXTURE_SETS;
+    const pasted = {
+      engine: 'codex',
+      cliVersion: '9.9.9',
+      capturedOn: '2026-10-04',
+      panes: { idle: { lines: JSON.parse(JSON.stringify(real.panes.idle.lines)), provenance: 'live-capture' } }
+    };
+    assert.notEqual(pasted.panes.idle.lines, real.panes.idle.lines, 'a different array holding the same rows');
+    assert.deepEqual(copiedPanes([real, pasted]), [`9.9.9 idle copies ${real.cliVersion} idle`]);
+    // Trailing spaces and a re-wrapped array do not disguise one.
+    const padded = { ...pasted, panes: { idle: { lines: real.panes.idle.lines.map((row) => `${row}  `), provenance: 'live-capture' } } };
+    assert.equal(copiedPanes([real, padded]).length, 1);
+    // A pane that really differs is not a copy, and a derived pane is not held to this.
+    const different = { ...pasted, panes: { idle: { lines: ['\u203a', '  Ready now'], provenance: 'live-capture' } } };
+    assert.deepEqual(copiedPanes([real, different]), []);
+    const derived = { ...pasted, panes: { thinking: { lines: [...real.panes.thinking.lines], provenance: 'derived' } } };
+    assert.deepEqual(copiedPanes([real, derived]), []);
   });
 
   it('the cells left unproven are exactly the derived panes, and they are named', () => {
