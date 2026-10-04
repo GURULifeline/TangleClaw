@@ -4,6 +4,10 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+### Internal
+
+- **The Codex receipt test no longer races its own read-back** (#1964). Its fake app-server sent the acceptance and completion notifications on 20 ms and 80 ms timers. On a slow runner the turn finished before the adapter's post-subscribe read-back ran, so `one read-back` saw 0 (seen on PR #1958's CI). The notifications now follow the adapter's first read-back after `turn/start`, which reports the turn still in progress with nothing echoed, so acceptance can only come from the notification. Every assertion is unchanged. With the old timers shortened to 0 and 1 ms, the test failed 6 runs in 10 on the same assertion; the new one passed 30 of 30 under CPU load.
+
 ## [5.30.0] - 2026-10-04
 
 ### Added
