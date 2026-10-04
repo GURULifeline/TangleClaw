@@ -306,6 +306,15 @@ server time, before its notices go out:
   "What a held wake means": a busy recipient is `actionable`, one that never
   opted in is `configuration`, and a message that was nudged and not yet read
   is `none`. With the wake monitor stopped, no notice promises a retry.
+- **A nudge that was not accepted is not a nudge.** It waits on a re-arm, so
+  it reads as `actionable` while the watchdog can still re-arm it. Once the
+  re-arm budget (`maxRearms`) is spent nothing retries, and it reads as
+  `configuration` with `investigate`. A wake the monitor is still holding is
+  retried by the monitor and is not affected by that budget.
+- **A notice says what the message is waiting for.** `condition` is `unread`,
+  or `unanswered` for a message that was acknowledged and still owes a reply.
+  It is separate from `class`: an acknowledged message holds no wake, so its
+  class is `none`, and it is still plainly unanswered.
 - **Normal mail reaches the operator once.** It never reaches the escalation
   route, and the sender is told once, at the aged step. It used to stop
   there, which left the cases only an operator can resolve silent for ever.
@@ -324,8 +333,8 @@ server time, before its notices go out:
   the same transaction, only by the pass that recorded it. Repeated passes, a
   restart and competing passes add neither. A row that cannot be written
   leaves no fact, and the next pass records both. The fact keeps the blocker,
-  its class and next action, and why the operator was told, as they were
-  then. A later change of class neither repeats the alert nor rewrites it.
+  the condition, its class and next action, and why the operator was told, as
+  they were then. A later change of class neither repeats the alert nor rewrites it.
 - **An operator alert is not a message.** It wakes nobody and costs no turn.
 - **Untracked mail is not on the ladder.** A message to a workspace no live
   session on this host holds cannot be supervised from here. Its own host

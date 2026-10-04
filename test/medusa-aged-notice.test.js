@@ -181,6 +181,84 @@ describe('aged notices (#2086)', () => {
       assert.deepEqual([body.class, body.nextAction], ['actionable', 'wait']);
     });
 
+    it('a nudge that was not accepted is re-armed at once, and reads as waiting on that re-arm', async () => {
+      const body = await agedNotice(() => {
+        wake('wake_attempted', 'tmux', T0 + MIN);
+        wake('wake_not_accepted', 'nonce-still-in-composer', T0 + 2 * MIN);
+      });
+      assert.deepEqual([body.blocker, body.class, body.nextAction], ['rearmed', 'actionable', 'wait']);
+    });
+
+    it('a nudge that was not accepted is not a nudge: between re-arms, with budget left, it is actionable', async () => {
+      // An hour between re-arms, so the second miss is still waiting when the message ages.
+      watchdog._internal.loadConfig = () => ({ medusaWatchdog: { backoffMs: [60 * MIN] } });
+      const x = pmToBuilder({});
+      wake('wake_attempted', 'tmux', T0 + MIN);
+      wake('wake_not_accepted', 'nonce-still-in-composer', T0 + 2 * MIN);
+      await tickAt(T0 + 3 * MIN);
+      assert.equal(row(x).rearm_count, 1);
+      wake('wake_attempted', 'tmux', T0 + 4 * MIN);
+      wake('wake_not_accepted', 'nonce-still-in-composer', T0 + 5 * MIN);
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(row(x).state, 'wake_not_accepted');
+      assert.equal(row(x).rearm_count, 1, 'the next re-arm is not due yet');
+      assert.equal(sent.length, 1);
+      assert.deepEqual([sent[0].body.blocker, sent[0].body.class, sent[0].body.nextAction], ['nonce-still-in-composer', 'actionable', 'wait']);
+      assert.equal(activity.length, 0, 'and the operator is not told at the aged rung');
+    });
+
+    it('a nudge that was not accepted, with the re-arm budget spent, promises no retry and is the operator\'s at once', async () => {
+      watchdog._internal.loadConfig = () => ({ medusaWatchdog: { maxRearms: 0 } });
+      const x = pmToBuilder({});
+      wake('wake_attempted', 'tmux', T0 + MIN);
+      wake('wake_not_accepted', 'nonce-still-in-composer', T0 + 2 * MIN);
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(row(x).state, 'wake_not_accepted');
+      assert.equal(sent.length, 1);
+      assert.deepEqual([sent[0].body.class, sent[0].body.nextAction], ['configuration', 'investigate']);
+      assert.doesNotMatch(sent[0].body.nextActionMeaning, /retries by itself/);
+      assert.equal(alerts(x)[0].code, 'configuration-hold');
+      assert.deepEqual([detail(alerts(x)[0]).class, detail(alerts(x)[0]).nextAction], ['configuration', 'investigate']);
+      assert.equal(activity.length, 1);
+    });
+
+    it('a spent re-arm budget says nothing about a wake the monitor is still holding', async () => {
+      // The budget bounds re-arms of a nudge that missed. A held wake is retried by the monitor itself.
+      watchdog._internal.loadConfig = () => ({ medusaWatchdog: { maxRearms: 0 } });
+      const body = await agedNotice(() => wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN));
+      assert.deepEqual([body.blocker, body.class, body.nextAction], ['pane-turn-in-flight', 'actionable', 'wait']);
+    });
+
+    it('every notice says whether the message is unread or unanswered', async () => {
+      const body = await agedNotice(() => wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN));
+      assert.equal(body.condition, 'unread');
+    });
+
+    it('acknowledged and still owed a reply: no wake is held, and it is visibly unanswered', async () => {
+      const x = pmToBuilder({ replyRequired: true });
+      clock = T0 + 2 * MIN;
+      mx.recordAcknowledged(['hub-1'], 'builder-ws', { kind: 'project', projectId: builder.id });
+      await tickAt(T0 + 31 * MIN);
+      assert.equal(sent.length, 0, 'measured from the ack');
+      await tickAt(T0 + 32 * MIN);
+      assert.equal(sent.length, 1);
+      assert.deepEqual([sent[0].body.condition, sent[0].body.class, sent[0].body.nextAction], ['unanswered', 'none', 'none']);
+      // An hour after the ack it has merely waited too long, and the operator is told once.
+      await tickAt(T0 + 62 * MIN);
+      assert.equal(alerts(x).length, 1);
+      assert.equal(alerts(x)[0].code, 'prolonged-unread');
+      assert.deepEqual([detail(alerts(x)[0]).condition, detail(alerts(x)[0]).class], ['unanswered', 'none']);
+      assert.equal(activity.length, 1);
+    });
+
+    it('a reply-required message that has not been acknowledged is unread, not unanswered', async () => {
+      const x = pmToBuilder({ replyRequired: true });
+      wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN);
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(sent[0].body.condition, 'unread');
+      assert.equal(row(x).esc_level, 'aged');
+    });
+
     it('with the wake monitor stopped, no notice promises a retry', async () => {
       monitorRunning = false;
       const body = await agedNotice(() => wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN));
@@ -219,7 +297,7 @@ describe('aged notices (#2086)', () => {
       assert.equal(alerts(x).length, 1);
       assert.equal(alerts(x)[0].code, 'configuration-hold');
       assert.deepEqual(detail(alerts(x)[0]), {
-        blocker: 'wake-not-opted-in', class: 'configuration', nextAction: 'enable-wake',
+        blocker: 'wake-not-opted-in', condition: 'unread', class: 'configuration', nextAction: 'enable-wake',
         nextActionMeaning: disposition.NEXT_ACTIONS['enable-wake'], why: 'configuration-hold'
       });
       assert.equal(activity.length, 1);
