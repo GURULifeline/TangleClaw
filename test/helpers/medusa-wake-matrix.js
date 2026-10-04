@@ -24,7 +24,15 @@
 
 const { performance } = require('node:perf_hooks');
 const wake = require('../../lib/medusa-wake');
-const { IDLE_PANE, BUSY_PANE, TYPING_PANE } = require('../_wake-fixtures');
+const {
+  IDLE_PANE, BUSY_PANE, TYPING_PANE, AG_IDLE_PANE, AG_BUSY_PANE, AG_TYPING_PANE
+} = require('../_wake-fixtures');
+
+/** The at-rest, busy and drafting panes of each pane-judged engine the fleet can hold. */
+const PANES = Object.freeze({
+  claude: { idle: IDLE_PANE, busy: BUSY_PANE, draft: TYPING_PANE },
+  antigravity: { idle: AG_IDLE_PANE, busy: AG_BUSY_PANE, draft: AG_TYPING_PANE }
+});
 
 /** Session states the matrix mixes, in the order a fleet is filled. */
 const FILLER_STATES = Object.freeze(['no-mail', 'busy', 'draft', 'unprofiled', 'listener-off', 'ended']);
@@ -34,9 +42,11 @@ const FILLER_STATES = Object.freeze(['no-mail', 'busy', 'draft', 'unprofiled', '
  *
  * The two tmux figures are the median of a measurement, taken 2026-10-04 on
  * the development host against a throwaway tmux server: one `tmux` command
- * costs about 18.5 ms, nearly all of it process start. A pane capture is one
- * command and a cursor probe is two. The other figures are small round
- * estimates for in-process lookups and are not measured.
+ * costs about 18.5 ms, nearly all of it process start. `lib/tmux.js` runs four
+ * commands for a pane capture (a liveness probe, an alternate-screen check
+ * that probes again and asks, and the capture) and three for a cursor probe.
+ * The other figures are small round estimates for in-process lookups and are
+ * not measured.
  */
 const DEFAULT_COSTS = Object.freeze({
   getProject: 0.05,
@@ -45,14 +55,22 @@ const DEFAULT_COSTS = Object.freeze({
   loadProjectConfig: 0.5,
   getStatus: 0.02,
   getMessages: 0.02,
-  capturePane: 18.5,
-  cursorInfo: 37,
+  capturePane: 74,
+  cursorInfo: 55.5,
   injectCommand: 250,
-  durable: 0.2
+  durable: 0.2,
+  // A non-blocking read is four tmux commands. With thirty in flight at once
+  // on the development host each took about a second, so every read already
+  // in flight adds a share of that.
+  asyncRead: 74,
+  asyncContention: 35
 });
 
-/** The same model with the tmux figures at the 95th percentile of that measurement. */
-const P95_COSTS = Object.freeze({ ...DEFAULT_COSTS, capturePane: 63, cursorInfo: 85 });
+/** How long the monitor waits for one non-blocking pane read. */
+const READ_TIMEOUT_MS = wake.PANE_READ_TIMEOUT_MS;
+
+/** The same model with every tmux command at the 95th percentile of that measurement (63 ms and 42 ms). */
+const P95_COSTS = Object.freeze({ ...DEFAULT_COSTS, capturePane: 252, cursorInfo: 126 });
 
 /** The interval the monitor ticks on in production. */
 const INTERVAL_MS = 5000;
@@ -61,10 +79,16 @@ const INTERVAL_MS = 5000;
  * One synthetic session and what its seams answer.
  * @param {number} id - Session id
  * @param {string} state - One of `idle-mail`, `slow`, `throwing` or a `FILLER_STATES` value
+ * @param {object} [opts]
+ * @param {'claude'|'antigravity'} [opts.engine='claude'] - The session's engine
+ * @param {number} [opts.slowReads=Infinity] - For a `slow` session, how many pane reads
+ *   are slow before the pane answers normally, at rest
  * @returns {object}
  */
-function makeSession(id, state) {
+function makeSession(id, state, opts = {}) {
   const hasMail = state !== 'no-mail';
+  const engine = opts.engine || 'claude';
+  const panes = PANES[engine];
   return {
     state,
     record: {
@@ -72,7 +96,7 @@ function makeSession(id, state) {
       projectId: id,
       sessionMode: 'tmux',
       tmuxSession: `syn-${id}`,
-      engineId: state === 'unprofiled' ? 'no-such-engine' : 'claude',
+      engineId: state === 'unprofiled' ? 'no-such-engine' : engine,
       ...(state === 'ended' ? { status: 'ended' } : {})
     },
     project: { id, name: `syn-proj-${id}`, path: `/nonexistent/syn-proj-${id}` },
@@ -83,7 +107,8 @@ function makeSession(id, state) {
       lastError: null
     },
     inbox: hasMail ? [{ id: `m-${id}-1`, from: 'peer', message: 'hello' }] : [],
-    pane: state === 'busy' ? BUSY_PANE : state === 'draft' ? TYPING_PANE : IDLE_PANE
+    pane: state === 'busy' ? panes.busy : state === 'draft' ? panes.draft : panes.idle,
+    slowReadsLeft: state === 'slow' ? (opts.slowReads ?? Infinity) : 0
   };
 }
 
@@ -94,6 +119,8 @@ function makeSession(id, state) {
  * @param {'first'|'last'} [opts.eligibleAt='last'] - Where the eligible recipient sits in scan order
  * @param {string[]} [opts.lead=[]] - States placed first in scan order (`slow`, `throwing`)
  * @param {string[]} [opts.fillers] - States the rest of the fleet cycles through
+ * @param {'claude'|'antigravity'} [opts.engine] - Every session's engine
+ * @param {number} [opts.slowReads] - How many reads of a `slow` session are slow
  * @returns {object[]} Sessions in scan order
  */
 function buildFleet(opts) {
@@ -103,7 +130,7 @@ function buildFleet(opts) {
   const states = lead.slice(0, Math.max(0, opts.size - 1));
   for (let i = 0; i < fillers; i++) states.push(cycle[i % cycle.length]);
   if (opts.eligibleAt === 'first') states.unshift('idle-mail'); else states.push('idle-mail');
-  return states.map((state, i) => makeSession(i + 1, state));
+  return states.map((state, i) => makeSession(i + 1, state, { engine: opts.engine, slowReads: opts.slowReads }));
 }
 
 /**
@@ -136,6 +163,8 @@ function install(fleet, opts = {}) {
     facts: [],
     attempted: new Set(),
     scans: [],
+    paneReads: [],
+    pending: [],
     restore: () => { wake.stop(); Object.assign(wake._internal, saved); }
   };
   // In real mode every cost also holds the thread for a scaled-down real
@@ -171,7 +200,18 @@ function install(fleet, opts = {}) {
   s.getMessages = (sessionId) => { spend(costs.getMessages); return byId.get(sessionId).inbox; };
   s.capturePane = (tmuxName) => {
     const x = byTmux.get(tmuxName);
-    if (x.state === 'slow') { spend(slowMs); throw new Error('synthetic: tmux timed out'); }
+    world.paneReads.push({ sessionId: x.record.id, at: world.clockMs });
+    if (x.slowReadsLeft > 0) {
+      x.slowReadsLeft -= 1;
+      spend(slowMs);
+      throw new Error('synthetic: tmux timed out');
+    }
+    // A read that is slow and still answers, as a loaded tmux server gives.
+    if (x.slowAnswersLeft > 0) {
+      x.slowAnswersLeft -= 1;
+      spend(slowMs);
+      return { lines: x.pane };
+    }
     spend(costs.capturePane);
     // Recorded at the moment the pane is read: the first point at which the
     // monitor has looked at this recipient's live state for this mail.
@@ -179,6 +219,30 @@ function install(fleet, opts = {}) {
     return { lines: x.pane };
   };
   s.cursorInfo = () => { spend(costs.cursorInfo); return null; };
+  // The non-blocking read. It answers later on the virtual clock, when
+  // `advance` reaches its time, with the pane as it is THEN.
+  s.readPaneAsync = (tmuxName) => {
+    const x = byTmux.get(tmuxName);
+    world.paneReads.push({ sessionId: x.record.id, at: world.clockMs });
+    return new Promise((resolve, reject) => {
+      const entry = { sessionId: x.record.id, startedAt: world.clockMs };
+      if (x.slowReadsLeft > 0) {
+        x.slowReadsLeft -= 1;
+        entry.at = world.clockMs + READ_TIMEOUT_MS;
+        entry.settle = () => reject(Object.assign(new Error('synthetic: tmux timed out'), { tcTimedOut: true }));
+      } else if (x.failReadsLeft > 0) {
+        x.failReadsLeft -= 1;
+        entry.at = world.clockMs + costs.asyncRead;
+        entry.settle = () => reject(new Error('synthetic: tmux session does not exist'));
+      } else {
+        const slowAnswer = x.slowAnswersLeft > 0;
+        if (slowAnswer) x.slowAnswersLeft -= 1;
+        entry.at = world.clockMs + (slowAnswer ? slowMs : costs.asyncRead + costs.asyncContention * world.pending.length);
+        entry.settle = () => resolve({ cap: { lines: x.pane, alternateScreen: false }, cursor: null });
+      }
+      world.pending.push(entry);
+    });
+  };
   s.injectCommand = (projectName, command, options) => {
     spend(costs.injectCommand);
     world.injected.push({ sessionId: byProject.get(projectName).record.id, at: world.clockMs, command, options });
@@ -230,6 +294,109 @@ function runTicks(world, ticks, opts = {}) {
 }
 
 /**
+ * Let queued promise callbacks run.
+ * @returns {Promise<void>}
+ */
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * Move the virtual clock forward to `toMs`, answering each non-blocking pane
+ * read whose time has come, in order, and letting the monitor judge each
+ * answer before the next one lands.
+ * @param {object} world - `install` output
+ * @param {number} toMs - Virtual time to reach
+ * @returns {Promise<void>}
+ */
+async function advance(world, toMs) {
+  for (;;) {
+    world.pending.sort((a, b) => a.at - b.at);
+    const next = world.pending[0];
+    if (!next || next.at > toMs) break;
+    world.pending.shift();
+    if (world.clockMs < next.at) world.clockMs = next.at;
+    next.settle();
+    await flush();
+  }
+  if (world.clockMs < toMs) world.clockMs = toMs;
+}
+
+/**
+ * Fire ticks the way the timer does: non-blocking pane reads, answered between
+ * ticks on the virtual clock.
+ * @param {object} world - `install` output
+ * @param {number} ticks - Ticks to fire
+ * @param {object} [opts]
+ * @param {number} [opts.intervalMs=5000] - Timer interval
+ * @returns {Promise<Array<{dueAt: number, startedAt: number, lagMs: number, durationMs: number}>>}
+ */
+async function runTicksAsync(world, ticks, opts = {}) {
+  const intervalMs = opts.intervalMs ?? INTERVAL_MS;
+  const out = [];
+  let dueAt = world.nextDueAt ?? world.clockMs + intervalMs;
+  for (let i = 0; i < ticks; i++) {
+    await advance(world, dueAt);
+    const startedAt = world.clockMs;
+    wake._internal.tick({ async: true });
+    out.push({ dueAt, startedAt, lagMs: startedAt - dueAt, durationMs: world.clockMs - startedAt });
+    dueAt = startedAt + intervalMs;
+  }
+  world.nextDueAt = dueAt;
+  return out;
+}
+
+/**
+ * `runCell` on the timer's path: non-blocking reads. Mail is waiting at time
+ * 0, and the monitor ticks until the eligible recipient is woken or
+ * `maxTicks` pass.
+ * @param {object} opts - `buildFleet` options plus `costs`, `slowMs`, `maxTicks`
+ * @returns {Promise<object>} The cell's measurements
+ */
+async function runCellAsync(opts) {
+  const fleet = buildFleet(opts);
+  const world = install(fleet, opts);
+  try {
+    const eligible = fleet.find((x) => x.state === 'idle-mail');
+    const woken = () => world.injected.some((n) => n.sessionId === eligible.record.id);
+    const ticks = [];
+    const maxTicks = opts.maxTicks ?? 12;
+    while (ticks.length < maxTicks && !woken()) {
+      ticks.push(...await runTicksAsync(world, 1));
+      // Let this tick's reads answer before deciding whether another is needed.
+      await advance(world, world.clockMs + READ_TIMEOUT_MS);
+    }
+    const nudges = world.injected.filter((n) => n.sessionId === eligible.record.id);
+    const firstRead = world.paneReads.find((x) => x.sessionId === eligible.record.id);
+    return {
+      size: fleet.length,
+      lead: (opts.lead || []).join('+') || 'none',
+      mix: opts.fillers ? opts.fillers.join('+') : 'mixed',
+      ticks: ticks.length,
+      tickMsMax: Math.max(...ticks.map((t) => t.durationMs)),
+      lagMsMax: Math.max(...ticks.map((t) => t.lagMs)),
+      overruns: ticks.filter((t) => t.durationMs > INTERVAL_MS).length,
+      firstAssessmentMs: firstRead ? firstRead.at : null,
+      wakeMs: nudges.length ? nudges[0].at : null,
+      nudgesToEligible: nudges.length,
+      nudgesToOthers: world.injected.filter((n) => n.sessionId !== eligible.record.id).length,
+      // The verdict the monitor would hand a sender for each session. The
+      // lookup reads every listener, so a fleet holding one whose read throws
+      // has no verdicts to give.
+      verdicts: fleet.map((x) => {
+        try {
+          return (wake.peerReachability(x.status.workspaceId) || {}).reason ?? null;
+        } catch {
+          return null;
+        }
+      }),
+      states: fleet.map((x) => x.state),
+      injected: world.injected.map((n) => ({ sessionId: n.sessionId, at: n.at }))
+    };
+  } finally {
+    world.restore();
+  }
+}
+
+/**
  * Run one cell of the matrix: mail is waiting at time 0, and the monitor ticks
  * until the eligible recipient is woken or `maxTicks` pass.
  * @param {object} opts - `buildFleet` options plus `costs`, `slowMs`, `maxTicks`
@@ -264,7 +431,10 @@ function runCell(opts) {
       wakeMs: nudges.length ? nudges[0].at : null,
       nudgesToEligible: nudges.length,
       nudgesToOthers: wrongly.length,
-      verdicts: last ? last.order.map((o) => o.result) : [],
+      // Each session's verdict on the last tick, in ROSTER order. The scan
+      // order is the monitor's to choose, so a verdict is looked up by session
+      // and never read off by position.
+      verdicts: last ? fleet.map((x) => (last.order.find((o) => o.id === x.record.id) || { result: null }).result) : [],
       states: fleet.map((x) => x.state),
       injected: world.injected.map((n) => ({ sessionId: n.sessionId, at: n.at })),
       ledger: world.recorded.map((r) => `${r.sessionId}|${r.outcome}|${r.skipReason || ''}`)
@@ -338,5 +508,7 @@ const SIZES = Object.freeze([1, 2, 5, 10, 20, 30]);
 
 module.exports = {
   SIZES, INTERVAL_MS, DEFAULT_COSTS, P95_COSTS, FILLER_STATES,
-  makeSession, buildFleet, install, runTicks, runCell, runRestart, runDeparture
+  READ_TIMEOUT_MS,
+  makeSession, buildFleet, install, runTicks, runCell, runRestart, runDeparture,
+  advance, flush, runTicksAsync, runCellAsync
 };

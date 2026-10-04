@@ -1,10 +1,12 @@
 # Medusa wake monitor: scale and lifecycle measurements
 
-Measured 2026-10-04 for #2086, on `main` at `4abe838d` plus the read-only instrumentation this
-measurement added. Nothing here changes how a wake is judged or delivered. It records what the
-monitor does today, so that the changes #2086 asks for are shaped by numbers.
+Measurements for #2086. Regenerate the tables with `node scripts/medusa-wake-matrix.js`.
 
-Regenerate the tables with `node scripts/medusa-wake-matrix.js`.
+**This revision supersedes the first one.** The first measurement (2026-10-04, `main` at
+`4abe838d`) modelled a pane capture as one tmux command and a cursor probe as two. `lib/tmux.js`
+runs four and three. Every figure that depended on that model is replaced below; "What the first
+measurement got wrong" lists them. The tables now describe the monitor with non-blocking pane
+reads, and "Before and after" compares it with `main` at `4b0d8b2e`, where every read blocked.
 
 ## What was measured, and how
 
@@ -12,86 +14,78 @@ Regenerate the tables with `node scripts/medusa-wake-matrix.js`.
   `lib/medusa-wake.js`'s own tick through its seams, with session records in these states: no
   mail, idle with mail, busy, a draft in the composer, an unprofiled engine, a listener that is
   off, and a session that ended between the roster read and its scan. No live session was used.
-- **Time is virtual.** Each seam call advances one clock by a stated cost, and ticks fire the way
-  Node fires an interval: the next is due one interval after the previous one *started*. The
-  output is the same on every machine.
-- **Two costs are measured, the rest are estimates.** One `tmux` command took 18.5 ms at the
-  median and 42 to 63 ms at the 95th percentile, timed against a throwaway tmux server on the
-  development host. A pane capture is one command and a cursor probe is two. In-process lookups
-  are modelled at under a millisecond each. Measured separately with zero-cost seams, the tick's
-  own JavaScript took about 0.2 ms for 30 sessions.
+- **Time is virtual.** Each seam call advances one clock by a stated cost, a non-blocking read
+  answers at a stated later time, and ticks fire the way Node fires an interval. The output is the
+  same on every machine.
+- **The tmux costs are measured; the rest are estimates.** Against a throwaway tmux server on the
+  development host:
+  - one `tmux` command took 18.5 ms at the median and 42 to 63 ms at the 95th percentile;
+  - the blocking readers run seven commands for a session holding mail (four for the pane, three
+    for the cursor), about 130 ms;
+  - the non-blocking reader runs four, about 74 ms alone;
+  - thirty non-blocking reads started together finished in 1.2 s, each taking about a second,
+    with the longest gap between two turns of the event loop at 0.34 s. The same thirty sessions
+    read by blocking calls held the loop for 4.7 s.
+  In-process lookups are modelled at under a millisecond each. The tick's own JavaScript took
+  about 0.2 ms for 30 sessions.
 - **Mail is waiting at time 0** and the eligible recipient's pane is at rest throughout.
 
 What the numbers cannot say: the real cost of the store and of a native engine observer, and
 anything about the live server. The instrumentation that would answer those
 (`medusaWake.tickMetrics()`, `medusaWatchdog.tickMetrics()`) is in the code and is not yet exposed
-on any route.
+on any route. The model does not charge for starting the reads' processes, which is the 0.34 s
+gap above at thirty sessions.
 
 ## The matrix
 
-"First assessed" is when the monitor first read the eligible recipient's pane. "Woken" is when the
-nudge was typed. "Latest start" is how late the worst tick began.
+The timer's path: every pane read is non-blocking. "First assessed" is when the monitor first
+asked for the eligible recipient's pane. "Woken" is when the nudge was typed. "Longest tick" is
+how long a tick held the thread.
 
 #### Mixed fleet, eligible recipient scanned last
 
 | Run | Sessions | Longest tick | Latest start | Overruns | First assessed | Woken | Duplicates |
 |---|---|---|---|---|---|---|---|
-| mixed | 1 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 2 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 5 | 420 ms | 0 ms | 0 | 5.1 s | 10.4 s | 0 |
-| mixed | 10 | 534 ms | 0 ms | 0 | 5.2 s | 10.5 s | 0 |
-| mixed | 20 | 650 ms | 0 ms | 0 | 5.4 s | 10.6 s | 0 |
-| mixed | 30 | 877 ms | 0 ms | 0 | 5.6 s | 10.9 s | 0 |
-
-#### Mixed fleet, eligible recipient scanned first
-
-| Run | Sessions | Longest tick | Latest start | Overruns | First assessed | Woken | Duplicates |
-|---|---|---|---|---|---|---|---|
-| mixed | 1 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 2 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 5 | 420 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 10 | 534 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 20 | 650 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| mixed | 30 | 877 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| mixed | 1 | 1 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| mixed | 2 | 2 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| mixed | 5 | 3 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| mixed | 10 | 7 ms | 0 ms | 0 | 5.0 s | 10.5 s | 0 |
+| mixed | 20 | 13 ms | 0 ms | 0 | 5.0 s | 10.5 s | 0 |
+| mixed | 30 | 19 ms | 0 ms | 0 | 5.0 s | 10.7 s | 0 |
 
 #### Every other session holds mail in a busy or drafting pane
 
 | Run | Sessions | Longest tick | Latest start | Overruns | First assessed | Woken | Duplicates |
 |---|---|---|---|---|---|---|---|
-| median tmux cost | 1 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| 95th-percentile tmux cost | 1 | 399 ms | 0 ms | 0 | 5.1 s | 10.4 s | 0 |
-| median tmux cost | 2 | 363 ms | 0 ms | 0 | 5.1 s | 10.4 s | 0 |
-| 95th-percentile tmux cost | 2 | 548 ms | 0 ms | 0 | 5.2 s | 10.5 s | 0 |
-| median tmux cost | 5 | 532 ms | 0 ms | 0 | 5.2 s | 10.5 s | 0 |
-| 95th-percentile tmux cost | 5 | 995 ms | 0 ms | 0 | 5.7 s | 11.0 s | 0 |
-| median tmux cost | 10 | 814 ms | 0 ms | 0 | 5.5 s | 10.8 s | 0 |
-| 95th-percentile tmux cost | 10 | 1739 ms | 0 ms | 0 | 6.4 s | 11.7 s | 0 |
-| median tmux cost | 20 | 1378 ms | 0 ms | 0 | 6.1 s | 11.4 s | 0 |
-| 95th-percentile tmux cost | 20 | 3228 ms | 0 ms | 0 | 7.9 s | 13.2 s | 0 |
-| median tmux cost | 30 | 1942 ms | 0 ms | 0 | 6.7 s | 11.9 s | 0 |
-| 95th-percentile tmux cost | 30 | 4717 ms | 0 ms | 0 | 9.4 s | 14.7 s | 0 |
+| mail in every pane | 1 | 1 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| mail in every pane | 2 | 2 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| mail in every pane | 5 | 4 ms | 0 ms | 0 | 5.0 s | 10.5 s | 0 |
+| mail in every pane | 10 | 9 ms | 0 ms | 0 | 5.0 s | 10.6 s | 0 |
+| mail in every pane | 20 | 17 ms | 0 ms | 0 | 5.0 s | 11.0 s | 0 |
+| mail in every pane | 30 | 26 ms | 0 ms | 0 | 5.0 s | 11.4 s | 0 |
 
-#### A pane read that times out (5 s) is scanned first
+#### Pane reads that time out are scanned first
 
 | Run | Sessions | Longest tick | Latest start | Overruns | First assessed | Woken | Duplicates |
 |---|---|---|---|---|---|---|---|
-| one hung pane | 2 | 5307 ms | 58 ms | 2 | 10.0 s | 15.4 s | 0 |
-| one hung pane | 5 | 5421 ms | 171 ms | 2 | 10.1 s | 15.6 s | 0 |
-| one hung pane | 10 | 5479 ms | 230 ms | 2 | 10.2 s | 15.7 s | 0 |
-| one hung pane | 20 | 5650 ms | 403 ms | 2 | 10.4 s | 16.1 s | 0 |
-| one hung pane | 30 | 5878 ms | 632 ms | 2 | 10.6 s | 16.5 s | 0 |
-| two hung panes | 30 | 10879 ms | 5633 ms | 2 | 15.6 s | 26.5 s | 0 |
-| three hung panes | 30 | 15823 ms | 10578 ms | 2 | 20.5 s | 36.4 s | 0 |
+| one hung pane | 2 | 2 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| one hung pane | 5 | 4 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| one hung pane | 10 | 7 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| one hung pane | 20 | 13 ms | 0 ms | 0 | 5.0 s | 10.5 s | 0 |
+| one hung pane | 30 | 19 ms | 0 ms | 0 | 5.0 s | 10.7 s | 0 |
+| two hung panes | 30 | 20 ms | 0 ms | 0 | 5.0 s | 10.7 s | 0 |
+| three hung panes | 30 | 20 ms | 0 ms | 0 | 5.0 s | 10.7 s | 0 |
+| ten hung panes | 30 | 22 ms | 0 ms | 0 | 5.0 s | 10.6 s | 0 |
 
 #### A scan that throws is scanned first
 
 | Run | Sessions | Longest tick | Latest start | Overruns | First assessed | Woken | Duplicates |
 |---|---|---|---|---|---|---|---|
-| one throwing scan | 2 | 307 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
-| one throwing scan | 5 | 421 ms | 0 ms | 0 | 5.1 s | 10.4 s | 0 |
-| one throwing scan | 10 | 478 ms | 0 ms | 0 | 5.2 s | 10.5 s | 0 |
-| one throwing scan | 20 | 650 ms | 0 ms | 0 | 5.4 s | 10.6 s | 0 |
-| one throwing scan | 30 | 877 ms | 0 ms | 0 | 5.6 s | 10.9 s | 0 |
+| one throwing scan | 2 | 1 ms | 0 ms | 0 | 5.0 s | 10.3 s | 0 |
+| one throwing scan | 5 | 4 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| one throwing scan | 10 | 7 ms | 0 ms | 0 | 5.0 s | 10.4 s | 0 |
+| one throwing scan | 20 | 13 ms | 0 ms | 0 | 5.0 s | 10.5 s | 0 |
+| one throwing scan | 30 | 19 ms | 0 ms | 0 | 5.0 s | 10.7 s | 0 |
 
 #### Restart and departure
 
@@ -104,30 +98,73 @@ nudge was typed. "Latest start" is how late the worst tick began.
 
 ## What the numbers show
 
-1. **Fleet size alone does not starve a recipient.** With a mixed fleet, 30 sessions add about
-   0.6 s to a wake that takes 10.3 s with one. Scan position costs the last session about 0.6 s
-   against the first.
-2. **The floor is two ticks.** A recipient at rest is woken about 10.3 s after its mail arrives,
-   at every fleet size: up to one interval before the first look, then the two-tick idle debounce.
-   Nothing triggers a look when the mail arrives or when a pane comes to rest.
-3. **What costs time is sessions that hold mail, because each is two tmux reads.** A session with
-   no mail, an unprofiled engine, a stopped listener or an ended session returns before any tmux
-   call. With mail in every pane, 30 sessions make a 1.9 s tick at median tmux cost and a 4.7 s
-   tick at the 95th percentile, against a 5 s interval.
-4. **The tick is synchronous, so its duration is a stall of the whole server.** `lib/tmux.js`
-   uses `execSync`. For as long as a tick runs, no HTTP request, WebSocket frame or other timer
-   is served. The real-timer run (`--real`) shows the longest event-loop stall equal to the
-   longest tick in every case.
-5. **One hung pane delays everyone behind it by its timeout, every tick.** tmux calls time out at
-   5 s, which is the tick interval. One pane that times out and is scanned first turns a 10.9 s
-   wake into 16.5 s at 30 sessions. Two make it 26.5 s, and three 36.4 s. The recipient is still
-   woken, exactly once. The scan order is the roster's order, so the same session is first every
-   tick.
+1. **Fleet size alone does not delay a recipient.** A quiet session costs well under a
+   millisecond, and a session holding mail no longer holds the tick at all.
+2. **The floor is two ticks.** A recipient at rest is woken about 10.3 s after its mail arrives:
+   up to one interval before the first look, then the two-tick idle debounce. Nothing triggers a
+   look when the mail arrives or when a pane comes to rest. Unchanged.
+3. **Sessions holding mail are read at the same time.** Thirty of them add about a second to the
+   wake, which is the tmux server answering thirty readers, and nothing to the tick.
+4. **The tick no longer stalls the server.** It runs the cheap gates and starts the reads. On
+   `main` it held the whole server for as long as its reads took: 4.2 s for thirty sessions with
+   mail, 51 s behind ten hung panes.
+5. **A hung pane delays nobody.** Its read times out after 4 s by itself, and the pane is then
+   left alone for 10, 30, then 60 s. A recipient behind ten hung panes is woken at 10.6 s, the
+   same as with none.
 6. **A scan that throws costs nothing.** The tick catches it and moves on.
 7. **No run produced a duplicate nudge or typed into a pane that was not at rest.**
 8. **A restart does not repeat a nudge while the durable attempt record is readable.** The
    in-memory watermark is lost, and `alreadyAttempted` restores it. If that read throws, the
    monitor falls back to memory, which is empty after a restart, and nudges a second time.
+
+## Before and after non-blocking reads
+
+30 sessions. "Before" is `main` at `4b0d8b2e`, measured with the corrected cost model.
+
+| Run | Longest tick, before | after | Recipient woken, before | after |
+|---|---|---|---|---|
+| Mixed fleet, recipient scanned last | 1.7 s | 0.02 s | 11.7 s | 10.7 s |
+| Mail in every pane, median tmux cost | 4.2 s | 0.03 s | 14.2 s | 11.4 s |
+| Mail in every pane, 95th-percentile tmux cost | 11.6 s, 2 overruns | not modelled | 28.0 s | not modelled |
+| One hung pane scanned first | 6.7 s | 0.02 s | 18.1 s | 10.7 s |
+| Two hung panes | 11.7 s | 0.02 s | 28.1 s | 10.7 s |
+| Three hung panes | 16.6 s | 0.02 s | 37.9 s | 10.7 s |
+| Ten hung panes | 51.2 s | 0.02 s | 107.1 s | 10.6 s |
+
+The non-blocking model has one contention figure, taken from the thirty-read measurement, so it
+has no separate 95th-percentile row.
+
+## How a non-blocking read is kept safe
+
+A read's answer arrives after the tick that asked for it, so nothing that tick decided is trusted:
+
+- **The whole gate chain runs again** on the session as it is when the read answers, with the
+  read standing in for the pane capture. A wrap or rotation that began, mail already read, a
+  listener that dropped, a withdrawn opt-in or a wake recorded meanwhile refuses the nudge.
+- **The read is dropped** when the monitor was stopped since, when the session is no longer live,
+  when its id now names another pane, or when its workspace changed.
+- **Assessment and injection happen in the same turn** as the answer, so the pane is as fresh
+  when it is typed into as it was on the blocking path.
+- **One read per session at a time.** A tick that finds a read still in flight starts no second
+  one.
+- **A tick that got no look at a pane is not an observation of it.** A timeout, a failed read, a
+  read still in flight and a backoff each end the idle streak, and a nudge then needs two fresh
+  at-rest observations on consecutive ticks.
+- **A read is bounded.** tmux is run without a shell, and a read that outlives 4 s is killed.
+
+## What the first measurement got wrong
+
+| Figure | First measurement | Now |
+|---|---|---|
+| tmux commands per session holding mail | 3 | 7 |
+| Cost of such a session, median | about 56 ms | about 130 ms |
+| Tick with mail in every pane, 30 sessions, median | 1.9 s | 4.2 s |
+| The same at the 95th percentile | 4.7 s, no overrun | 11.6 s, 2 overruns (on `main`) |
+| Mixed fleet tick, 30 sessions | 0.9 s | 1.7 s |
+| Wake behind one, two, three hung panes (on `main`) | 16.5, 26.5, 36.4 s | 18.1, 28.1, 37.9 s |
+
+The direction of every finding held. Finding 3 is stronger than first reported: a fleet of 30
+with mail in every pane already overruns the interval at ordinary tmux latency.
 
 ## The hypotheses on #2086
 
@@ -135,11 +172,11 @@ nudge was typed. "Latest start" is how late the worst tick began.
 |---|---|
 | A large fleet pushes back the tick slot of the one session that has mail | **Refuted** for quiet sessions: they cost well under a millisecond each. |
 | Per-session lookups before the mail check add up across a fleet | **Refuted** at 30 sessions, with the estimated lookup costs. Not measured against the real store. |
-| Contention among sessions that do have mail can delay a wake | **Confirmed.** About 56 ms per such session at the median, all of it tmux. |
-| A slow early-scanned session can starve a later one | **Confirmed as delay, not as starvation.** One 5 s timeout per hung pane per tick, compounding. |
-| The tick has no overrun or queue-lag handling | **Confirmed.** A tick that overruns starts the next one late and nothing records it. |
-| Retry is interval polling, blind to state transitions | **Confirmed.** Finding 2. |
-| An ended or listener-off session is reported as undelivered for ever | **Confirmed**, below. |
+| Contention among sessions that do have mail can delay a wake | **Confirmed** on `main`: about 130 ms per such session, serially. Removed by non-blocking reads. |
+| A slow early-scanned session can starve a later one | **Confirmed as delay** on `main`. Removed by non-blocking reads. |
+| The tick has no overrun or queue-lag handling | **Confirmed** on `main`. A tick that starts reads and returns has nothing left to overrun with. |
+| Retry is interval polling, blind to state transitions | **Confirmed.** Finding 2. Unchanged. |
+| An ended or listener-off session is reported as undelivered for ever | **Confirmed**, below. Unchanged. |
 
 ## What `/api/medusa/deliveries` returns today
 
@@ -200,8 +237,13 @@ without pause may not offer for a long time.
 ## Not measured
 
 - The live server's tick durations. The meter is in place; reading it needs a route or a log line.
-- The native engine observer's cost (`engine-thread-*` verdicts). The synthetic fleet uses a
-  pane-judged engine.
+- The native engine observer's cost (`engine-thread-*` verdicts). The synthetic fleet uses
+  pane-judged engines (Claude and Antigravity profiles).
 - The delivery watchdog under load. Its pass is metered and tested, and no matrix was run over it.
 - The duplicate case against the real `lib/medusa-exchanges.js`. The harness models the durable
   attempt record as a set.
+- The tmux server under more than thirty concurrent readers, and the non-blocking reads at
+  95th-percentile tmux latency.
+- A single pane that hangs while the tmux server answers for the others. Every tmux timeout this
+  repository has recorded was a wedged server, where every read hangs. The matrix models the
+  single-pane case because #2086 asks for it.

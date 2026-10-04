@@ -8,7 +8,9 @@
  *
  * Drives the real `lib/medusa-wake.js` tick over a synthetic fleet
  * (`test/helpers/medusa-wake-matrix.js`) at 1, 2, 5, 10, 20 and 30 sessions,
- * and prints what each run cost as Markdown tables. It touches no tmux
+ * and prints what each run cost as Markdown tables: first on the timer's
+ * path, where panes are read without blocking, then on the synchronous path a
+ * hand-driven tick takes. Before #2086 the timer took the synchronous path too. It touches no tmux
  * session, no Hub and no TangleClaw database but a throwaway one.
  *
  * Times are virtual and come from the harness's cost model, so the output is
@@ -79,6 +81,8 @@ const row = (label, c) => [label, String(c.size), whole(c.tickMsMax), whole(c.la
 const HEAD = ['Run', 'Sessions', 'Longest tick', 'Latest start', 'Overruns', 'First assessed', 'Woken', 'Duplicates'];
 const out = [];
 
+const syncOut = out;
+syncOut.push('## Synchronous reads (a hand-driven tick)\n');
 out.push('### Mixed fleet, eligible recipient scanned last\n');
 out.push(table(HEAD, matrix.SIZES.map((size) => row('mixed', cell({ size })))));
 
@@ -95,7 +99,8 @@ out.push('\n### A pane read that times out (5 s) is scanned first\n');
 out.push(table(HEAD, [
   ...[2, 5, 10, 20, 30].map((size) => row('one hung pane', cell({ size, lead: ['slow'] }))),
   row('two hung panes', cell({ size: 30, lead: ['slow', 'slow'], maxTicks: 20 })),
-  row('three hung panes', cell({ size: 30, lead: ['slow', 'slow', 'slow'], maxTicks: 20 }))
+  row('three hung panes', cell({ size: 30, lead: ['slow', 'slow', 'slow'], maxTicks: 20 })),
+  row('ten hung panes', cell({ size: 30, lead: new Array(10).fill('slow'), maxTicks: 40 }))
 ]));
 
 out.push('\n### A scan that throws is scanned first\n');
@@ -114,6 +119,44 @@ out.push(table(['Run', 'Result'], [
   ['Busy recipient leaves the roster with mail deferred', `nudged ${left.nudgedDeparted} times; its last ledger row stays \`${left.ledgerAfter[left.ledgerAfter.length - 1].split('|').slice(1).join(' ')}\` and nothing supersedes it`],
   ['Same, and a replacement session of the project joins', `replacement nudged ${replaced.nudgedReplacement} time; the departed session's \`skipped\` row remains`]
 ]));
+
+/**
+ * A row of the standard columns for a non-blocking run.
+ * @param {string} label - First column
+ * @param {object} c - A `runCellAsync` cell
+ * @returns {string[]}
+ */
+const asyncRow = (label, c) => {
+  if (c.nudgesToEligible !== 1 || c.nudgesToOthers !== 0) broken += 1;
+  return [label, String(c.size), whole(c.tickMsMax), whole(c.lagMsMax), String(c.overruns), sec(c.firstAssessmentMs), sec(c.wakeMs), String(c.nudgesToEligible - 1)];
+};
+
+/**
+ * The tables for the timer's path: every pane read is non-blocking.
+ * @returns {Promise<string[]>} Markdown blocks
+ */
+async function asyncTables() {
+  const blocks = ['## Non-blocking reads (the timer\'s path)\n'];
+  const rows = async (cells) => {
+    const r = [];
+    for (const [label, opts] of cells) r.push(asyncRow(label, await matrix.runCellAsync(opts)));
+    return r;
+  };
+  blocks.push('### Mixed fleet, eligible recipient scanned last\n');
+  blocks.push(table(HEAD, await rows(matrix.SIZES.map((size) => ['mixed', { size }]))));
+  blocks.push('\n### Every other session holds mail in a busy or drafting pane\n');
+  blocks.push(table(HEAD, await rows(matrix.SIZES.map((size) => ['mail in every pane', { size, fillers: ['busy', 'draft'] }]))));
+  blocks.push('\n### Pane reads that time out are scanned first\n');
+  blocks.push(table(HEAD, await rows([
+    ...[2, 5, 10, 20, 30].map((size) => ['one hung pane', { size, lead: ['slow'] }]),
+    ['two hung panes', { size: 30, lead: ['slow', 'slow'] }],
+    ['three hung panes', { size: 30, lead: ['slow', 'slow', 'slow'] }],
+    ['ten hung panes', { size: 30, lead: new Array(10).fill('slow') }]
+  ])));
+  blocks.push('\n### A scan that throws is scanned first\n');
+  blocks.push(table(HEAD, await rows([2, 5, 10, 20, 30].map((size) => ['one throwing scan', { size, lead: ['throwing'] }]))));
+  return blocks;
+}
 
 /**
  * One run under a real timer with costs that really block the thread, at a
@@ -149,12 +192,13 @@ function realRun(label, fleetOpts) {
  * @returns {Promise<void>}
  */
 async function main() {
+  out.unshift(...await asyncTables(), '');
   if (process.argv.includes('--real')) {
     const rows = [];
     rows.push(await realRun('mixed', { size: 30 }));
     rows.push(await realRun('every other session holds mail', { size: 30, fillers: ['busy', 'draft'] }));
     rows.push(await realRun('one hung pane first', { size: 30, lead: ['slow'] }));
-    out.push('\n### Real timer, real blocking, scaled back up tenfold\n');
+    out.push('\n### Synchronous reads under a real timer, real blocking, scaled back up tenfold\n');
     out.push(table(['Run', 'Sessions', 'Ticks', 'Longest tick', 'Latest start', 'Overruns', 'Longest event-loop stall'], rows));
   }
   process.stdout.write(`${out.join('\n')}\n`);
