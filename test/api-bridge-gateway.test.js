@@ -429,6 +429,52 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal(bridgeStore.routes.get(routeId).state, 'closed');
   });
 
+  it('records every part over the route, and a reply to any of them is the Master\'s to read as a reply to that item', async () => {
+    const text = 'Milestone: the suite is green.';
+    const id = bridgeStore.outbound.enqueue({
+      idemKey: `notify:operator-needed:parts-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw',
+      text, digest: bridgeStore.digest(text)
+    }).outboundId;
+    const item = (await claim()).body.items.find((i) => i.outboundId === id);
+    const parts = [`p${++seq}a`, `p${seq}b`, `p${seq}c`];
+    const post = (body, headers = asHelper()) => call('POST', `/api/bridge/helper/outbound/${id}/ack`, { headers, body });
+
+    const partial = await post({ leaseId: item.leaseId, parts: parts.slice(0, 2), partCount: 3 });
+    assert.deepEqual([partial.status, partial.body.code], [400, 'BAD_ACK']);
+    const noToken = await post({ leaseId: item.leaseId, parts, partCount: 3 }, { [bridgeApi.HELPER_NONCE_HEADER]: crypto.randomBytes(16).toString('hex') });
+    assert.deepEqual([noToken.status, noToken.body.code], [401, 'HELPER_TOKEN_REQUIRED']);
+    assert.equal((await post({ leaseId: item.leaseId, parts, partCount: 3 }, asMaster())).status, 401, 'the Master\'s credential does not acknowledge');
+    assert.equal(bridgeStore.outbound.get(id).state, 'ready');
+
+    const done = await post({ leaseId: item.leaseId, parts, partCount: 3 });
+    assert.deepEqual([done.status, done.body.replayed, done.body.parts], [200, false, 3]);
+    assert.equal((await post({ leaseId: item.leaseId, parts, partCount: 3 })).body.replayed, true);
+    assert.equal((await post({ leaseId: item.leaseId, parts: [parts[0]], partCount: 1 })).body.code, 'ACK_MISMATCH');
+
+    // The operator replies to the middle part.
+    const replyId = `m${++seq}`;
+    const reply = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: replyId, ...ALLOWED, replyToExternalId: parts[1], text: 'who needs me?' } });
+    assert.equal(reply.status, 202);
+    const read = await call('GET', `/api/bridge/master/routes/${reply.body.routeId}`, { headers: asMaster() });
+    assert.deepEqual([read.body.route.resolvedBy, read.body.route.destination.kind], ['reply-inheritance', 'master']);
+    assert.deepEqual(read.body.route.replyContext, {
+      repliedExternalId: parts[1], canonicalExternalId: parts[0], outboundId: id, partIndex: 1, partCount: 3,
+      kind: 'notification', notifyType: 'operator-needed', routeId: null, candidateId: null, candidateKind: null
+    });
+    assert.equal(read.body.bodies.find((b) => b.role === 'inbound').text, 'who needs me?');
+    assert.equal(hub.fromGateway().length, 0, 'it went to no session');
+
+    const shown = await tc(['bridge', 'read', reply.body.routeId]);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, new RegExp(`answers posted operator-needed \\(item ${id}, part 2 of 3, message ${parts[1]}, first ${parts[0]}\\)`));
+
+    // Somebody else replying to the same message is refused before anything is recorded.
+    const stranger = await call('POST', '/api/bridge/helper/inbound', {
+      headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, authorId: 'stranger', replyToExternalId: parts[1], text: 'me too' }
+    });
+    assert.deepEqual([stranger.status, stranger.body.code], [403, 'NOT_ALLOWLISTED']);
+  });
+
   it('answers 410 over the route, for good, to an acknowledgement of an item that was let go', async () => {
     const realNow = gateway._deps.now;
     const week = bridgeStore.EXPIRY_MS.notification['operator-needed'];

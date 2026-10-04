@@ -57,7 +57,8 @@ outbound   destination session ──▶ gateway (held) ──▶ Master release
    place, is refused.
 3. **The gateway resolves the destination mechanically**, in this order:
    1. a leading `@name`;
-   2. the route of the message this one replies to;
+   2. the route of the message this one replies to, or the Project Master when it replies to a
+      posted message that has no route (see "What a reply answers");
    3. a pin on the conversation: the operator's for that conversation, then the operator's for
       every conversation, then the Master's;
    4. the default, which is the Project Master itself.
@@ -351,11 +352,12 @@ also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never u
 |---|---|
 | `POST /api/bridge/helper/inbound` | Hands over one operator message: `externalId`, `authorId`, `spaceId`, `channelId`, optional `threadId` and `replyToExternalId`, and `text` (at most 8000 characters). `202` when stored, `200` for a replay. |
 | `POST /api/bridge/helper/outbound/claim` | Collects what to post next, oldest first: optional `{limit}`, 1 to 20, 10 by default. Each item comes with the chat context to post it in and a lease. |
-| `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, deliveredRef}`: the lease the item was claimed under and the chat's id for the post. Exact: repeating it changes nothing, and a different id for the same item is refused. |
+| `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, parts, partCount}`: the lease the item was claimed under, and the chat's id for every message the item was posted as, in order, with how many there are. `{leaseId, deliveredRef}` names a single message. Exact: repeating it changes nothing, and a different set for the same item is refused. |
 
 Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
-`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `400 BAD_CLAIM`, `400 BAD_ACK`,
+`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`,
+`409 PART_ID_COLLISION`, `400 BAD_CLAIM`, `400 BAD_ACK`,
 `400 LEASE_REQUIRED`, `404 OUTBOUND_NOT_FOUND`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`,
 `409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`.
 
@@ -393,6 +395,38 @@ and when it lapses. The window is two minutes.
   one helper write whose nonce may be seen twice.
 - **A live lease holds its item past its retention limit.** See Retention.
 
+### What a reply answers
+
+An acknowledgement records **every** message the chat made for an item, by the chat's own id,
+against that item: its position, how many there were, and what the item was (its kind, and its
+route, candidate and type where it has them). That description is taken from the item, never
+from the helper. The first message's id stays the item's reference.
+
+- The set must be whole: `partCount` ids, each a chat id, none twice, at most 32. Anything else
+  is `400 BAD_ACK` and delivers nothing.
+- An id the bridge already knows, as a part of another item or as a message the operator sent,
+  is `409 PART_ID_COLLISION`. An operator message carrying a posted message's id is
+  `409 EXTERNAL_ID_COLLISION`.
+
+When an operator message replies to a recorded message, the bridge fixes what it answers on the
+new route, at acceptance, and never changes it: the item, its kind, its candidate id and kind
+or notification type, its route, the message replied to, the item's first message, and the
+part's position and count. A message that replies to something the bridge does not know has no
+such record and is handled as before.
+
+| The reply is to | It goes to | Because |
+|---|---|---|
+| The operator's own earlier message | That message's destination | Reply inheritance, as before. |
+| Any part of an answer whose route is still held | That route's destination | Reply inheritance. Any part, not only the first. |
+| Any part of a milestone, another candidate or a notification | The Project Master | The item has no route. The Master reads the route and sees what it answers. A conversation pin does not divert it. |
+| Any part of an answer whose route has since been removed | The Project Master | There is nowhere left to inherit; what it answered is still on record. |
+| A message the bridge does not know | Resolved as an unaddressed message | Nothing is invented about what it answers. |
+
+A leading `@name` still wins over all of these, and what the message answers is recorded all
+the same. A reply changes nothing about the candidate it answers and releases nothing again.
+`tc bridge read <route-id>` shows what a route answers, and the Master's notice says so in
+fixed words.
+
 `OUTBOUND_NOT_READY` is retired. An item is waiting, delivered or let go, and each of the last
 two has its own answer, so no request could ever have reached that refusal.
 
@@ -428,7 +462,8 @@ v52 store and refuses one with a bridge table missing or misshapen, before touch
 The v53 shape is a superset of v52's: a server from before v53 that meets a v53 store still
 accepts it.
 
-Schema v54 added `bridge_outbound_claims` and `bridge_outbound_leases`, and a CHECK on
+Schema v54 added `bridge_outbound_claims`, `bridge_outbound_leases`, `bridge_outbound_parts`
+and `bridge_route_reply_context`, and a CHECK on
 `bridge_helper_tokens` tying a revoked token to the time it was revoked. That one table is
 rebuilt with its rows carried over, after the store is proven a sound v53 store. A v53 store
 holding a token marked revoked with no time recorded is refused, and left at v53 untouched. The
@@ -441,6 +476,8 @@ v54 shape is a superset of v53's.
 | `bridge_helper_tokens` | The chat helper's scoped token, hash only. |
 | `bridge_nonces` | Request nonces already seen from the helper. |
 | `bridge_outbound_claims` | Each claim the helper made: its nonce, the token and a digest of what was asked. Never updated. |
+| `bridge_outbound_parts` | Every message the chat confirmed, by the chat's own id: the item it is a part of, its position, and what the item was. Never updated, and never removed. |
+| `bridge_route_reply_context` | For an inbound message that replies to a recorded message, which one. Fixed at acceptance; leaves with its route. |
 | `bridge_outbound_leases` | The lease each item was handed over under. What it was issued for never changes; its state settles once, to `used` or `lapsed`. At most one live lease per item. |
 | `bridge_routes` | One row per inbound operator message, unique on the chat's own message id. A replay of the same message returns the same route; the same id with a different body or chat context is refused. |
 | `bridge_route_bodies` | The text of a route, held apart so it can be cleared while the route stays. |
@@ -469,6 +506,8 @@ starts, before any helper request is heard. Revoked pins and helper tokens leave
 | Message text | Until confirmed delivery or close. Not by age. |
 | Helper nonces | 24 hours |
 | A used or lapsed lease, and a claim with no lease left | 24 hours after settling |
+| The record of which posted message belonged to which item | Never removed. It holds ids and no text. |
+| What an inbound message answers | With that message's own route |
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
 | Delivered or dropped outbound items | 30 days |
 | Decided candidates | 30 days |
@@ -483,6 +522,11 @@ starts, before any helper request is heard. Revoked pins and helper tokens leave
 
 An open route, an undelivered reply, a live lease and the live credential are never removed,
 whatever their age.
+
+The record of posted messages is the one thing retention never removes. A reply to a posted
+message can arrive at any time, and without the record that reply would be handled as a message
+that answers nothing, with nothing to say a correlation had been lost. The rows hold ids and
+positions, no text, and one row per posted message.
 
 "Let go" means an undecided candidate is rejected as expired and an uncollected item is
 dropped. Something is let go when it has waited strictly longer than its limit. Each one is

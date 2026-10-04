@@ -245,6 +245,9 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
     const db = store.getDb();
     db.exec('DROP TABLE bridge_outbound_leases');
     db.exec('DROP TABLE bridge_outbound_claims');
+    db.exec('DROP TABLE bridge_outbound_parts');
+    db.exec('DROP TABLE bridge_route_reply_context');
+    db.exec('DROP TRIGGER bridge_routes_delete_reply_context');
     db.exec('DROP TABLE bridge_helper_tokens');
     db.exec('DROP TRIGGER bridge_outbound_delete_leases');
     db.exec(`

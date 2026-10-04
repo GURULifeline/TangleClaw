@@ -264,7 +264,7 @@ describe('bridge helper: its parts (#2031)', () => {
       const client = createBridgeClient({ origin: tc.origin, token: HELPER_TOKEN });
       assert.deepEqual(Object.keys(client), ['sendInbound', 'claim', 'ack']);
       await client.claim('claim-nonce-0000001', 5);
-      await client.ack(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', '300000000000000012');
+      await client.ack(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', ['300000000000000012', '300000000000000014']);
       await client.sendInbound({ externalId: '300000000000000013', text: 'hello' });
       assert.deepEqual(tc.hits.map((h) => `${h.method} ${h.url}`),
         ['POST /api/bridge/helper/outbound/claim', 'POST /api/bridge/helper/outbound/7/ack', 'POST /api/bridge/helper/inbound']);
@@ -274,6 +274,9 @@ describe('bridge helper: its parts (#2031)', () => {
         assert.ok(!hit.body.includes(HELPER_TOKEN) && !hit.url.includes(HELPER_TOKEN));
       }
       assert.equal(tc.hits[0].headers[NONCE_HEADER], 'claim-nonce-0000001', 'a claim carries the nonce it was given');
+      assert.deepEqual(JSON.parse(tc.hits[1].body), {
+        leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', parts: ['300000000000000012', '300000000000000014'], partCount: 2, deliveredRef: '300000000000000012'
+      }, 'an acknowledgement names every part, in order, and how many there are');
       assert.notEqual(tc.hits[1].headers[NONCE_HEADER], tc.hits[2].headers[NONCE_HEADER], 'every other write has a nonce of its own');
     });
 

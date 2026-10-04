@@ -197,7 +197,7 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
     route('rt_1');
     const id = bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: T0 }).item.outboundId;
     const [lease] = bridgeStore.leases.claim({ nonce: 'claim-nonce-00000001', tokenId: 't1', at: at(500) }).leases;
-    assert.equal(bridgeStore.outbound.markDelivered(id, 'posted-1', { leaseId: lease.leaseId, tokenId: 't1', at: at(1000) }).outcome, 'delivered');
+    assert.equal(bridgeStore.outbound.markDelivered(id, ['posted-1'], { leaseId: lease.leaseId, tokenId: 't1', at: at(1000) }).outcome, 'delivered');
     bridgeStore.prune({ now: at(90 * DAY) });
     assert.equal(bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: at(91 * DAY) }).created, false);
   });

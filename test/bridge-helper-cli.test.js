@@ -14,7 +14,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { Readable } = require('node:stream');
 
-const { main, EXIT, LABEL, takeLock } = require('../lib/bridge-helper/cli');
+const { main, EXIT, LABEL, takeLock, isAlive, _internal } = require('../lib/bridge-helper/cli');
 const { SecretError } = require('../lib/bridge-helper/secrets');
 const { paths } = require('../lib/bridge-helper/config');
 const { openState } = require('../lib/bridge-helper/state');
@@ -176,6 +176,25 @@ describe('bridge helper: its commands (#2031)', () => {
     const state = openState(paths(home).state);
     state.set(12, { status: 'rejected', parts: [], round: 0 });
     assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242 })), EXIT.ok, 'the stale lock is taken over');
+  });
+
+  it('when it cannot tell whether a pid is a helper, it says one may be running', () => {
+    const real = _internal.execFileSync;
+    try {
+      assert.equal(isAlive(process.pid), false, 'this test process is alive and is not a helper');
+      _internal.execFileSync = () => 'node /repo/bin/tc-bridge-helper run\n';
+      assert.equal(isAlive(process.pid), true);
+      _internal.execFileSync = () => { throw Object.assign(new Error('no such process'), { status: 1 }); };
+      assert.equal(isAlive(process.pid), false, 'ps found no such process');
+      _internal.execFileSync = () => { throw Object.assign(new Error('spawnSync /bin/ps ETIMEDOUT'), { code: 'ETIMEDOUT' }); };
+      assert.equal(isAlive(process.pid), true, 'ps itself failed: the lock is not taken over on a guess');
+      let asked = false;
+      _internal.execFileSync = () => { asked = true; return ''; };
+      assert.equal(isAlive(2 ** 22 + 12345), false, 'a pid that is gone needs no second opinion');
+      assert.equal(asked, false);
+    } finally {
+      _internal.execFileSync = real;
+    }
   });
 
   it('takes over a lock a dead helper left, and gives its own back', () => {

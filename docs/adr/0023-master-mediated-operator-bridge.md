@@ -318,9 +318,12 @@ nothing recorded the fetch. These rulings close it.
 - **A claim is token-bound and idempotent on its nonce.** An exact repeat returns the same
   leases and issues nothing; the same nonce with a different request or token conflicts.
 - **An acknowledgement names its lease.** For an item still waiting it is taken only from the
-  token the lease was issued to, inside the lease's window. What has already become of an item
-  is answered first, whatever lease is named: a delivered item answers a repeat as a repeat,
-  and one let go is refused for good.
+  token the lease was issued to, inside the lease's window.
+- **What has already become of an item is answered first,** whatever lease is named: a
+  delivered item answers a repeat as a repeat, and one let go is refused for good. (This
+  ordering was the builder's, made in review and put to the Architect for confirmation: such an
+  item is never handed over again and its lease is removed a day after it settles, so an
+  answer that depended on the lease would leave a helper asking for good.)
 - **A live lease is the one thing that holds an item past its retention limit,** and no lease
   is issued for an item already past it. So an acknowledgement can cross the limit by at most
   the lease window. Without a live lease, being let go stays final.
@@ -331,6 +334,30 @@ nothing recorded the fetch. These rulings close it.
 
 The detail is in `docs/operator-bridge.md` ("Claims and leases") and
 `docs/operator-bridge-helper.md`.
+
+### 22. What a reply answers (Architect ruling, 2026-10-04)
+
+The operator must be able to reply to a posted milestone, from any part of a long post, and
+have the reply reach the Master as a reply to that milestone.
+
+- **Every delivered message is mapped to its item.** The acknowledgement reports the complete
+  ordered set of the chat's message ids with their count. The bridge records each against the
+  item and derives what the item was (route, candidate, type) from the item itself. The first
+  id remains the item's reference. A partial or malformed set delivers nothing; an exact repeat
+  changes nothing; a different set, or an id the bridge already knows as another message,
+  conflicts.
+- **A reply to any mapped message resolves deterministically.** An item with a route keeps the
+  existing behaviour: the reply goes where that route went. An item with no route (a milestone,
+  another candidate, a notification) sends the reply to the verified Master as an explicitly
+  correlated operator reply, with immutable context naming the outbound item, the candidate id
+  and kind, the message replied to, the item's first message, and the part's index and count.
+  It is not unaddressed input, and it neither changes nor re-releases the candidate. A
+  reference the bridge does not know stays on the existing unaddressed path.
+- **The mapping lasts as long as a reply may arrive,** which is without limit, so it is never
+  removed. It holds ids and no text. This is the one record Decision 20's retention does not
+  bound, and it is bounded in size by what was posted.
+- **Nothing here gives a session a path to the chat or the chat a path to a session.** The
+  reply reaches the Master through the gateway's route, like any other operator message.
 
 ## Records that carry the decision (proposed, not ruled)
 

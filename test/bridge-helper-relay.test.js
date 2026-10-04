@@ -371,6 +371,15 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(discord.posts.map((p) => p.replyTo), [messageId, ...discord.posts.slice(1).map(() => null)], 'only the first part is a reply');
       assert.equal(new Set(discord.posts.map((p) => p.nonce)).size, discord.posts.length);
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+      assert.deepEqual(bridgeStore.parts.forItem(outboundId), discord.posts.map((p) => p.id), 'and the bridge has every part\'s id, in order');
+
+      // The operator replies in Discord to the last part: the bridge knows what it answers.
+      const last = discord.posts.length - 1;
+      const reply = operatorMessage('and the rest?', { type: 19, message_reference: { message_id: discord.posts[last].id } });
+      assert.equal(await inbound()(reply, { selfId: BOT_ID }), 'inbound-accepted');
+      const context = bridgeStore.routes.getByExternalId(reply.id).replyContext;
+      assert.deepEqual([context.outboundId, context.partIndex, context.partCount, context.canonicalExternalId],
+        [outboundId, last, discord.posts.length, discord.posts[0].id]);
     });
 
     it('a lost acknowledgement is made again after a restart, and nothing is posted twice', async () => {

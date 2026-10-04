@@ -21,6 +21,12 @@ All notable changes to TangleClaw are documented in this file.
   - **launchd.** `install-launchd` writes a job that carries paths and a label only.
   - **Known gap.** The helper cannot discard an item Discord rejects, and closing a route does not withdraw a released answer. Such an item stays held and is never posted.
 
+- **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
+  - **Every posted message is recorded.** An acknowledgement now reports the chat's id for every message an item was posted as, in order, with the count. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.
+  - **A reply to any part resolves.** A reply to an answer goes where that answer's route went, from any part and not only the first. A reply to a milestone or a notification, which has no route, goes to the Project Master as a reply to that item: what it answers is fixed on the route and shown by `tc bridge read`. It is not handled as an unaddressed message and changes nothing about the candidate.
+  - **The record is not removed.** It holds ids and no text, and a reply can arrive at any time.
+  - Schema v54 also carries `bridge_outbound_parts` and `bridge_route_reply_context`.
+
 - **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023). Still off by default. `docs/operator-bridge.md` has the detail.
   - **Claim, not read.** `GET /api/bridge/helper/outbound` is replaced by `POST /api/bridge/helper/outbound/claim`. Each item is handed over under a two-minute lease bound to the helper token that claimed it. An item holds one live lease at a time, and one whose lease lapses is handed over again.
   - **A claim is named by its nonce.** Repeating it exactly returns the same leases and issues nothing. The same nonce with a different request or token is refused.

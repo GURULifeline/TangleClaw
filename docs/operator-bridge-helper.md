@@ -144,7 +144,8 @@ and the channel it names against the configured one.
 
 An item is posted as **who it is from**, in bold, then the text as written. An answer is posted
 as a reply to the operator's message. Text longer than one Discord message is posted as several,
-in order, and acknowledged with the first one's id.
+in order, and acknowledged with every part's id, so the bridge knows what a reply to any of
+them answers.
 
 A lease does not make a post safe to repeat. Two things do: the helper's own record,
 `~/.tangleclaw/bridge-helper/state.json`, and the nonce each post carries, which Discord uses
