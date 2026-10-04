@@ -601,7 +601,21 @@ describe('bridge API: the round trip (#2031)', () => {
     const forOperator = await asOperator('GET', '/api/bridge/operator/status');
     assert.deepEqual([forOperator.body.configurationCircuit.episodeId, forOperator.body.configurationCircuit.reason], [episodeId, 'chat-channel-missing']);
     const shown = await tc(['bridge', 'status']);
-    assert.match(shown.stdout, /CONFIGURATION CIRCUIT OPEN since .* \(chat-channel-missing\)/);
+    assert.match(shown.stdout, new RegExp(`CONFIGURATION CIRCUIT OPEN, episode ${episodeId}, since .* \\(chat-channel-missing\\)`));
+    assert.match(shown.stdout, new RegExp(`a release is not a delivery\\. NOT YET ACKNOWLEDGED: tell the operator, then \`tc bridge circuit ack ${episodeId}\``));
+
+    // The Master takes it up. Nobody else can say it has.
+    const ackAs = (headers) => call('POST', `/api/bridge/master/circuit/${episodeId}/ack`, { headers, body: {} });
+    assert.equal((await ackAs(asHelper())).status, 401);
+    assert.equal((await ackAs({})).status, 401);
+    assert.equal(bridgeStore.circuit.open().masterAckedAt, null);
+    const acked = await tc(['bridge', 'circuit', 'ack', String(episodeId)]);
+    assert.deepEqual([acked.code, /^Configuration episode \d+ acknowledged\. It stays open until it is reset/.test(acked.stdout)], [0, true]);
+    assert.match((await tc(['bridge', 'circuit', 'ack', String(episodeId)])).stdout, /\(it already was\)/);
+    const wrong = await tc(['bridge', 'circuit', 'ack', String(episodeId + 50)]);
+    assert.deepEqual([wrong.code, /CIRCUIT_NOT_OPEN/.test(wrong.stderr)], [2, true]);
+    assert.match((await tc(['bridge', 'status'])).stdout, /Acknowledged 20\d\d-/);
+    assert.equal((await claim()).body.code, 'BRIDGE_CONFIGURATION_BLOCKED', 'acknowledging it does not open the queue');
 
     // Only the Master or a signed-in operator resets it.
     const reset = (headers, body) => call('POST', '/api/bridge/master/circuit/reset', { headers, body });

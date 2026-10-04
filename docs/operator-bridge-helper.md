@@ -205,8 +205,9 @@ bridge opens its **configuration circuit**. The helper logs `bridge-configuratio
 every pass and posts nothing. The notice cannot reach you through Discord; `tc bridge status`
 and `GET /api/bridge/operator/status` show it, and the server log carries a warning.
 
-While the circuit is open the Project Master can still release answers and approve
-candidates. They queue behind it. **A release is not a delivery receipt:** nothing released
+The Project Master is told of the open circuit and reports it at the workstation. While it
+is open the Master can still release answers and approve candidates. They queue behind it.
+**A release is not a delivery receipt:** nothing released
 during an open circuit has reached you until the circuit is reset and the helper posts it.
 
 Put the configuration right (the bot's permissions in the channel, or `set-secret bot` for a

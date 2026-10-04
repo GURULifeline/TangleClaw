@@ -208,6 +208,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge blocked` | Lists the items the helper could not post and the bridge set aside, without their text. |
 | `tc bridge requeue <item-id>` | Puts a set-aside item back for the helper. |
 | `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. |
+| `tc bridge circuit ack <episode>` | Says the Master has taken up the open configuration episode. The gateway then stops telling it. The episode stays open. |
 | `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. |
 
 `<dest>` is `master`, a project's exact name or a project's id.
@@ -504,10 +505,13 @@ the audit, and as a warning in the server log, so the operator learns of it with
 There is no dashboard page for the bridge yet. Until cutover the interim Discord
 procedure is also still in force.
 
-Nothing tells the Project Master that an episode is open; it finds out from `tc bridge status`.
-Until it looks, it can go on releasing answers and approving candidates, and they queue behind
-the circuit. **A release is not a delivery receipt.** Having the Master actively take up the
-episode's record is a gate on cutover, not something built yet.
+The gateway tells the Project Master of an open episode through the Master's Medusa listener,
+at once and then every five minutes, until the Master acknowledges it with
+`tc bridge circuit ack <episode>`. The notice is a fixed sentence naming the episode and its
+reason. Acknowledging does not close the episode. The Master's own rules tell it to report the
+episode to the operator at the workstation and that, while it is open, **a release is not a
+delivery receipt**: what it answers or releases only queues. A Master with no listener cannot
+be told this way; `tc bridge status` still shows the episode, and whether it was acknowledged.
 
 An episode does not close by itself, however long it lasts. Once the chat's configuration is
 put right, the Project Master (`tc bridge reset --requeue` or `--withdraw`) or the signed-in

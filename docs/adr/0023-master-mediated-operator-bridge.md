@@ -421,9 +421,11 @@ have the reply reach the Master as a reply to that milestone.
 - **`outcome-unverifiable` stays one block reason with two recovery paths.** Held as
   `uncertain` at the helper: settle, then requeue. Absent from the helper's status: nothing
   landed or is held; inspect the refusal, then requeue or withdraw.
-- **No new push to the Master in this phase.** The durable one-per-episode record and the
-  status surfaces stand. Before cutover the Master must actively consume and surface that
-  record; until then a release may queue behind an open circuit and is not a delivery receipt.
+- **The Master consumes the episode's record before cutover.** The gateway tells the Master of
+  an open episode until the Master acknowledges it, and the Master surfaces it to the operator
+  at the workstation. A release made while an episode is open queues and is not a delivery
+  receipt. (Phase 4 shipped the record and its status surfaces; the telling and the
+  acknowledgement were added in Phase 5.)
 - **The episode's record does not recurse.** It is not delivered through the chat that is
   closed; it is visible through the operator's local status and, until cutover, the interim
   route.

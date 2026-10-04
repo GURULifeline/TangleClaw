@@ -581,6 +581,8 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       const episode = bridgeStore.circuit.open();
       assert.deepEqual([episode.reason, episode.outboundId], ['chat-permission-denied', one.outboundId]);
       assert.equal(relay.state.get(one.outboundId), undefined, 'the bridge holds the item; the helper keeps nothing');
+      assert.deepEqual(codes.filter(([c]) => c === 'outbound-chat-closed').map(([, f]) => [f.outboundId, f.status, f.reason]),
+        [[one.outboundId, 403, 'chat-permission-denied']], 'the log line says which reason was chosen');
 
       // Pass after pass the helper asks, is told the same thing, and nothing moves.
       const before = store.getDb().prepare('SELECT * FROM bridge_outbound ORDER BY outbound_id').all();
@@ -607,7 +609,7 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual([atBridge(one.outboundId)[0], atBridge(two.outboundId)[0]], ['delivered', 'delivered']);
     });
 
-    it('a bare 403 is the bot not being allowed: it opens the circuit, code or no code', async () => {
+    it('a 403 with no code is the bot not being allowed: it opens the circuit', async () => {
       const one = await answered('first');
       discord.script.push({ status: 403, body: {} });
       assert.deepEqual(await outbound().pass(), { ok: false, posted: 0, acked: 0, held: 0 });

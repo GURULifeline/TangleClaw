@@ -926,6 +926,68 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'dropped');
     });
 
+    it('tells the Master of an open configuration circuit until the Master says it has taken it up', async () => {
+      /**
+       * The helper finds the chat closed to it: one item is set aside and an episode opens.
+       * @param {string} name - Distinguishes the item.
+       * @returns {number} The episode's id.
+       */
+      const chatCloses = (name) => {
+        const text = `notice ${name}`;
+        const id = bridgeStore.outbound.enqueue({
+          idemKey: `notify:operator-needed:${name}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text), at: clock
+        }).outboundId;
+        const item = helperClaims().body.items.find((i) => i.outboundId === id);
+        return gateway.reportFailure(id, { leaseId: item.leaseId, tokenId: helper().tokenId, reason: 'chat-permission-denied' }).body.circuit.episodeId;
+      };
+      const aboutCircuit = () => hub.system.filter((m) => m.message.includes('configuration circuit'));
+      const episode = chatCloses('first');
+
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.equal(aboutCircuit().length, 1);
+      assert.deepEqual([aboutCircuit()[0].to, bridgeStore.circuit.open().masterToldAt], [MASTER_WS, clock]);
+      assert.match(aboutCircuit()[0].message, new RegExp(`episode ${episode}, chat-permission-denied\\).*a release is not a delivery.*tc bridge circuit ack ${episode}`));
+      assert.ok(!aboutCircuit()[0].message.includes('notice first'), 'the notice carries no text of what was to be posted');
+
+      // Not on every pass: again only after five minutes, and for as long as it goes unacknowledged.
+      later(gateway.CIRCUIT_RETELL_MS - 1000);
+      assert.equal((await gateway.tick()).circuitTold, false);
+      later(1000);
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.equal(aboutCircuit().length, 2);
+
+      assert.deepEqual(bridgeStore.circuit.ack(episode + 1, 7, { at: clock }).outcome, 'not-open', 'only the open episode can be acknowledged');
+      const acked = bridgeStore.circuit.ack(episode, 7, { at: clock });
+      assert.deepEqual([acked.outcome, acked.episode.masterAckedAt], ['acked', clock]);
+      assert.equal(bridgeStore.circuit.ack(episode, 8, { at: clock }).outcome, 'already-acked');
+      const audit = store.getDb().prepare("SELECT actor, master_generation, detail_json FROM bridge_audit WHERE op = 'circuit-ack'").all();
+      assert.deepEqual(audit.map((r) => [r.actor, r.master_generation, JSON.parse(r.detail_json).episodeId]), [['master', 7, episode]], 'acknowledged once, on the record');
+      assert.throws(() => store.getDb().exec('UPDATE bridge_config_circuit SET master_acked_at = NULL, master_acked_generation = NULL'), /fixed once opened/);
+      later(10 * gateway.CIRCUIT_RETELL_MS);
+      assert.equal((await gateway.tick()).circuitTold, false);
+      assert.equal(aboutCircuit().length, 2, 'an acknowledged episode is not told again, however long it stays open');
+      assert.equal(bridgeStore.circuit.open().episodeId, episode, 'acknowledging does not close it');
+
+      // A later episode is a new thing to be told of.
+      bridgeStore.applyCircuitReset({ requestId: 'req-reset-told-0001', decision: 'withdraw', actor: 'master', proof: 'master-launch', masterGeneration: 7, at: clock });
+      const next = chatCloses('second');
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.match(aboutCircuit()[2].message, new RegExp(`episode ${next},`));
+    });
+
+    it('a Master with no listener cannot be told of the circuit that way; it is told once it has one', async () => {
+      const text = 'notice x';
+      const id = bridgeStore.outbound.enqueue({ idemKey: 'notify:operator-needed:x', kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text), at: clock }).outboundId;
+      const item = helperClaims().body.items.find((i) => i.outboundId === id);
+      gateway.reportFailure(id, { leaseId: item.leaseId, tokenId: helper().tokenId, reason: 'chat-channel-missing' });
+      masterState.listening = false;
+      for (let i = 0; i < 3; i++) assert.equal((await gateway.tick()).circuitTold, false);
+      assert.deepEqual([hub.system.filter((m) => m.message.includes('configuration circuit')).length, bridgeStore.circuit.open().masterToldAt], [0, null],
+        'it is not recorded as told when it was not');
+      masterState.listening = true;
+      assert.equal((await gateway.tick()).circuitTold, true);
+    });
+
     it('one route that fails does not hold up the others', async () => {
       liveProject('Alpha');
       bridgeStore.routes.accept({ routeId: 'rt_a', externalId: 'ma', ...ALLOWED, text: '@alpha one', digest: bridgeStore.digest('@alpha one'), at: clock });

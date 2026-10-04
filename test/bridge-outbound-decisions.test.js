@@ -430,7 +430,8 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       assert.deepEqual(standing(a), ['blocked', 'chat-permission-denied']);
       assert.deepEqual(bridgeStore.parts.forItem(a), ['d100'], 'the part that did post is recorded');
       assert.deepEqual(bridgeStore.circuit.open(), {
-        episodeId: 1, reason: 'chat-permission-denied', outboundId: a, openedAt: at(1000), closedAt: null, closedBy: null, decision: null
+        episodeId: 1, reason: 'chat-permission-denied', outboundId: a, openedAt: at(1000), closedAt: null, closedBy: null, decision: null,
+        masterToldAt: null, masterAckedAt: null
       });
       const notices = bridgeStore.outbound.ready().filter((i) => i.idemKey.startsWith('config-circuit:'));
       assert.deepEqual(notices.map((n) => [n.idemKey, n.kind, n.notifyType, n.text]), [['config-circuit:1', 'notification', 'operator-needed', gateway.CIRCUIT_NOTICE]]);
