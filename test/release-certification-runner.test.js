@@ -475,6 +475,8 @@ describe('rc-cert CLI', () => {
     assert.equal(JSON.parse(status.out).canonicalThresholds, true);
     assert.match((await run(['status', '--sha', SHA, '--base', base])).out, /running/);
     assert.equal((await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).code, 3);
+    assert.equal((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason', '--soak-disposition-sha256', 'd'.repeat(64)], { deps })).code, 2, 'a cancellation disposes of nothing');
+    assert.equal(store.readRun(base, SHA).state.state, 'running', 'and the refused command changed nothing');
     assert.deepEqual(JSON.parse((await run(['cancel', '--sha', SHA, '--base', base, '--actor', 'jason'], { deps })).out), { state: 'cancelled', published: true });
     assert.equal(deps.publication.calls.publish, 1, 'the decision is published at once');
     assert.deepEqual(JSON.parse((await run(['list', '--base', base])).out), [SHA]);
@@ -665,7 +667,8 @@ describe('runner: host-attested checks and admission (#2020 Q1, A31, A32)', () =
     assert.ok(h.requests.every((b) => b.manifestDigest === state.manifestDigest));
     const { manifest } = store.readRun(h.base, SHA);
     assert.deepEqual([manifest.runId, manifest.checksSource, manifest.private.checksExchange], [fx.RUN_ID, 'host-attested', h.exchange]);
-    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { ...store.readRun(h.base, SHA).state, state: 'awaiting-review' }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }) });
+    const out = await hostChecks.finalize({ hostBase: h.hostBase, manifest, manifestDigest: state.manifestDigest, state: { ...store.readRun(h.base, SHA).state, state: 'awaiting-review' }, samples, observe: async () => ({ observation: { state: 'ok', checks: { test: 'success' } }, error: null }),
+      soakJudgement: fx.soakJudgement(manifest, state.manifestDigest) });
     assert.deepEqual(out, { ok: true, reasons: [] }, 'the host can vouch for every earning sample this run took');
   });
 
@@ -857,11 +860,57 @@ describe('rc-cert CLI: run ids and the host commands (#2020 Q1)', () => {
     assert.equal(running.code, 0, running.err);
     assert.deepEqual([probeCtxs[1].checksSource, probeCtxs[1].runId, probeCtxs[1].exchangeDir], ['host-attested', runId, exchange], 'run reads them from the pinned manifest');
     assert.equal(store.readRun(base, SHA).state.state, 'awaiting-review');
-    const fin = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase], { deps: { observeGithub: GREEN } });
+    // The soak judge is handed this run's own identity, read from the store,
+    // and the bundle and disposition proposal the host names; it is faked here, and
+    // judged for real in the soak judge's tests.
+    const bundleDir = path.join(tmp, 'evidence');
+    const judged = [];
+    const { manifest: stored, state: storedState } = store.readRun(base, SHA);
+    const judgeSoak = (a) => { judged.push(a); return fx.soakJudgement(stored, storedState.manifestDigest); };
+    assert.equal((await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase], { deps: { observeGithub: GREEN, judgeSoak } })).code, 2, 'the soak bundle is required');
+    assert.equal((await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', 'relative'], { deps: { observeGithub: GREEN, judgeSoak } })).code, 3, 'and must be an absolute path');
+    assert.equal(judged.length, 0, 'nothing is judged or finalized without it');
+    const fin = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir], { deps: { observeGithub: GREEN, judgeSoak } });
     assert.equal(fin.code, 0, fin.out + fin.err);
-    assert.deepEqual(JSON.parse(fin.out), { ok: true, reasons: [] });
-    const drifted = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase], { deps: { observeGithub: async () => ({ observation: { state: 'ok', checks: { test: 'failure' } }, error: null }) } });
+    assert.deepEqual(JSON.parse(fin.out), { ok: true, reasons: [], soak: fx.soakJudgement(stored, storedState.manifestDigest) });
+    assert.deepEqual(judged, [{ bundleDir, disposition: null,
+      run: { candidateSha: SHA, runId, manifestDigest: storedState.manifestDigest, startedAt: storedState.startedAt, updatedAt: storedState.updatedAt } }]);
+    // A disposition proposal reaches the judge as the file's exact bytes,
+    // because the judge binds it by its sha256: it is never parsed here.
+    const dispositionFile = path.join(tmp, 'disposition.json');
+    fs.writeFileSync(dispositionFile, '{ "not": "even checked here" }\n');
+    await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir, '--soak-disposition', dispositionFile], { deps: { observeGithub: GREEN, judgeSoak } });
+    assert.deepEqual(judged.at(-1).disposition, fs.readFileSync(dispositionFile));
+    assert.equal((await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir, '--soak-disposition', 'relative.json'], { deps: { observeGithub: GREEN, judgeSoak } })).code, 3, 'a relative proposal path');
+    assert.equal((await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir, '--soak-disposition', path.join(tmp, 'none.json')], { deps: { observeGithub: GREEN, judgeSoak } })).code, 2, 'a proposal file that does not exist');
+    // Findings a proposal covers finalize as ok, and print the digest the
+    // operator's accept must name. Findings nothing covers do not.
+    const covered = fx.soakWithFindings(stored, storedState.manifestDigest);
+    const withFindings = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir, '--soak-disposition', dispositionFile], { deps: { observeGithub: GREEN, judgeSoak: () => covered } });
+    assert.equal(withFindings.code, 0, withFindings.out + withFindings.err);
+    assert.equal(JSON.parse(withFindings.out).soak.disposition.sha256, fx.DISPOSITION_SHA);
+    const uncovered = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir], { deps: { observeGithub: GREEN, judgeSoak: () => ({ ...covered, disposition: null }) } });
+    assert.equal(uncovered.code, 3);
+    assert.deepEqual(JSON.parse(uncovered.out).reasons, [{ code: 'SOAK_JUDGEMENT_AWAITING_REVIEW' }]);
+    const failedSoak = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir], {
+      deps: { observeGithub: GREEN, judgeSoak: () => fx.soakJudgement(stored, storedState.manifestDigest, { verdict: 'fail', reasons: [{ sampleSeq: 4, code: 'DATA_CORRUPTION', class: 'terminal' }] }) }
+    });
+    assert.equal(failedSoak.code, 3);
+    assert.deepEqual(JSON.parse(failedSoak.out).reasons, [{ code: 'SOAK_JUDGEMENT_FAILED' }]);
+    assert.deepEqual(JSON.parse(failedSoak.out).soak.reasons, [{ sampleSeq: 4, code: 'DATA_CORRUPTION', class: 'terminal' }], 'the soak\'s own reasons are shown');
+    const drifted = await run(['host-finalize', '--sha', SHA, '--base', base, '--host-base', hostBase, '--soak-bundle', bundleDir], { deps: { judgeSoak, observeGithub: async () => ({ observation: { state: 'ok', checks: { test: 'failure' } }, error: null }) } });
     assert.equal(drifted.code, 3);
     assert.deepEqual(JSON.parse(drifted.out).reasons, [{ code: 'FINAL_CHECKS_NOT_GREEN' }]);
+    // The operator's accept carries the proposal's digest to the state machine,
+    // which refuses a malformed one before anything else. This run's
+    // thresholds are compressed, so even a well-formed digest cannot pass it:
+    // naming a disposition never widens what an acceptance may do. (An
+    // acceptance that does bind one is the state machine's and the soak
+    // judge's tests' subject.)
+    const malformed = await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason', '--soak-disposition-sha256', 'not-a-digest']);
+    assert.deepEqual([malformed.code, JSON.parse(malformed.err).error], [3, 'INVALID_SOAK_DISPOSITION']);
+    const compressed = await run(['accept', '--sha', SHA, '--base', base, '--actor', 'jason', '--soak-disposition-sha256', fx.DISPOSITION_SHA]);
+    assert.deepEqual([compressed.code, JSON.parse(compressed.err).error], [3, 'NOT_CANONICAL']);
+    assert.deepEqual([store.readRun(base, SHA).state.state, store.readRun(base, SHA).state.acceptance], ['awaiting-review', null], 'neither accepted anything');
   });
 });

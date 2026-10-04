@@ -395,6 +395,20 @@ describe('target, PTY use and review', () => {
     assert.equal(passed.events[0].at, at);
   });
 
+  it('binds a soak disposition into the acceptance by digest, candidate and run, and refuses a malformed one', () => {
+    const { state } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
+    const at = 1_000_000 + 4 * MIN;
+    const canonical = manifest();
+    const D = 'd'.repeat(64);
+    const passed = sm.accept(state, 'jason', at, canonical, D);
+    assert.equal(passed.state.state, STATES.PASSED);
+    assert.deepEqual(passed.state.acceptance, { actor: 'jason', at, soakDisposition: { sha256: D, candidateSha: canonical.candidateSha, runId: canonical.runId } });
+    assert.equal(sm.accept(state, 'jason', at, canonical).state.acceptance.soakDisposition, undefined, 'an acceptance that names none binds none');
+    for (const bad of ['abc', 'D'.repeat(64), '', null, 7]) refuses(() => sm.accept(state, 'jason', at, canonical, bad), REFUSAL.INVALID_SOAK_DISPOSITION);
+    refuses(() => sm.accept(state, 'jason', at, { ...canonical, runId: undefined }, D), REFUSAL.INVALID_SOAK_DISPOSITION);
+    assert.equal(state.acceptance, null, 'a refused acceptance changes nothing');
+  });
+
   it('never records an acceptance before the review it accepts, whatever the operator clock says', () => {
     const { state, events } = run(m, [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(1, MIN)), sample(3 * MIN, busy(2, 3 * MIN))]);
     const passed = sm.accept(state, 'jason', 5, manifest());
