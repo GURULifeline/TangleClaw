@@ -136,6 +136,7 @@ describe('aged notices (#2086)', () => {
   afterEach(() => {
     Object.assign(watchdog._internal, saved);
     mx._internal.now = savedNow;
+    store._setActivityLogRetention(store.ACTIVITY_LOG_RETENTION);
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -246,9 +247,12 @@ describe('aged notices (#2086)', () => {
       // An hour after the ack it has merely waited too long, and the operator is told once.
       await tickAt(T0 + 62 * MIN);
       assert.equal(alerts(x).length, 1);
-      assert.equal(alerts(x)[0].code, 'prolonged-unread');
+      assert.equal(alerts(x)[0].code, 'prolonged-unanswered', 'it was read: the operator is not told it was not');
       assert.deepEqual([detail(alerts(x)[0]).condition, detail(alerts(x)[0]).class], ['unanswered', 'none']);
       assert.equal(activity.length, 1);
+      assert.deepEqual([activity[0].detail.reason, activity[0].detail.condition], ['prolonged-unanswered', 'unanswered']);
+      const listed = watchdog.listEscalations(T0 + 62 * MIN).find((e) => e.exchangeId === x.exchange_id);
+      assert.equal(listed.condition, 'unanswered', 'and the dashboard list says so too');
     });
 
     it('a reply-required message that has not been acknowledged is unread, not unanswered', async () => {
@@ -264,6 +268,33 @@ describe('aged notices (#2086)', () => {
       const body = await agedNotice(() => wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN));
       assert.deepEqual([body.class, body.nextAction], ['configuration', 'investigate']);
       assert.doesNotMatch(body.nextActionMeaning, /retries by itself/);
+    });
+
+    it('a stopped monitor changes nothing for a message that holds no wake: nudged stays none', async () => {
+      monitorRunning = false;
+      const x = pmToBuilder({});
+      wake('wake_attempted', 'tmux', T0 + MIN);
+      await tickAt(T0 + 30 * MIN);
+      assert.deepEqual([sent[0].body.class, sent[0].body.nextAction], ['none', 'none']);
+      assert.equal(activity.length, 0, 'and it is not a configuration hold');
+      await tickAt(T0 + 60 * MIN);
+      assert.equal(alerts(x)[0].code, 'prolonged-unread');
+    });
+
+    it('a stopped monitor does not turn an acknowledged, unanswered message into a configuration hold', async () => {
+      monitorRunning = false;
+      const x = pmToBuilder({ replyRequired: true });
+      clock = T0 + 2 * MIN;
+      mx.recordAcknowledged(['hub-1'], 'builder-ws', { kind: 'project', projectId: builder.id });
+      await tickAt(T0 + 32 * MIN);
+      assert.deepEqual([sent[0].body.condition, sent[0].body.class], ['unanswered', 'none']);
+      assert.equal(alerts(x).length, 0);
+    });
+
+    it('a stopped monitor leaves a configuration hold what it is, with its own next action', async () => {
+      monitorRunning = false;
+      const body = await agedNotice(() => wake('wake_blocked', 'wake-not-opted-in', T0 + MIN));
+      assert.deepEqual([body.class, body.nextAction], ['configuration', 'enable-wake']);
     });
 
     it('a monitor whose state cannot be read counts as stopped', async () => {
@@ -282,6 +313,45 @@ describe('aged notices (#2086)', () => {
       for (const n of sent) assert.deepEqual([n.body.class, n.body.nextAction], ['actionable', 'wait']);
       assert.equal(row(x).esc_level, 'operator');
       assert.equal(alerts(x).length, 1);
+    });
+  });
+
+  describe('the exchange record\'s own wake codes are translated, never classified raw', () => {
+    it('every code the record writes stands for a reason the classifier knows', () => {
+      for (const [code, reason] of Object.entries(mx.EXCHANGE_WAKE_REASONS)) {
+        assert.equal(disposition.classifyReason(reason).known, true, `${code} -> ${reason}`);
+        assert.equal(mx.wakeReasonForCode(code), reason);
+      }
+      assert.equal(mx.wakeReasonForCode(null), 'not-observed');
+      assert.equal(mx.wakeReasonForCode('pane-turn-in-flight'), 'pane-turn-in-flight', 'a monitor reason passes through');
+      assert.deepEqual({ ...mx.EXCHANGE_WAKE_REASONS }, { 'rearmed': 'not-observed', 'awaiting-read': 'nudged' });
+    });
+
+    it('every wake code the exchange module writes itself is in the mapping', () => {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'medusa-exchanges.js'), 'utf8');
+      const written = new Set();
+      // The projection: `wake = { state: 'wake_…', code: '…' }`.
+      for (const m of src.matchAll(/state:\s*'wake_\w+',\s*code:\s*'([^']+)'/g)) written.add(m[1]);
+      // A direct write: `recordWakeForExchange(id, 'wake_…', '…')`.
+      for (const m of src.matchAll(/recordWakeForExchange\([^,]+,\s*'wake_\w+',\s*'([^']+)'\)/g)) written.add(m[1]);
+      assert.deepEqual([...written].sort(), Object.keys(mx.EXCHANGE_WAKE_REASONS).sort());
+    });
+
+    it('attempted, then blocked, then found already nudged: the aged notice says nothing is held', async () => {
+      const x = pmToBuilder({});
+      wake('wake_attempted', 'tmux', T0 + MIN);
+      wake('wake_blocked', 'listener-reconnecting', T0 + 2 * MIN);
+      clock = T0 + 3 * MIN;
+      assert.equal(mx.noteAwaitingRead('builder-ws'), 1);
+      assert.deepEqual([row(x).state, row(x).wake_code], ['wake_pending', 'awaiting-read']);
+      await tickAt(T0 + 30 * MIN);
+      assert.deepEqual([row(x).state, row(x).wake_code], ['wake_pending', 'awaiting-read'], 'the pass did not re-arm it');
+      assert.equal(sent.length, 1);
+      assert.deepEqual([sent[0].body.blocker, sent[0].body.class, sent[0].body.nextAction], ['awaiting-read', 'none', 'none']);
+      assert.equal(alerts(x).length, 0, 'nudged and unread is not a configuration hold');
+      await tickAt(T0 + 60 * MIN);
+      assert.equal(alerts(x)[0].code, 'prolonged-unread');
+      assert.equal(detail(alerts(x)[0]).class, 'none');
     });
   });
 
@@ -342,6 +412,35 @@ describe('aged notices (#2086)', () => {
         ['engine-thread-unknown', 'actionable', 'wait']
       );
       assert.equal(sent[0].body.class, 'actionable', 'the sender\'s notice is not falsified either');
+    });
+
+    it('a late flip to engine-thread-unknown is not a stall until it has held for the stall interval', async () => {
+      const x = pmToBuilder({});
+      wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN);
+      await tickAt(T0 + 30 * MIN);
+      wake('wake_blocked', 'engine-thread-unknown', T0 + 35 * MIN);
+      await tickAt(T0 + 36 * MIN);
+      await tickAt(T0 + 44 * MIN);
+      assert.equal(alerts(x).length, 0, 'nine minutes is not a stall');
+      await tickAt(T0 + 45 * MIN);
+      assert.equal(alerts(x)[0].code, 'engine-thread-unknown-stalled');
+    });
+
+    it('a brief flip to engine-thread-unknown that ends is never reported as a stall', async () => {
+      const x = pmToBuilder({});
+      wake('wake_blocked', 'pane-turn-in-flight', T0 + MIN);
+      await tickAt(T0 + 30 * MIN);
+      wake('wake_blocked', 'engine-thread-unknown', T0 + 35 * MIN);
+      await tickAt(T0 + 36 * MIN);
+      wake('wake_blocked', 'pane-turn-in-flight', T0 + 37 * MIN);
+      await tickAt(T0 + 50 * MIN);
+      assert.equal(alerts(x).length, 0);
+      // And the count restarts if it comes back.
+      wake('wake_blocked', 'engine-thread-unknown', T0 + 51 * MIN);
+      await tickAt(T0 + 59 * MIN);
+      assert.equal(alerts(x).length, 0);
+      await tickAt(T0 + 60 * MIN);
+      assert.equal(alerts(x)[0].code, 'prolonged-actionable', 'an hour of waiting is told as what it is');
     });
 
     it('a hold that becomes configuration after the aged rung is still alerted, on the pass that finds it', async () => {
@@ -474,6 +573,65 @@ describe('aged notices (#2086)', () => {
       assert.equal(activity.length, 1);
       await tickAt(T0 + 32 * MIN);
       assert.equal(activity.length, 1);
+    });
+
+    it('against the real activity store: a refused row takes the fact back, and the next pass records both', async () => {
+      watchdog._internal.logActivity = saved.logActivity;
+      const rows = () => store.activity.query({ eventType: 'medusa-escalation' });
+      const x = pmToBuilder({});
+      wake('wake_blocked', 'wake-not-opted-in', T0 + MIN);
+      const db = store.getDb();
+      db.exec("CREATE TRIGGER refuse_activity BEFORE INSERT ON activity_log BEGIN SELECT RAISE(ABORT, 'activity refused'); END;");
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(alerts(x).length, 0, 'no fact without its activity row');
+      assert.equal(row(x).esc_level, 'aged');
+      assert.equal(rows().length, 0);
+      db.exec('DROP TRIGGER refuse_activity;');
+      await tickAt(T0 + 31 * MIN);
+      await tickAt(T0 + 32 * MIN);
+      assert.equal(alerts(x).length, 1);
+      assert.equal(rows().length, 1);
+      assert.deepEqual(
+        [rows()[0].projectId, rows()[0].detail.exchangeId, rows()[0].detail.reason, rows()[0].detail.condition],
+        [builder.id, x.exchange_id, 'configuration-hold', 'unread']
+      );
+    });
+
+    it('against the real activity store: a failed trim after the insert takes the row and the fact back', async () => {
+      watchdog._internal.logActivity = saved.logActivity;
+      const rows = () => store.activity.query({ eventType: 'medusa-escalation' });
+      const x = pmToBuilder({});
+      wake('wake_blocked', 'wake-not-opted-in', T0 + MIN);
+      const db = store.getDb();
+      // One earlier row and a cap of one, so the alert's insert makes the trim delete.
+      store.activity.log({ eventType: 'medusa-escalation', detail: { earlier: true } });
+      store._setActivityLogRetention(1);
+      db.exec("CREATE TRIGGER refuse_trim BEFORE DELETE ON activity_log BEGIN SELECT RAISE(ABORT, 'trim refused'); END;");
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(alerts(x).length, 0);
+      assert.equal(rows().filter((r) => r.detail.exchangeId === x.exchange_id).length, 0, 'the inserted row went with it');
+      db.exec('DROP TRIGGER refuse_trim;');
+      await tickAt(T0 + 31 * MIN);
+      assert.equal(alerts(x).length, 1);
+      assert.equal(rows().filter((r) => r.detail.exchangeId === x.exchange_id).length, 1);
+    });
+
+    it('a recipient project that no longer exists does not stop the alert: the row is filed without it', async () => {
+      watchdog._internal.logActivity = saved.logActivity;
+      const caller = { kind: 'project', projectId: pm.id };
+      const x = mx.createSendIntent({
+        meta: mx.validateSendMeta({}, caller, pm.id),
+        sender: { projectId: pm.id, workspaceId: 'pm-ws' },
+        recipient: { workspaceId: 'gone-ws', projectId: 987654, sessionId: 2 }
+      });
+      mx.bindHubId(x.exchange_id, 'hub-gone');
+      mx.recordArrival({ hubId: 'hub-gone', recipientWorkspaceId: 'gone-ws' });
+      clock = T0 + MIN;
+      mx.recordWakeForRecipient('gone-ws', 'wake_blocked', { code: 'wake-not-opted-in' });
+      await tickAt(T0 + 30 * MIN);
+      assert.equal(alerts(x).length, 1);
+      const rows = store.activity.query({ eventType: 'medusa-escalation' });
+      assert.deepEqual([rows.length, rows[0].projectId, rows[0].detail.exchangeId], [1, null, x.exchange_id]);
     });
 
     it('blocking mail writes one activity row too, however many passes follow', async () => {

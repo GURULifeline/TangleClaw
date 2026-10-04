@@ -305,7 +305,17 @@ server time, before its notices go out:
   `class`, `nextAction` and `nextActionMeaning` from the classifier under
   "What a held wake means": a busy recipient is `actionable`, one that never
   opted in is `configuration`, and a message that was nudged and not yet read
-  is `none`. With the wake monitor stopped, no notice promises a retry.
+  is `none`. With the wake monitor stopped, no notice promises a retry: a hold
+  that would otherwise be `actionable` reads as `configuration` with
+  `investigate`. That applies to held wakes only. A message that was nudged,
+  read or acknowledged holds no wake and stays `none` whatever the monitor is
+  doing, and a `configuration` hold keeps its own next action.
+- **The exchange record's own codes are translated first.** A blocked or
+  pending exchange usually carries the monitor's reason, but the record
+  writes two codes itself: `rearmed` (the monitor will look again, read as
+  `not-observed`) and `awaiting-read` (the newest mail was already nudged,
+  read as `nudged`). One mapping in `lib/medusa-exchanges.js` owns them, and
+  the notice classifies what the code stands for, never the code itself.
 - **A nudge that was not accepted is not a nudge.** It waits on a re-arm, so
   it reads as `actionable` while the watchdog can still re-arm it. Once the
   re-arm budget (`maxRearms`) is spent nothing retries, and it reads as
@@ -323,16 +333,27 @@ server time, before its notices go out:
   - `configuration-hold`: nothing changes until someone acts. Told at the
     aged step.
   - `engine-thread-unknown-stalled`: the engine's own channel has not said
-    the session is idle for the whole aged window. Told at the aged step. The
-    monitor still retries, and the class stays `actionable`.
+    the session is idle for 10 minutes without a break, the same interval the
+    wake monitor's own stall alert uses, and the message has aged. A recipient
+    whose state only just became this is not stalled: the count starts when
+    the state does, and starts again if it ends and returns. The monitor still
+    retries, and the class stays `actionable`.
   - `prolonged-actionable`, `prolonged-unread`: the recipient is merely busy,
     or was nudged and has not read. Told at `operatorNormalMs`, and never
     sooner than the aged step.
+  - `prolonged-unanswered`: the recipient acknowledged the message, a reply
+    is owed, and none has come for `operatorNormalMs` since the
+    acknowledgement.
 - **The operator alert is one fact and one activity row.** The
   `operator_alerted` fact is recorded once, and the activity row is written in
   the same transaction, only by the pass that recorded it. Repeated passes, a
   restart and competing passes add neither. A row that cannot be written
-  leaves no fact, and the next pass records both. The fact keeps the blocker,
+  leaves no fact, and the next pass records both: the row is written with a
+  store write that throws on a failed insert or trim, where the ordinary
+  activity write swallows its failures. The row is filed under the recipient
+  project when that project still exists, and without one otherwise, so a
+  deleted project cannot refuse it for ever. The row and the dashboard's
+  escalation list both carry `condition`. The fact keeps the blocker,
   the condition, its class and next action, and why the operator was told, as
   they were then. A later change of class neither repeats the alert nor rewrites it.
 - **An operator alert is not a message.** It wakes nobody and costs no turn.
