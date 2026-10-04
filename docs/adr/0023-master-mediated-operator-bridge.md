@@ -161,6 +161,12 @@ Four kinds of item, and nothing else:
 4. a Master-approved `milestone` or `operator-action-required` item, bound to its source
    receipts.
 
+**Clarification (Architect, 2026-10-04).** The one notice Decision 17 permits, and the "queued,
+Master unavailable" notice of Decision 4, are not a fifth kind of content. They are transport
+control: a `status` item whose text is a fixed sentence the server wrote, tied to its route,
+idempotent, and at most one per route. It cannot carry prose from the operator, a session or
+Master, and it is not a delivery failure.
+
 The fourth is the candidate lane the operator relies on today. A verified session may submit
 candidate milestone or operator-action-required facts to Master. Only Master may validate them,
 consolidate them and render them into gateway outbound items. It is not a way for a session to
@@ -261,6 +267,9 @@ Every write is idempotent, version-checked and audited.
 - **After 5 minutes with no final answer:** at most one pending notice to Discord, and one wake
   or notice to Master.
 - **It never climbs** to the `blocking`, `critical` or operator-authority rungs.
+- **The pending notice is a `status` item** (see Decision 8's clarification): fixed text, one
+  record, one helper acknowledgement, never repeated. A route that has already had the
+  "Master unavailable" notice has had its one.
 - **A terminal delivery failure may produce one immediate failure notice.**
 - **Nothing repeats.** The route stays open until Decision 7's close condition.
 

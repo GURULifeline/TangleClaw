@@ -274,6 +274,7 @@ const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
 const coordinatorRotation = require('./lib/coordinator-rotation');
 const bridgeApi = require('./lib/bridge-api');
+const bridgeGateway = require('./lib/bridge-gateway');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
 const sessionFinalize = require('./lib/session-finalize');
@@ -4795,27 +4796,52 @@ route('GET', '/api/tc/workload', (req, res) => {
   return jsonResponse(res, 200, { ...result.body, ...(lane || {}) });
 });
 
-// The Project Master's structured surface on the operator bridge (ADR 0023
-// Decision 15, #2031). Authorised by the live Master generation's credential
-// and by nothing else; `lib/bridge-api.js` holds the handlers.
+// The operator bridge's HTTP surface (ADR 0023, #2031). Three callers, each
+// with its own proof and none standing in for another; `lib/bridge-api.js`
+// holds the handlers.
+
+/** How often the operator bridge's gateway runs its pass. */
+const BRIDGE_TICK_MS = 15 * 1000;
 
 /**
  * Hand a request to a bridge handler and send what it answers.
- * @param {(request: object) => {status: number, body: object}} handler - A `lib/bridge-api.js` handler.
+ * @param {(request: object) => ({status: number, body: object}|Promise<{status: number, body: object}>)} handler - A `lib/bridge-api.js` handler.
  * @returns {Function} A route handler.
  */
 function _bridgeRoute(handler) {
-  return (req, res, params, body) => {
+  return async (req, res, params, body) => {
     const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
-    const result = handler({ headers: req.headers, params, query, body });
+    const result = await handler({ req, headers: req.headers, params, query, body });
     return jsonResponse(res, result.status, result.body);
   };
 }
 
+// The Project Master's surface: authorised by its live credential alone.
 route('GET', '/api/bridge/master/status', _bridgeRoute(bridgeApi.status));
 route('GET', '/api/bridge/master/routes', _bridgeRoute(bridgeApi.listRoutes));
 route('GET', '/api/bridge/master/routes/:routeId', _bridgeRoute(bridgeApi.readRoute));
 route('POST', '/api/bridge/master/routes/:routeId/close', _bridgeRoute(bridgeApi.closeRoute));
+route('POST', '/api/bridge/master/routes/:routeId/route', _bridgeRoute(bridgeApi.routeTo));
+route('POST', '/api/bridge/master/routes/:routeId/answer', _bridgeRoute(bridgeApi.answerRoute));
+route('POST', '/api/bridge/master/routes/:routeId/release', _bridgeRoute(bridgeApi.releaseRoute));
+route('POST', '/api/bridge/master/routes/:routeId/pin', _bridgeRoute(bridgeApi.pinRoute));
+
+// The chat helper's three routes: authorised by its scoped token alone.
+route('POST', '/api/bridge/helper/inbound', _bridgeRoute(bridgeApi.helperInbound));
+route('GET', '/api/bridge/helper/outbound', _bridgeRoute(bridgeApi.helperOutbound));
+route('POST', '/api/bridge/helper/outbound/:outboundId/ack', _bridgeRoute(bridgeApi.helperAck));
+
+// The operator's policy: a verified account session, nothing less.
+route('GET', '/api/bridge/operator/status', _bridgeRoute(bridgeApi.operatorStatus));
+route('POST', '/api/bridge/operator/enable', _bridgeRoute(bridgeApi.operatorSwitch(true)));
+route('POST', '/api/bridge/operator/disable', _bridgeRoute(bridgeApi.operatorSwitch(false)));
+route('POST', '/api/bridge/operator/allowlist', _bridgeRoute(bridgeApi.operatorAllowlist));
+route('POST', '/api/bridge/operator/helper-token', _bridgeRoute(bridgeApi.operatorMintHelperToken));
+route('DELETE', '/api/bridge/operator/helper-token', _bridgeRoute(bridgeApi.operatorRevokeHelperToken));
+route('POST', '/api/bridge/operator/aliases', _bridgeRoute(bridgeApi.operatorSetAlias));
+route('DELETE', '/api/bridge/operator/aliases/:alias', _bridgeRoute(bridgeApi.operatorRemoveAlias));
+route('POST', '/api/bridge/operator/pins', _bridgeRoute(bridgeApi.operatorSetPin));
+route('DELETE', '/api/bridge/operator/pins/:pinId', _bridgeRoute(bridgeApi.operatorRevokePin));
 
 // Governed coordinator context rotation (#2032). A coordinator prepares its
 // own rotation with a structured checkpoint; the server fences its new
@@ -7773,6 +7799,15 @@ medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
     recipientSessionId: session ? sessionKey : null,
     senderWorkspaceId: typeof message.from === 'string' ? message.from : null
   });
+  // The operator bridge's gateway is the one listener that is not a session:
+  // what arrives for it is a held reply or nothing (ADR 0023).
+  if (sessionKey === bridgeGateway.GATEWAY_KEY) {
+    try {
+      bridgeGateway.drainInbox();
+    } catch (err) {
+      log.warn('Operator bridge could not process an arrival', { error: err.message });
+    }
+  }
 });
 
 // ── Control state (#1861): durable HOLD / RELEASE / STOP ──
@@ -12228,6 +12263,16 @@ if (require.main === module) {
     // The Master's bridge credential (ADR 0023): a handoff the restart
     // interrupted is revoked, and so is a credential whose Master is gone.
     master.reconcileBridgeCredential();
+    // The gateway listens exactly while the bridge is enabled, and its pass
+    // carries on any route a restart interrupted. Both do nothing while it is off.
+    try {
+      bridgeGateway.syncListener();
+    } catch (err) {
+      log.warn('Operator bridge listener could not be started', { error: err.message });
+    }
+    setInterval(() => {
+      bridgeGateway.tick().catch((err) => log.warn('Operator bridge pass failed', { error: err.message }));
+    }, BRIDGE_TICK_MS).unref();
     // Resolve the operator's login PATH once, here, so no request ever pays for
     // it. launchd hands this service `/usr/bin:/bin:/usr/sbin:/sbin`, which
     // contains none of the places an engine CLI actually installs (#346) — and

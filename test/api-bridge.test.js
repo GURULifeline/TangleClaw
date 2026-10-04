@@ -233,7 +233,7 @@ describe('bridge API: the Master surface (#2031)', () => {
 
     const closed = await tc(['bridge', 'close', routeId, '--version', '1', '--request-id', 'req-cli-000001'], env);
     assert.equal(closed.code, 0, closed.stderr);
-    assert.match(closed.stdout, /is closed \(applied\); now v2/);
+    assert.match(closed.stdout, /is closed; now v2/);
 
     const without = await tc(['bridge', 'status']);
     assert.equal(without.code, 2);
