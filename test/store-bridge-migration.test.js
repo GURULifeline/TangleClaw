@@ -304,17 +304,24 @@ describe('store: operator bridge constraints (#2031)', () => {
     set("resolved_by = 'default', destination_kind = 'master', destination_project_id = NULL, resolved_generation = NULL")();
   });
 
-  it('lets a compaction remove audit rows it has recorded, and nothing else', () => {
-    freshStore('compaction');
+  it('lets audit rows leave only behind the anchor, which is one row and only moves forward', () => {
+    freshStore('anchor');
     const db = store.getDb();
     const add = db.prepare("INSERT INTO bridge_audit (op, actor, proof, outcome, at) VALUES ('close', 'operator', 'operator', 'applied', ?)");
     add.run(at);
     add.run(at);
-    db.prepare('INSERT INTO bridge_audit_compactions (through_seq, row_count, rows_digest, at) VALUES (1, 1, ?, ?)').run(digest, at);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM bridge_audit_anchor').get().n, 1, 'seeded at creation');
+    const move = (sql) => () => db.exec(`UPDATE bridge_audit_anchor SET ${sql}`);
+    move(`through_seq = 1, removed_count = 1, compactions = 1, chain_digest = '${digest}'`)();
     assert.equal(db.prepare('DELETE FROM bridge_audit WHERE audit_seq = 1').run().changes, 1);
     assert.throws(() => db.exec('DELETE FROM bridge_audit WHERE audit_seq = 2'), /append-only/);
-    assert.throws(() => db.exec('UPDATE bridge_audit_compactions SET row_count = 9'), /append-only/);
-    assert.throws(() => db.exec('DELETE FROM bridge_audit_compactions'), /append-only/);
+    assert.throws(move('through_seq = 0, removed_count = 2, compactions = 2'), /only moves forward/);
+    assert.throws(move('through_seq = 2, removed_count = 1, compactions = 2'), /only moves forward/);
+    assert.throws(move('through_seq = 2, removed_count = 2, compactions = 5'), /only moves forward/);
+    assert.throws(() => db.exec('DELETE FROM bridge_audit_anchor'), /permanent/);
+    assert.throws(() => db.exec(
+      "INSERT INTO bridge_audit_anchor (anchor_id, through_seq, removed_count, compactions, updated_at) VALUES (2, 0, 0, 0, 'x')"
+    ), /CHECK/);
   });
 
   it('keeps global pins for the operator, one active pin per conversation in each scope', () => {

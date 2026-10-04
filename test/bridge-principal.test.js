@@ -243,3 +243,29 @@ describe('Master launch and the bridge credential (#2031)', () => {
     assert.equal(principal.verify(issued.credential), null);
   });
 });
+
+describe('the Master\'s standing instructions for the bridge (#2031)', () => {
+  it('keeps the Master read-only with one narrow, conditioned exception', () => {
+    const rule = master.MASTER_BASELINE_RULES[0];
+    assert.match(rule, /Read-only\./);
+    assert.match(rule, /Use only GET endpoints/);
+    assert.match(rule, /one exception is the operator bridge/);
+    for (const condition of [/`tc bridge`, and with nothing else/, /live bridge credential/, /operator has enabled the bridge/, /request id/, /route version/]) {
+      assert.match(rule, condition);
+    }
+    assert.match(rule, /routing, not authority/);
+    assert.match(rule, /permits no other mutating call/);
+  });
+
+  it('tells every Master how to treat the bridge, whatever its rules say', () => {
+    const custom = master.buildMasterClaudeMd(store.config.load(), { rules: [{ id: 7, content: 'An operator-written rule.' }] });
+    const md = master.buildMasterClaudeMd(store.config.load());
+    for (const text of [md, custom]) {
+      assert.match(text, /## Operator bridge/);
+      assert.match(text, /Use only `tc bridge`/);
+      assert.match(text, /conversation, not authority/);
+      assert.match(text, new RegExp(`Never print, store or send \`${handoff.CREDENTIAL_ENV}\``));
+      assert.ok(!/mbk_/.test(text), 'the identity never contains a credential');
+    }
+  });
+});

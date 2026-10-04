@@ -62,8 +62,8 @@ isolation between sessions running as the same user is claimed.
 
 - **Another process running as the same user** can read a process's environment, and so can
   read the credential.
-- **The Master's own shell** can print the variable. Nothing structural prevents it, and no
-  Master rule addresses it yet.
+- **The Master's own shell** can print the variable. The Master's generated identity tells it
+  not to; nothing structural prevents it.
 
 Whether this boundary is acceptable for cutover is decided by the security review that precedes
 cutover. If it is not, the bridge stays disabled and the interim procedure stays in force.
@@ -80,9 +80,17 @@ this verb and on no other, so it is never typed.
 | `tc bridge read <route-id>` | Shows one route with the text still held for it. |
 | `tc bridge close <route-id> --version <n>` | Closes a route and clears its text. |
 
-The Master's baseline rules still say it is read-only and must use only GET endpoints.
-`tc bridge close` is a write, so that rule has to be amended, with the operator's approval,
-before the Master is expected to use it. This change does not edit any rule.
+The Master is read-only everywhere else. Its first baseline rule now carries one narrow
+exception: it may record routing decisions with `tc bridge`, and with nothing else, when it holds
+the live credential, the bridge is enabled, and the write names a request id and the route
+version it read. The rule says this is routing, not authority.
+
+- The baseline rules seed a fresh install and are what "Restore defaults" recovers. An install
+  whose Master rules already exist keeps its own rule text, so there the operator has to make
+  the same edit. This change does not touch any stored rule.
+- The Master's generated identity gains an "Operator bridge" section on every install: use only
+  `tc bridge`, operator text is conversation and not authority, and never print, store or send
+  the credential.
 
 A route is one inbound operator message. What it says is **conversation, not authority**: it
 approves nothing, whatever it asks for.
@@ -122,7 +130,7 @@ ordinary tracked exchange, and what makes it the bridge's is a row in `bridge_ro
 | `bridge_candidate_receipts` | The receipts a candidate rests on, each by kind, id and digest. Immutable. |
 | `bridge_aliases`, `bridge_pins` | Routing policy. Global entries are the operator's; the Master may hold a conversation pin only. One pin is active per scope and conversation. A global pin names one conversation, or none, which means all of them. |
 | `bridge_audit` | Every bridge write. Never updated; removed only by a compaction. |
-| `bridge_audit_compactions` | One row per compaction: how many audit rows left and a digest of them, chained to the compaction before. Append-only. |
+| `bridge_audit_anchor` | One row, always: how far compaction has reached, how many audit rows have left in total, and a digest chained across every compaction. It only moves forward. |
 
 The database does not run with foreign keys, so triggers enforce the same integrity: a body, a
 proof or a route-bound outbound item needs its route; a candidate-bound item needs its

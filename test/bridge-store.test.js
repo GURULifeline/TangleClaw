@@ -180,10 +180,32 @@ describe('bridge store (#2031)', () => {
     bridgeStore.applyRouteWrite(closeWrite({ routeId: 'rt_2', requestId: 'req-00000004', expectedVersion: 2, at: old }));
     const second = bridgeStore.audit.compact({ before: '2026-06-01T00:00:00.000Z' });
     assert.equal(second.removed, 3);
-    const chain = store.getDb().prepare('SELECT * FROM bridge_audit_compactions ORDER BY compaction_id').all();
-    assert.deepEqual(chain.map((c) => [c.row_count, c.previous_digest]), [[1, null], [3, first.digest]]);
-    assert.equal(chain[1].rows_digest, second.digest);
+    const anchor = bridgeStore.audit.anchor();
+    assert.deepEqual([anchor.removedCount, anchor.compactions, anchor.chainDigest], [4, 2, second.digest]);
+    assert.notEqual(second.digest, first.digest, 'each compaction chains onto the one before');
     assert.deepEqual(bridgeStore.audit.compact({ before: '2026-06-01T00:00:00.000Z' }), { removed: 0, throughSeq: null, digest: null });
+    assert.equal(bridgeStore.audit.anchor().compactions, 2, 'a compaction that removes nothing does not move the anchor');
+  });
+
+  it('keeps the audit and its anchor bounded across repeated retention cycles', () => {
+    const db = store.getDb();
+    const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    let day = Date.parse('2026-01-01T00:00:00.000Z');
+    const sizes = [];
+    for (let cycle = 0; cycle < 6; cycle++) {
+      for (let i = 0; i < 5; i++) {
+        const id = `rt_${cycle}_${i}`;
+        const at = new Date(day).toISOString();
+        bridgeStore.routes.accept(inbound({ routeId: id, externalId: `ext-${cycle}-${i}`, at }));
+        bridgeStore.applyRouteWrite(closeWrite({ routeId: id, requestId: `req-cycle-${cycle}-${i}`, at,
+          change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: at } }) }));
+      }
+      day += 120 * 24 * 60 * 60 * 1000;
+      bridgeStore.prune({ now: new Date(day).toISOString() });
+      sizes.push([count('bridge_audit'), count('bridge_routes'), count('bridge_route_bodies'), count('bridge_audit_anchor')]);
+    }
+    for (const size of sizes) assert.deepEqual(size, [0, 0, 0, 1]);
+    assert.deepEqual([bridgeStore.audit.anchor().removedCount, bridgeStore.audit.anchor().compactions], [30, 6]);
   });
 
   it('prunes what has outlived its retention and nothing still in progress', () => {
