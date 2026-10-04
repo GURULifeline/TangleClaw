@@ -178,21 +178,51 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       }
     });
 
-    it('the lease that delivered an item can always learn that it landed; no other lease can', () => {
+    it('a lease that is no longer live is told only that, whatever became of its item', () => {
+      const names = ['still waiting', 'delivered by another', 'set aside', 'withdrawn', 'let go'];
+      const ids = names.map((name) => waiting(name));
+      const old = claim();
+      // One is set aside while its lease is live; the rest of the leases lapse by time.
+      assert.equal(fail(old[2], 'rejected-by-chat').body.state, 'blocked');
+      clockAt(LEASE + 1);
+      const fresh = claim();
+      assert.equal(seal(fresh.find((i) => i.outboundId === ids[1]), ['d100']).status, 200);
+      clockAt(2 * (LEASE + 1));
+      assert.equal(decide('outbound-withdraw', ids[3]).outcome, 'applied');
+      clockAt(8 * DAY);
+      bridgeStore.expire({ now: at(8 * DAY) });
+      claim();
+      assert.deepEqual(ids.map((id) => bridgeStore.outbound.get(id).state), ['dropped', 'delivered', 'dropped', 'dropped', 'dropped']);
+
+      // Every old lease of the helper's own, on every route, gets one answer.
+      const answers = old.flatMap((item) => [seal(item, ['d900']), seal(item, ['d100']), part(item, 0, 1, 'd900'), fail(item, 'transient'), fail(item, 'rejected-by-chat')]);
+      for (const answer of answers) assert.deepEqual([answer.status, answer.body], [409, answers[0].body]);
+      assert.equal(answers[0].body.code, 'LEASE_LAPSED');
+      assert.ok(!/deliver|withdraw|set aside|let go|expired|blocked/i.test(JSON.stringify(answers[0].body)), 'and the answer names no state');
+    });
+
+    it('the lease that sealed a delivery can always learn that it landed; no other lease can', () => {
       const id = waiting('a');
       const [first] = claim();
       clockAt(LEASE + 1);
       const [second] = claim();
       assert.equal(second.outboundId, id);
-      assert.equal(seal(second, ['d100']).body.replayed, false);
-      // The earlier lease is this token's and this item's, and still on record. It did not deliver the item, so it cannot repeat the delivery.
-      assert.deepEqual([seal(first, ['d100']).status, seal(first, ['d100']).body.code], [409, 'LEASE_LAPSED']);
+      assert.equal(part(second, 0, 2, 'd100').status, 200);
+      assert.equal(seal(second, ['d100', 'd101']).body.replayed, false);
+      // The earlier lease is this token's and this item's, and still on record. It did not seal the item, so it learns nothing.
+      assert.deepEqual([seal(first, ['d100', 'd101']).status, seal(first, ['d100', 'd101']).body.code], [409, 'LEASE_LAPSED']);
 
       clockAt(20 * DAY);
       bridgeStore.prune({ now: at(20 * DAY) });
-      assert.equal(seal(second, ['d100']).body.replayed, true, 'twenty days on, the receipt still answers');
-      assert.equal(seal(second, ['d101']).body.code, 'ACK_MISMATCH');
-      assert.equal(seal(first, ['d100']).body.code, 'LEASE_NOT_FOUND', 'the lapsed lease is forgotten, and says nothing');
+      const again = seal(second, ['d100', 'd101']);
+      assert.deepEqual([again.status, again.body], [200, { outboundId: id, state: 'delivered', replayed: true, parts: 2 }], 'twenty days on, the receipt still answers');
+      assert.equal(seal(second, ['d100']).body.code, 'ACK_MISMATCH', 'and only for exactly what it sealed');
+      // The receipt answers through the acknowledgement alone: the same lease learns nothing on the other routes.
+      assert.equal(part(second, 0, 2, 'd100').body.code, 'LEASE_LAPSED');
+      assert.equal(fail(second, 'transient').body.code, 'LEASE_LAPSED');
+      assert.equal(seal(first, ['d100', 'd101']).body.code, 'LEASE_NOT_FOUND', 'the lapsed lease is forgotten, and says nothing');
+      // Nor does the receipt outlive its token's authority.
+      assert.equal(seal(second, ['d100', 'd101'], { tokenId: 'bht_another' }).body.code, 'LEASE_NOT_YOURS');
     });
   });
 
@@ -241,7 +271,7 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       assert.equal(part(again, 2, 3, 'd102').status, 200);
       assert.equal(seal(again, ['d100', 'd101', 'd102']).body.replayed, false);
       assert.deepEqual([standing(id)[0], bridgeStore.outbound.get(id).deliveredRef], ['delivered', 'd100']);
-      assert.equal(part(again, 2, 3, 'd102').body.code, 'OUTBOUND_DELIVERED', 'a sealed item takes no more parts');
+      assert.equal(part(again, 2, 3, 'd102').body.code, 'LEASE_LAPSED', 'a sealed item takes no more parts: its lease is spent');
     });
 
     it('a part out of order, or one that is not a part, is refused and records nothing', () => {
@@ -318,7 +348,7 @@ describe('bridge: what the helper may write about an item, and what becomes of o
 
         // Reporting it again, or anything else about it, changes nothing.
         for (const again of [fail(item, reason), fail(item, 'transient'), seal(item, [`d${index}a`, `d${index}b`, `d${index}c`]), part(item, 2, 3, `d${index}c`)]) {
-          assert.deepEqual([again.status, again.body.code], [409, 'OUTBOUND_BLOCKED']);
+          assert.deepEqual([again.status, again.body.code], [409, 'LEASE_LAPSED']);
         }
         const notices = bridgeStore.outbound.ready();
         assert.deepEqual(notices.map((n) => [n.kind, n.notifyType, n.sourceLabel, n.text, n.idemKey]),
@@ -547,7 +577,7 @@ describe('bridge: what the helper may write about an item, and what becomes of o
         assert.equal(decide('outbound-requeue', id).outcome, 'not-blocked', 'a withdrawn item cannot be put back');
         assert.equal(decide('outbound-withdraw', id).outcome, 'not-waiting');
       }
-      assert.equal(seal(items[0], ['d100']).body.code, 'OUTBOUND_EXPIRED', 'the helper that held it is told it is gone');
+      assert.equal(seal(items[0], ['d100']).body.code, 'LEASE_LAPSED', 'the helper that held it is told only that its lease lapsed');
       const audit = store.getDb().prepare("SELECT actor, proof, master_generation, outcome FROM bridge_audit WHERE op = 'outbound-withdraw' AND outcome = 'applied' ORDER BY audit_seq").all();
       assert.deepEqual(audit.map((r) => [r.actor, r.proof, r.master_generation]), [['master', 'master-launch', 1], ['operator', 'verified-session', null]]);
       assert.equal(decide('outbound-withdraw', 9999).outcome, 'outbound-not-found');
@@ -566,7 +596,7 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       assert.equal(decide('outbound-withdraw', other).outcome, 'outbound-in-flight');
       clockAt(LEASE + 1);
       assert.equal(decide('outbound-withdraw', other).outcome, 'applied', 'once the lease has lapsed');
-      assert.deepEqual([seal(held, ['d200']).status, seal(held, ['d200']).body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.deepEqual([seal(held, ['d200']).status, seal(held, ['d200']).body.code], [409, 'LEASE_LAPSED']);
       assert.deepEqual(claim(), [], 'and it is never handed over again');
     });
 

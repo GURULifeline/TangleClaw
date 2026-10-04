@@ -270,7 +270,7 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
     const expiry = store.getDb().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'expire'").get();
     assert.deepEqual([expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['uncollected-expired', id]);
     const late = ack(lease, 'posted-late');
-    assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
+    assert.deepEqual([late.status, late.body.code], [409, 'LEASE_LAPSED'], 'a lapsed lease is told only that, not what became of its item');
   });
 
   it('no lease is issued for an item already past its limit', () => {

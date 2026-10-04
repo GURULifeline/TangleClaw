@@ -922,7 +922,7 @@ describe('bridge gateway (#2031)', () => {
       // Being let go is final: a helper that claimed it earlier and posts it
       // now cannot acknowledge it. Its lease lapsed long before the limit passed.
       const late = helperAcks(fetched, 'posted-late');
-      assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.deepEqual([late.status, late.body.code], [409, 'LEASE_LAPSED'], 'its lease lapsed long ago, and that is all it is told');
       assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'dropped');
     });
 

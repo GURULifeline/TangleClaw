@@ -367,8 +367,8 @@ Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRE
 `413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`, `400 BAD_CLAIM`,
 `400 LEASE_REQUIRED`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`, `400 BAD_PART`,
 `400 BAD_ACK`, `400 BAD_FAILURE`, `409 PART_MISMATCH`, `409 PART_OUT_OF_ORDER`,
-`409 PART_ID_COLLISION`, `409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `409 OUTBOUND_DELIVERED`,
-`409 OUTBOUND_BLOCKED`, `409 BRIDGE_CONFIGURATION_BLOCKED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
+`409 PART_ID_COLLISION`, `409 ACK_MISMATCH`, `409 LEASE_LAPSED`,
+`409 BRIDGE_CONFIGURATION_BLOCKED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
 (an id that could not be an item's).
 
 Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
@@ -391,8 +391,7 @@ and when it lapses. The window is two minutes.
 
 - **One live lease per item.** An item somebody holds is not handed over again.
 - **A lapsed lease returns its item.** If no acknowledgement arrives inside the window, the
-  lease lapses and the next claim hands the item over under a new one. The old lease then
-  acknowledges nothing: `409 LEASE_LAPSED`.
+  lease lapses and the next claim hands the item over under a new one.
 - **Bound to the token.** A lease is good only from the helper token it was issued to:
   `403 LEASE_NOT_YOURS`. Replacing or revoking the token lapses everything it held at once.
 - **The binding is judged before anything is said about the item.** Every write about an item
@@ -400,9 +399,16 @@ and when it lapses. The window is two minutes.
   the answer is `404 LEASE_NOT_FOUND`; if it was issued to another token, `403 LEASE_NOT_YOURS`.
   Both are the same whether the item is waiting, delivered, set aside, let go, or never
   existed, so a caller that does not hold the lease learns nothing about the item.
-- **The lease that delivered an item is its receipt.** It is kept as long as the item is, so
-  the helper that made an acknowledgement can always repeat it and learn that it landed. No
-  other lease on that item answers a repeat. A lapsed lease is removed after a day.
+- **A lease that is no longer live is told only that.** Lapsed by time, settled when its item
+  was set aside, replaced with its token: every write under it answers `409 LEASE_LAPSED`, on
+  every route, whether its item was delivered by another lease, set aside, withdrawn, let go
+  or is still waiting. Having held a lease once is not holding it now. No helper route ever
+  says what became of an item.
+- **The one exception is the lease that sealed a delivery.** It is that delivery's receipt,
+  kept as long as the item is, so the helper that made an acknowledgement can always repeat it
+  exactly and learn that it landed. It answers through the acknowledgement alone, only for
+  exactly what it sealed (anything else is `409 ACK_MISMATCH`), and only to its own token. A
+  lapsed lease is removed after a day.
 - **A claim is named by its nonce.** Repeating a claim with the same nonce, token and request
   returns the leases it issued the first time, each in its present state, and issues nothing.
   A lease that is no longer live comes back without its text. The same nonce with a different
@@ -466,8 +472,9 @@ reason from a closed list and the parts that did post. Any other reason is `400 
 
 An item **set aside** (`blocked`) keeps its text and is handed to nobody. The lease it was held
 under is settled. The bridge raises one `operator-needed` notice, a fixed sentence, for each
-time an item is set aside. That notice is never itself set aside: a helper that cannot post it
-keeps trying.
+time an item is set aside. For a refusal of one item, that notice is never itself set aside: a
+helper that cannot post it keeps trying. (When the chat is closed to everything, whatever is in
+hand is set aside, a notice included; see the configuration circuit below.)
 
 Only the Project Master or the signed-in operator decides what happens next:
 
@@ -492,8 +499,9 @@ anything: no lease, no hand-over count, no nonce, no expiry, no notice, no audit
 queued stays queued, exactly as it was.
 
 The episode's notice cannot be posted, since nothing is handed over. It is on the record and
-shows in `tc bridge status`, in the operator's status route (`configurationCircuit`) and in the
-audit, so the operator learns of it without the chat. Until cutover the interim Discord
+shows in `tc bridge status`, in `GET /api/bridge/operator/status` (`configurationCircuit`), in
+the audit, and as a warning in the server log, so the operator learns of it without the chat.
+There is no dashboard page for the bridge yet. Until cutover the interim Discord
 procedure is also still in force.
 
 An episode does not close by itself, however long it lasts. Once the chat's configuration is
@@ -520,7 +528,7 @@ audit.
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, what is waiting, and the arrivals the gateway dropped since the server started, each with its reason. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
@@ -628,8 +636,9 @@ window. A claim lets go of what is past its limit before it issues any lease, so
 ever issued for an item already past it. Once the lease lapses the item is judged like any
 other.
 
-Being let go is final. An acknowledgement for an item that was let go is refused with
-`410 OUTBOUND_EXPIRED`, every time, whatever lease it names. Nothing let go is raised again:
+Being let go is final. Nothing is let go while a lease on it is live, so the helper that held
+it holds only a lapsed lease, and its acknowledgement is refused `409 LEASE_LAPSED` like any
+other lapsed lease's. The item is never handed over again. Nothing let go is raised again:
 its row and its idempotency key stay until retention removes them, so the event that caused it
 remains accounted for.
 

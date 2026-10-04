@@ -849,7 +849,7 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       gateway.claimOutbound({ tokenId: bridgeStore.helperTokens.active().tokenId }, 'expiry-pass-nonce-0001');
       assert.equal(atBridge(id)[0], 'dropped');
       assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 0, held: 0 });
-      assert.ok(logged().includes('outbound-ack-expired'));
+      assert.ok(logged().includes('outbound-ack-failed'), 'it is told its lease lapsed, not what became of the item');
       assert.deepEqual(relay.state.entries(), [], 'the helper does not keep trying');
       assert.equal(discord.posts.length, 1);
     });

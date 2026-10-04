@@ -170,7 +170,7 @@ to refuse a repeat for a few minutes.
 | The message an answer replies to is gone | The answer is posted by itself, not as a reply. That is not a broken channel. |
 | The bridge's record of an item's parts disagrees with the helper's | The helper reports `part-conflict` and posts nothing more of it. The bridge sets it aside. |
 | The helper token was replaced | The old token's leases are no longer the helper's, and the bridge says nothing about their items. Items still waiting are handed to the new token with their parts. |
-| The bridge let the item go, or the Master withdrew it | The helper drops its record and stops trying. Anything already posted stays in the channel. |
+| The bridge let the item go, set it aside, or the Master withdrew it | The helper is not told which. Its lease is simply no longer live, and the item is not handed over again. Once the bridge holds every part the helper posted, the helper drops its own record. Anything already posted stays in the channel. |
 | The record cannot be written | The helper posts nothing it could not record first, logs `state-write-failed` and tries again later. A part that did post before a write failed is remembered while the helper runs; if the helper also stops before it can write, the restarted helper finds the attempt on record as in doubt and falls back on the nonce, or holds the item as `uncertain`. |
 
 One case leaves something behind. If the helper posted a part, could not report it, and the
@@ -184,7 +184,8 @@ remove it by removing the record once nothing else is in progress.
 keeps its text, is handed to nobody, and one notice is posted in the channel saying that
 something was set aside. The Project Master lists these with `tc bridge blocked` and decides:
 
-- `tc bridge requeue <item-id>` puts the item back. The helper picks it up on its next pass and
+- `tc bridge requeue <item-id>` puts the item back. The helper picks it up on its next pass
+  (once any open configuration circuit has been reset) and
   carries on after any parts already posted.
 - `tc bridge withdraw <item-id>` gives it up for good.
 
@@ -199,7 +200,7 @@ requeue.
 If the channel or server is missing, the bot may not post there, or its token is refused, the
 bridge opens its **configuration circuit**. The helper logs `bridge-configuration-blocked` on
 every pass and posts nothing. The notice cannot reach you through Discord; `tc bridge status`
-and the operator's status page show it.
+and `GET /api/bridge/operator/status` show it, and the server log carries a warning.
 
 Put the configuration right (the bot's permissions in the channel, or `set-secret bot` for a
 new token, then restart the helper). Then the Master runs `tc bridge reset --requeue`, or
@@ -262,8 +263,7 @@ TangleClaw's answer is echoed.
 | `outbound-uncertain` | An item is held here and set aside at the bridge; see "Settling an `uncertain` item". |
 | `outbound-rejected`, `outbound-part-conflict` | The bridge was asked to set an item aside; see "Items set aside". |
 | `outbound-report-failed` | The bridge could not be told that an item could not be posted. It is told again on the next pass. |
-| `outbound-ack-failed` | A posted item could not be acknowledged yet. It is acknowledged on a later pass. |
-| `outbound-ack-expired` | The bridge had let the item go. Nothing to do. |
+| `outbound-ack-failed` | A posted item could not be reported or acknowledged: the bridge did not answer, or the helper's lease on it is no longer live. If the item is still waiting it is handed over again and acknowledged then. |
 | `outbound-digest-mismatch`, `outbound-foreign-channel` | An item did not pass the helper's checks and was not posted. Either is a defect to report. |
 | `outbound-pass-failed` | A pass ended on a failure the helper did not expect. The line gives the failure's type and never its message. Report it, with the lines around it. |
 

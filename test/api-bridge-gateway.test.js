@@ -505,7 +505,7 @@ describe('bridge API: the round trip (#2031)', () => {
 
       // A helper that posts it after all cannot say so, and it is never handed over again.
       const late = await ackItem(item, 'posted-late');
-      assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.deepEqual([late.status, late.body.code], [409, 'LEASE_LAPSED'], 'its lease lapsed; it is not told the answer was withdrawn');
       assert.equal((await claim()).body.items.some((i) => i.outboundId === item.outboundId), false);
     } finally {
       gateway._deps.now = realNow;
@@ -619,13 +619,24 @@ describe('bridge API: the round trip (#2031)', () => {
     const done = await tc(['bridge', 'reset', '--requeue']);
     assert.deepEqual([done.code, done.stdout], [0, `Configuration circuit reset: episode ${episodeId} is closed, 1 item(s) put back.\n`]);
     assert.equal(bridgeStore.circuit.open(), null);
-    assert.equal((await claim()).body.items.some((i) => i.outboundId === id), true, 'and the item is handed over again');
+    const again = (await claim()).body.items.find((i) => i.outboundId === id);
+    assert.ok(again, 'and the item is handed over again');
+    // The operator, signed in, has the same reset: a second episode, withdrawn this time.
+    await call('POST', `/api/bridge/helper/outbound/${id}/failure`, { headers: asHelper(), body: { leaseId: again.leaseId, reason: 'chat-permission-denied' } });
+    const second = bridgeStore.circuit.open().episodeId;
+    assert.equal(second > episodeId, true);
+    const byOperator = await asOperator('POST', '/api/bridge/operator/circuit/reset', { params: {}, body: { requestId: `req-r-${++seq}-0000`, decision: 'withdraw' } });
+    assert.deepEqual([byOperator.status, byOperator.body.items, byOperator.body.episode.episodeId, byOperator.body.episode.closedBy, byOperator.body.episode.decision],
+      [200, 1, second, 'operator', 'withdraw']);
+    assert.deepEqual([bridgeStore.outbound.get(id).state, bridgeStore.outbound.get(id).dropCode], ['dropped', 'withdrawn']);
+    const audited = store.getDb().prepare("SELECT proof, detail_json FROM bridge_audit WHERE op = 'circuit-reset' AND actor = 'operator' AND outcome = 'applied'").all();
+    assert.deepEqual(audited.map((r) => [r.proof, JSON.parse(r.detail_json).user, JSON.parse(r.detail_json).episodeId]), [['verified-session', 'rosie', second]]);
     const none = await tc(['bridge', 'reset', '--withdraw']);
     assert.deepEqual([none.code, /CIRCUIT_NOT_OPEN/.test(none.stderr)], [2, true]);
     assert.doesNotMatch((await tc(['bridge', 'status'])).stdout, /CIRCUIT/);
   });
 
-  it('answers 410 over the route, for good, to an acknowledgement of an item that was let go', async () => {
+  it('refuses over the route, for good, an acknowledgement of an item that was let go, without saying what became of it', async () => {
     const realNow = gateway._deps.now;
     const week = bridgeStore.EXPIRY_MS.notification['operator-needed'];
     try {
@@ -647,7 +658,7 @@ describe('bridge API: the round trip (#2031)', () => {
 
       for (const attempt of [1, 2]) {
         const late = await ackItem(held, 'posted-late');
-        assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED'], `attempt ${attempt}`);
+        assert.deepEqual([late.status, late.body.code], [409, 'LEASE_LAPSED'], `attempt ${attempt}`);
       }
       assert.deepEqual([bridgeStore.outbound.get(id).state, bridgeStore.outbound.get(id).deliveredRef], ['dropped', null]);
     } finally {

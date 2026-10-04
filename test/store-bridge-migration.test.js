@@ -116,6 +116,8 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
    */
   function rewindToV52(populate) {
     const db = store.getDb();
+    // First everything v54 added or reshaped, then what v53 did: a v52 store had neither.
+    shapeAsV53(db);
     db.exec('DROP TABLE bridge_outbound');
     db.exec('DROP TABLE bridge_route_proofs');
     db.exec(`
@@ -133,14 +135,14 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
       );
     `);
     // Dropping a table takes its own indexes and triggers with it; put them back.
-    db.exec(bridgeSchema.bridgeIndexDdl());
+    restoreIndexesBeforeV54(db);
     if (populate) populate(db);
     db.exec('DELETE FROM schema_version WHERE version >= 53');
     db.exec('INSERT INTO schema_version (version) VALUES (52)');
     store.close();
   }
 
-  it('upgrades a v52 store in place: both changed tables are rebuilt and keep every row and id', () => {
+  it('upgrades a v52 store straight to the current schema: every reshaped table is rebuilt and keeps every row and id', () => {
     freshStore('v52');
     const fresh = bridgeObjects();
     const at = '2026-10-04T00:00:00.000Z';
@@ -159,11 +161,30 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
       db.prepare(
         "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, in_reply_to_hub_id, sender_proof, sender_project_id, sender_launch_id, recorded_at) VALUES ('r1', 'from-target', 'h9', 'h1', 'launch', 4, 'launch', ?)"
       ).run(at);
+      const token = db.prepare('INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?)');
+      token.run('t-old', 'e'.repeat(64), 'revoked', 'operator', at, at);
+      token.run('t-live', 'f'.repeat(64), 'active', 'operator', at, null);
+      // What a v52 store looked like: none of what the two later versions added.
+      const names = db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'bridge_%' OR name LIKE 'idx_bridge_%'").all().map((r) => r.name);
+      for (const later of ['bridge_outbound_leases', 'bridge_outbound_claims', 'bridge_outbound_parts', 'bridge_route_reply_context', 'bridge_config_circuit']) {
+        assert.ok(!names.includes(later), `${later} is not in a v52 store`);
+      }
+      const routesSql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'bridge_routes'").get().sql;
+      assert.ok(!routesSql.includes('outbound-correlation'));
     });
+    const raw = new (require('node:sqlite').DatabaseSync)(path.join(tmpDir, 'tangleclaw.db'));
+    assert.equal(raw.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 52);
+    raw.close();
 
     reopen();
     assert.deepEqual([...bridgeObjects()], [...fresh], 'the upgraded store has exactly the shape of a fresh one');
     const after = store.getDb();
+    assert.deepEqual(after.prepare('SELECT route_id, external_id, state, resolved_by FROM bridge_routes').all().map((r) => [r.route_id, r.external_id, r.state, r.resolved_by]),
+      [['r1', 'ext-r1', 'accepted', null]], 'the route came through both rebuilds');
+    assert.deepEqual(after.prepare('SELECT token_id, status FROM bridge_helper_tokens ORDER BY token_id').all().map((r) => [r.token_id, r.status]),
+      [['t-live', 'active'], ['t-old', 'revoked']]);
+    assert.deepEqual(after.prepare('SELECT state, block_code, attempts FROM bridge_outbound ORDER BY outbound_id').all().map((r) => [r.state, r.block_code, r.attempts]),
+      [['ready', null, 0], ['ready', null, 0]], 'and each item has the columns v54 added, empty');
     assert.deepEqual(after.prepare('SELECT outbound_id, idem_key, text FROM bridge_outbound ORDER BY outbound_id').all().map((r) => [r.outbound_id, r.idem_key, r.text]),
       [[1, 'notify:fleet-idle:1', 'first'], [2, 'notify:fleet-idle:2', 'kept']]);
     assert.deepEqual(after.prepare('SELECT hub_id, in_reply_to_hub_id FROM bridge_route_proofs').all().map((r) => [r.hub_id, r.in_reply_to_hub_id]),
@@ -236,13 +257,25 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
   });
 
   /**
-   * Turn the open store into one as schema v53 left it: no lease table, and a
-   * helper-token table without the revoked-time check. The stamp is 53.
-   * @param {(db: object) => void} [populate] - Insert v53-era rows.
+   * Put back the indexes and triggers a store had before v54: every one the
+   * current schema declares, less those on tables v54 added.
+   * @param {object} db - The open database.
    * @returns {void}
    */
-  function rewindToV53(populate) {
-    const db = store.getDb();
+  function restoreIndexesBeforeV54(db) {
+    db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/)
+      .filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context|bridge_config_circuit/.test(stmt)).join(';\n'));
+  }
+
+  /**
+   * Give the open store's bridge tables the shape schema v53 left them in:
+   * none of the tables v54 added, a helper-token table without the
+   * revoked-time check, no set-aside state on an item, and no resolution by a
+   * posted message's record. Leaves the version stamp alone.
+   * @param {object} db - The open database.
+   * @returns {void}
+   */
+  function shapeAsV53(db) {
     db.exec('DROP TABLE bridge_outbound_leases');
     db.exec('DROP TABLE bridge_outbound_claims');
     db.exec('DROP TABLE bridge_outbound_parts');
@@ -281,7 +314,17 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
       db.exec(`DROP TRIGGER IF EXISTS ${trigger.name}`);
     }
     // Dropping a table takes its own indexes and triggers with it; put back those v53 had.
-    db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/).filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context|bridge_config_circuit/.test(stmt)).join(';\n'));
+    restoreIndexesBeforeV54(db);
+  }
+
+  /**
+   * Turn the open store into one as schema v53 left it. The stamp is 53.
+   * @param {(db: object) => void} [populate] - Insert v53-era rows.
+   * @returns {void}
+   */
+  function rewindToV53(populate) {
+    const db = store.getDb();
+    shapeAsV53(db);
     if (populate) populate(db);
     db.exec('DELETE FROM schema_version WHERE version >= 54');
     db.exec('INSERT INTO schema_version (version) VALUES (53)');

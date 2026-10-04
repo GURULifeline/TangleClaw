@@ -37,8 +37,9 @@ All notable changes to TangleClaw are documented in this file.
   - **Claim, not read.** `GET /api/bridge/helper/outbound` is replaced by `POST /api/bridge/helper/outbound/claim`. Each item is handed over under a two-minute lease bound to the helper token that claimed it. An item holds one live lease at a time, and one whose lease lapses is handed over again.
   - **A claim is named by its nonce.** Repeating it exactly returns the same leases and issues nothing. The same nonce with a different request or token is refused.
   - **Bound before anything is said.** Every write about an item is checked against its lease and token first. A caller that does not hold the lease gets the same refusal whatever became of the item.
-  - **The lease that delivered an item is its receipt,** kept as long as the item, so the helper that acknowledged can always learn it landed. Replacing or revoking the helper token lapses what it held at once.
-  - **Across the retention limit.** An item with a live lease is not let go, so an acknowledgement can cross the limit by at most the lease window. Without one, being let go stays final: `410 OUTBOUND_EXPIRED`.
+  - **The lease that sealed a delivery is its receipt,** kept as long as the item, so the helper that acknowledged can always learn it landed. Replacing or revoking the helper token lapses what it held at once.
+  - **Across the retention limit.** An item with a live lease is not let go, so an acknowledgement can cross the limit by at most the lease window. Without one, being let go stays final.
+  - **A lease that is no longer live learns nothing.** It is answered `409 LEASE_LAPSED` on every helper route, whether its item was delivered, set aside, withdrawn, let go or still waits. `410 OUTBOUND_EXPIRED` is retired with this: a late acknowledgement is refused the same way, and the item stays let go. The one exception is the lease that sealed a delivery, which can repeat exactly that acknowledgement.
   - **Schema v54.** Adds the claim, lease, posted-part and reply-context tables, the set-aside state on an item, the `outbound-correlation` resolution, and a CHECK tying a revoked helper token to the time it was revoked. The migration first proves the store is a sound v53 store.
   - `OUTBOUND_NOT_READY` is retired: no request could reach it.
 

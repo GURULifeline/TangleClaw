@@ -323,10 +323,17 @@ nothing recorded the fetch. These rulings close it.
   delivered, set aside or let go: there is no oracle on an item's state. (A first
   implementation answered the item's state before the lease, so that a helper would not ask
   forever once its lease was pruned. The Architect rejected that ordering.)
-- **The lease that delivered an item is its receipt.** An exact repeat of an acknowledgement is
-  available only to the same still-authorised token and lease that made it. That lease is kept
-  for as long as the item is, so lease pruning never leaves a valid helper asking forever. A
-  replaced, revoked or other token gets the binding refusal.
+- **A lapsed lease is not bound merely because the same token once held it.** Any expired,
+  replaced, revoked or otherwise non-live lease gets the same non-oracular `LEASE_LAPSED` or
+  binding refusal on every route, and learns no delivered, blocked, withdrawn or nonexistent
+  state. (This retires `OUTBOUND_EXPIRED`, `OUTBOUND_DELIVERED` and `OUTBOUND_BLOCKED` from the
+  helper's routes, and with them the earlier "a late acknowledgement is refused
+  `OUTBOUND_EXPIRED`": it is refused `LEASE_LAPSED`, and the item stays let go.)
+- **The sole exception is a minimal, immutable completion receipt:** the exact lease that
+  sealed the complete ordered delivery may replay that acknowledgement, while its token remains
+  authorised. It is exposed through the acknowledgement's idempotency alone, not as state on
+  the part or failure routes. That lease is kept for as long as the item is, so lease pruning
+  never leaves a valid helper asking forever. Every other old lease fails uniformly.
 - **A hand-over is counted.** `attempts` rises by one for each lease issued for an item, and
   never for a claim repeated under its nonce.
 - **A live lease is the one thing that holds an item past its retention limit,** and no lease

@@ -286,8 +286,8 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       gateway._deps.now = () => at(7 * DAY + 1);
       bridgeStore.expire({ now: at(7 * DAY + 1) });
       const refused = ack(held, 'posted-2');
-      assert.deepEqual([refused.status, refused.body.code], [410, 'OUTBOUND_EXPIRED']);
-      assert.deepEqual(ack(held, 'posted-2').body.code, 'OUTBOUND_EXPIRED', 'and again, whenever it is tried');
+      assert.deepEqual([refused.status, refused.body.code], [409, 'LEASE_LAPSED'], 'the lapsed lease is told only that');
+      assert.deepEqual(ack(held, 'posted-2').body.code, 'LEASE_LAPSED', 'and again, whenever it is tried');
       assert.deepEqual(gateway.claimOutbound(helper, 'claim-nonce-00000003').body.items, [], 'and it is never handed over again');
       const item = bridgeStore.outbound.get(late);
       assert.deepEqual([item.state, item.deliveredRef], ['dropped', null], 'it is not marked delivered');
