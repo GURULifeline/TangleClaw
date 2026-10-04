@@ -208,6 +208,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge blocked` | Lists the items the helper could not post and the bridge set aside, without their text. |
 | `tc bridge requeue <item-id>` | Puts a set-aside item back for the helper. |
 | `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. |
+| `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. |
 
 `<dest>` is `master`, a project's exact name or a project's id.
 
@@ -367,7 +368,7 @@ Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRE
 `400 LEASE_REQUIRED`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`, `400 BAD_PART`,
 `400 BAD_ACK`, `400 BAD_FAILURE`, `409 PART_MISMATCH`, `409 PART_OUT_OF_ORDER`,
 `409 PART_ID_COLLISION`, `409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `409 OUTBOUND_DELIVERED`,
-`409 OUTBOUND_BLOCKED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
+`409 OUTBOUND_BLOCKED`, `409 BRIDGE_CONFIGURATION_BLOCKED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
 (an id that could not be an item's).
 
 Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
@@ -458,10 +459,10 @@ reason from a closed list and the parts that did post. Any other reason is `400 
 |---|---|---|
 | `transient` | A retry may fix it | Records it. The item stays waiting under its lease. |
 | `outcome-unknown` | A retry may fix it | The same. The helper retries under the same chat nonce. |
-| `rejected-by-chat` | A retry will not | Sets the item aside. |
-| `chat-configuration` | A retry will not | Sets the item aside. The bot may not post in the channel. |
-| `outcome-unverifiable` | A retry will not | Sets the item aside. A post may have landed and can no longer be checked. |
-| `part-conflict` | A retry will not | Sets the item aside. The bridge's record of its parts and the helper's disagree. |
+| `rejected-by-chat` | This item will not post | Sets the item aside. |
+| `outcome-unverifiable` | This item will not post | Sets the item aside. A post may have landed and can no longer be checked. |
+| `part-conflict` | This item will not post | Sets the item aside. The bridge's record of its parts and the helper's disagree. |
+| `chat-channel-missing`, `chat-guild-missing`, `chat-permission-denied`, `chat-auth-refused` | The chat is closed to the bot | Sets the item aside and opens the configuration circuit (below). |
 
 An item **set aside** (`blocked`) keeps its text and is handed to nobody. The lease it was held
 under is settled. The bridge raises one `operator-needed` notice, a fixed sentence, for each
@@ -473,6 +474,34 @@ Only the Project Master or the signed-in operator decides what happens next:
 - **Requeue** puts the item back. The next claim hands it over with the parts already posted.
 - **Withdraw** lets it go for good and drops its text. An item is withdrawn only when no helper
   holds it: with a live lease the answer is `409 OUTBOUND_IN_FLIGHT`.
+
+### The configuration circuit
+
+When the helper reports that the chat itself will not take posts (the channel or server is
+gone, the bot may not post there, its token is refused), setting aside one item after another
+would empty the mailbox into a pile and raise a notice for each. Instead, in one transaction:
+
+- the item in hand is set aside;
+- **one episode opens.** At most one is ever open; a second such report while it is open sets
+  its own item aside and opens and raises nothing;
+- **one `operator-needed` notice is recorded** for the episode.
+
+While an episode is open, **every claim answers `409 BRIDGE_CONFIGURATION_BLOCKED`** with the
+episode, its reason and when it opened. That answer is given before the claim touches
+anything: no lease, no hand-over count, no nonce, no expiry, no notice, no audit row. What is
+queued stays queued, exactly as it was.
+
+The episode's notice cannot be posted, since nothing is handed over. It is on the record and
+shows in `tc bridge status`, in the operator's status route (`configurationCircuit`) and in the
+audit, so the operator learns of it without the chat. Until cutover the interim Discord
+procedure is also still in force.
+
+An episode does not close by itself, however long it lasts. Once the chat's configuration is
+put right, the Project Master (`tc bridge reset --requeue` or `--withdraw`) or the signed-in
+operator (`POST /api/bridge/operator/circuit/reset`, `{requestId, decision}`) resets it. The
+reset closes the episode, puts back or withdraws every item it set aside, and withdraws the
+episode's notice. Items set aside for their own reasons are not the reset's to decide.
+`409 CIRCUIT_NOT_OPEN` when there is none.
 
 Closing a route withdraws everything released for it and not yet posted, under the same rule.
 What was delivered is history and is not unsent. An item set aside still has its retention
@@ -497,6 +526,7 @@ audit.
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
 | `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set and a helper token exists. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
+| `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
 | `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. |
 | `POST /api/bridge/operator/pins`, `DELETE .../pins/:pinId` | Sets a pin for one conversation, or for every conversation when no `conversationKey` is given; revokes any active pin, the Master's included. |
@@ -514,8 +544,8 @@ v52 store and refuses one with a bridge table missing or misshapen, before touch
 The v53 shape is a superset of v52's: a server from before v53 that meets a v53 store still
 accepts it.
 
-Schema v54 added `bridge_outbound_claims`, `bridge_outbound_leases`, `bridge_outbound_parts`
-and `bridge_route_reply_context`, the `blocked` state and its reason on `bridge_outbound`, the
+Schema v54 added `bridge_outbound_claims`, `bridge_outbound_leases`, `bridge_outbound_parts`,
+`bridge_route_reply_context` and `bridge_config_circuit`, the `blocked` state and its reason on `bridge_outbound`, the
 `outbound-correlation` resolution on `bridge_routes`, and a CHECK on
 `bridge_helper_tokens` tying a revoked token to the time it was revoked. Those three tables are
 rebuilt with their rows and row ids carried over, after the store is proven a sound v53 store. A v53 store
@@ -529,6 +559,7 @@ v54 shape is a superset of v53's.
 | `bridge_helper_tokens` | The chat helper's scoped token, hash only. |
 | `bridge_nonces` | Request nonces already seen from the helper. |
 | `bridge_outbound_claims` | Each claim the helper made: its nonce, the token and a digest of what was asked. Never updated. |
+| `bridge_config_circuit` | Each time the chat itself stopped taking posts: why, which item found it, when it opened, and who closed it with what decision. At most one is open. |
 | `bridge_outbound_parts` | Every message the chat confirmed, recorded as it is reported, by the chat's own id: the item it is a part of, its position, and what the item was. Never updated, and never removed. |
 | `bridge_route_reply_context` | For an inbound message that replies to a recorded message, which one. Fixed at acceptance; leaves with its route. |
 | `bridge_outbound_leases` | The lease each item was handed over under. What it was issued for never changes; its state settles once, to `used` or `lapsed`. At most one live lease per item. |

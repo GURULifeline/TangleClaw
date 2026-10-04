@@ -141,7 +141,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     const routeId = acceptRoute('off');
     bridgeStore.settings.set('enabled', 'false');
     const status = await call('GET', '/api/bridge/master/status');
-    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: 0 });
+    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: 0, configurationCircuit: null });
     for (const [method, apiPath] of [
       ['GET', '/api/bridge/master/routes'],
       ['GET', `/api/bridge/master/routes/${routeId}`],

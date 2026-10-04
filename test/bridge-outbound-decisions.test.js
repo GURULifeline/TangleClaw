@@ -276,9 +276,12 @@ describe('bridge: what the helper may write about an item, and what becomes of o
     it('takes a reason from its closed list and no other', () => {
       waiting('a');
       const [item] = claim();
-      assert.deepEqual([...FAILURE_REASONS.retryable, ...FAILURE_REASONS.blocking],
-        ['transient', 'outcome-unknown', 'rejected-by-chat', 'chat-configuration', 'outcome-unverifiable', 'part-conflict']);
-      for (const reason of ['discard', 'delete', '', undefined, 'Discord said: no', 'TRANSIENT']) {
+      assert.deepEqual(FAILURE_REASONS, {
+        retryable: ['transient', 'outcome-unknown'],
+        blocking: ['rejected-by-chat', 'outcome-unverifiable', 'part-conflict'],
+        circuit: ['chat-channel-missing', 'chat-guild-missing', 'chat-permission-denied', 'chat-auth-refused']
+      });
+      for (const reason of ['discard', 'delete', '', undefined, 'Discord said: no', 'TRANSIENT', 'chat-configuration']) {
         const refused = fail(item, reason);
         assert.deepEqual([refused.status, refused.body.code], [400, 'BAD_FAILURE'], String(reason));
       }
@@ -331,10 +334,10 @@ describe('bridge: what the helper may write about an item, and what becomes of o
 
     it('the notice that something was set aside is never itself set aside', () => {
       const id = waiting('a');
-      fail(claim()[0], 'chat-configuration');
+      fail(claim()[0], 'rejected-by-chat');
       const [notice] = claim();
-      assert.deepEqual(fail(notice, 'chat-configuration').body, { outboundId: notice.outboundId, state: 'ready', reason: 'chat-configuration' });
-      assert.deepEqual([standing(notice.outboundId), standing(id)], [['ready', null], ['blocked', 'chat-configuration']]);
+      assert.deepEqual(fail(notice, 'rejected-by-chat').body, { outboundId: notice.outboundId, state: 'ready', reason: 'rejected-by-chat' });
+      assert.deepEqual([standing(notice.outboundId), standing(id)], [['ready', null], ['blocked', 'rejected-by-chat']]);
       assert.equal(bridgeStore.outbound.ready().length, 1, 'and no notice is raised about the notice');
       assert.equal(seal(notice, ['d100']).status, 200, 'it is posted as soon as the helper can');
     });
@@ -347,6 +350,165 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       assert.deepEqual([refused.status, refused.body.code], [409, 'PART_ID_COLLISION']);
       assert.deepEqual([standing(b), bridgeStore.parts.forItem(b)], [['ready', null], []], 'nothing of it was recorded, and the item is not set aside');
       assert.equal(standing(a)[0], 'ready');
+    });
+  });
+
+  describe('when the chat itself is not taking posts', () => {
+    /**
+     * Every row of every table a claim could touch, for comparing before and after.
+     * @returns {object}
+     */
+    function everything() {
+      const db = store.getDb();
+      const dump = (table, order) => db.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all();
+      return {
+        outbound: dump('bridge_outbound', 'outbound_id'), leases: dump('bridge_outbound_leases', 'lease_id'), claims: dump('bridge_outbound_claims', 'claim_nonce'),
+        nonces: dump('bridge_nonces', 'nonce'), parts: dump('bridge_outbound_parts', 'part_external_id'), audit: dump('bridge_audit', 'audit_seq'),
+        circuit: dump('bridge_config_circuit', 'episode_id'), routes: dump('bridge_routes', 'route_id')
+      };
+    }
+
+    /**
+     * A claim's whole answer.
+     * @param {string} [nonce] - The claim's nonce.
+     * @returns {{status: number, body: object}}
+     */
+    function poll(nonce) {
+      return gateway.claimOutbound(helper, nonce || `decisions-nonce-${String(++seq).padStart(6, '0')}`, { limit: 20 });
+    }
+
+    /**
+     * Reset the circuit.
+     * @param {('requeue'|'withdraw')} decision - What becomes of the items set aside.
+     * @param {object} [over] - `requestId`, `actor`.
+     * @returns {object}
+     */
+    function reset(decision, over = {}) {
+      return bridgeStore.applyCircuitReset({
+        decision, requestId: over.requestId || `req-reset-${++seq}-0000`, actor: over.actor || 'master',
+        proof: over.actor === 'operator' ? 'verified-session' : 'master-launch', masterGeneration: over.actor === 'operator' ? null : 1,
+        at: gateway._deps.now()
+      });
+    }
+
+    it('one report sets the item aside, opens one episode, raises one notice, and stops every claim', () => {
+      const [a, b, c] = [waiting('a'), waiting('b'), waiting('c')];
+      const [first] = gateway.claimOutbound(helper, 'decisions-nonce-first1', { limit: 1 }).body.items;
+      clockAt(1000);
+      const report = fail(first, 'chat-permission-denied', { parts: ['d100'], partCount: 2 });
+      assert.deepEqual(report.body, { outboundId: a, state: 'blocked', reason: 'chat-permission-denied', circuit: { episodeId: 1, opened: true } });
+      assert.deepEqual(standing(a), ['blocked', 'chat-permission-denied']);
+      assert.deepEqual(bridgeStore.parts.forItem(a), ['d100'], 'the part that did post is recorded');
+      assert.deepEqual(bridgeStore.circuit.open(), {
+        episodeId: 1, reason: 'chat-permission-denied', outboundId: a, openedAt: at(1000), closedAt: null, closedBy: null, decision: null
+      });
+      const notices = bridgeStore.outbound.ready().filter((i) => i.idemKey.startsWith('config-circuit:'));
+      assert.deepEqual(notices.map((n) => [n.idemKey, n.kind, n.notifyType, n.text]), [['config-circuit:1', 'notification', 'operator-needed', gateway.CIRCUIT_NOTICE]]);
+      assert.equal(bridgeStore.outbound.ready().filter((i) => i.idemKey.startsWith('outbound-blocked:')).length, 0, 'the episode\'s notice is the only one');
+
+      // Every poll from now on gets one typed answer, and changes nothing whatever.
+      const before = everything();
+      const answers = [poll(), poll(), poll('decisions-nonce-first1'), poll('decisions-nonce-first1')];
+      for (const answer of answers) {
+        assert.deepEqual([answer.status, answer.body.code, answer.body.episodeId, answer.body.reason, answer.body.since],
+          [409, 'BRIDGE_CONFIGURATION_BLOCKED', 1, 'chat-permission-denied', at(1000)]);
+        assert.equal(answer.body.items, undefined);
+      }
+      assert.deepEqual(everything(), before, 'no lease, no hand-over count, no nonce, no notice, no audit row: nothing');
+      assert.deepEqual([standing(b), standing(c)], [['ready', null], ['ready', null]], 'what is queued stays queued, untouched');
+      assert.deepEqual([bridgeStore.outbound.get(b).attempts, bridgeStore.outbound.get(c).attempts], [0, 0]);
+    });
+
+    it('two reports of the same broken chat open one episode and raise one notice', () => {
+      const [a, b] = [waiting('a'), waiting('b')];
+      const [first, second] = claim();
+      const one = fail(first, 'chat-channel-missing');
+      const two = fail(second, 'chat-permission-denied');
+      assert.deepEqual([one.body.circuit, two.body.circuit], [{ episodeId: 1, opened: true }, { episodeId: 1, opened: false }]);
+      assert.deepEqual([standing(a), standing(b)], [['blocked', 'chat-channel-missing'], ['blocked', 'chat-permission-denied']], 'each item in hand is set aside');
+      assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_config_circuit').get().n, 1);
+      assert.equal(bridgeStore.circuit.open().reason, 'chat-channel-missing', 'the episode is the first report\'s');
+      assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE kind = 'notification' AND idem_key NOT LIKE 'notify:%'").get().n, 1, 'one notice');
+      // The store itself will not hold two open episodes, whoever tries.
+      assert.throws(() => store.getDb().prepare("INSERT INTO bridge_config_circuit (reason, outbound_id, opened_at) VALUES ('chat-auth-refused', ?, ?)").run(b, T0), /UNIQUE/);
+      assert.deepEqual(bridgeStore.circuit.trip('chat-auth-refused', b), { opened: false, episode: bridgeStore.circuit.open() });
+    });
+
+    it('a refusal of one item, or one a retry may fix, never opens it', () => {
+      for (const reason of [...FAILURE_REASONS.retryable, ...FAILURE_REASONS.blocking]) {
+        waiting(reason);
+        const item = claim().at(-1);
+        assert.equal(fail(item, reason).body.circuit, undefined, reason);
+        assert.equal(bridgeStore.circuit.open(), null, reason);
+        clockAt(Date.parse(gateway._deps.now()) - Date.parse(T0) + LEASE + 1);
+      }
+      assert.equal(poll().status, 200);
+    });
+
+    it('stays open across a restart and for any length of time', async () => {
+      const a = waiting('a');
+      fail(claim()[0], 'chat-auth-refused');
+      store.close();
+      store._setBasePath(tmpDir);
+      store.init();
+      assert.equal(bridgeStore.circuit.open().episodeId, 1, 'after a restart');
+      assert.equal(poll().body.code, 'BRIDGE_CONFIGURATION_BLOCKED');
+
+      clockAt(400 * DAY);
+      await gateway.tick();
+      bridgeStore.expire({ now: at(400 * DAY) });
+      bridgeStore.prune({ now: at(400 * DAY) });
+      assert.equal(bridgeStore.circuit.open().episodeId, 1, 'no passage of time closes it');
+      assert.equal(poll().body.code, 'BRIDGE_CONFIGURATION_BLOCKED');
+      assert.equal(standing(a)[0], 'dropped', 'the item it caught still has its own retention limit');
+    });
+
+    it('is reset by the Master or the operator, who say what becomes of the items it set aside', () => {
+      const [a, b, c] = [waiting('a'), waiting('b'), waiting('c')];
+      const items = gateway.claimOutbound(helper, 'decisions-nonce-reset1', { limit: 2 }).body.items;
+      fail(items[0], 'chat-permission-denied', { parts: ['d100'], partCount: 2 });
+      fail(items[1], 'chat-permission-denied');
+      assert.equal(reset('requeue', { requestId: 'req-reset-0001' }).outcome, 'applied');
+      clockAt(LEASE + 1);
+      assert.equal(bridgeStore.circuit.open(), null);
+      const closed = store.getDb().prepare('SELECT * FROM bridge_config_circuit WHERE episode_id = 1').get();
+      assert.deepEqual([closed.closed_by, closed.decision, closed.closed_at !== null], ['master', 'requeue', true]);
+      assert.deepEqual([standing(a), standing(b), standing(c)], [['ready', null], ['ready', null], ['ready', null]]);
+      const notice = store.getDb().prepare("SELECT state, drop_code, text FROM bridge_outbound WHERE idem_key = 'config-circuit:1'").get();
+      assert.deepEqual([notice.state, notice.drop_code, notice.text], ['dropped', 'withdrawn', null], 'the episode\'s notice is not posted after the fact');
+
+      const again = reset('requeue', { requestId: 'req-reset-0001' });
+      assert.deepEqual([again.outcome, again.replayed, again.items, again.episode.episodeId], ['applied', true, 2, 1]);
+      assert.equal(reset('withdraw', { requestId: 'req-reset-0001' }).outcome, 'request-id-reused');
+      assert.equal(reset('requeue').outcome, 'circuit-not-open');
+
+      const handed = poll().body.items;
+      assert.deepEqual(handed.map((i) => [i.outboundId, i.postedParts]), [[a, ['d100']], [b, []], [c, []]], 'claims resume, with what was already posted');
+
+      // A second episode is a new one, with its own notice; the operator withdraws what it caught.
+      const own = waiting('own');
+      clockAt(2 * (LEASE + 1));
+      const next = poll().body.items;
+      fail(next.find((i) => i.outboundId === own), 'rejected-by-chat');
+      const caught = fail(next.find((i) => i.outboundId === a), 'chat-channel-missing');
+      assert.deepEqual(caught.body.circuit, { episodeId: 2, opened: true });
+      const byOperator = reset('withdraw', { actor: 'operator' });
+      assert.deepEqual([byOperator.outcome, byOperator.items, byOperator.episode.closedBy, byOperator.episode.decision], ['applied', 1, 'operator', 'withdraw']);
+      assert.deepEqual([standing(a)[0], bridgeStore.outbound.get(a).dropCode, bridgeStore.outbound.get(a).text], ['dropped', 'withdrawn', null]);
+      assert.deepEqual(standing(own), ['blocked', 'rejected-by-chat'], 'an item set aside for its own reason is not the reset\'s to decide');
+      const audit = store.getDb().prepare("SELECT actor, outcome, detail_json FROM bridge_audit WHERE op = 'circuit-reset' AND outcome = 'applied' ORDER BY audit_seq").all();
+      assert.deepEqual(audit.map((r) => [r.actor, JSON.parse(r.detail_json).episodeId, JSON.parse(r.detail_json).decision, JSON.parse(r.detail_json).items]),
+        [['master', 1, 'requeue', 2], ['operator', 2, 'withdraw', 1]]);
+    });
+
+    it('an episode\'s record cannot be rewritten, and a closed one is final', () => {
+      waiting('a');
+      fail(claim()[0], 'chat-guild-missing');
+      const db = store.getDb();
+      assert.throws(() => db.exec("UPDATE bridge_config_circuit SET reason = 'chat-auth-refused'"), /fixed once opened/);
+      assert.throws(() => db.exec("UPDATE bridge_config_circuit SET closed_at = 'x'"), /CHECK/, 'closing says who and what was decided');
+      reset('withdraw');
+      assert.throws(() => db.exec('UPDATE bridge_config_circuit SET closed_at = NULL, closed_by = NULL, decision = NULL'), /final once closed/);
     });
   });
 
@@ -377,7 +539,7 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       const [a, b] = [waiting('a'), waiting('b')];
       const items = claim();
       fail(items[0], 'rejected-by-chat');
-      fail(items[1], 'chat-configuration');
+      fail(items[1], 'part-conflict');
       const byMaster = decide('outbound-withdraw', a);
       const byOperator = decide('outbound-withdraw', b, { actor: 'operator' });
       for (const [result, id] of [[byMaster, a], [byOperator, b]]) {

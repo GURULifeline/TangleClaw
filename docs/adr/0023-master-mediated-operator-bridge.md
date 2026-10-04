@@ -386,6 +386,21 @@ have the reply reach the Master as a reply to that milestone.
   the ids of any parts that did post. A transient or unknown failure leaves the item
   retryable. A permanent or configuration failure **blocks** the item and raises
   `operator-needed`, until the Master or the operator explicitly requeues or closes it.
+- **A failure of the chat itself opens one circuit, not a pile.** A closed, channel-level
+  configuration failure (the channel or server verified missing, permission denied, the bot's
+  token refused) atomically blocks the item in hand, opens one durable configuration episode,
+  raises exactly one `operator-needed` record for that episode, and stops all further claims.
+  Later polls get one typed `BRIDGE_CONFIGURATION_BLOCKED` answer and neither change queued
+  items nor raise more notices. Recovery is a verified Master or operator reset after the
+  configuration is fixed, which closes the episode and explicitly requeues or withdraws what
+  was blocked. Nothing clears it by time alone.
+- **Only the chat's own verdict opens it.** An item-specific permanent refusal blocks only that
+  item. A transient, network, rate-limit or server failure is retried with bounded backoff and
+  never opens the circuit. A missing reply target is not a broken channel: the answer is posted
+  unthreaded.
+- **The episode's record does not recurse.** It is not delivered through the chat that is
+  closed; it is visible through the operator's local status and, until cutover, the interim
+  route.
 - **A Master close withdraws an undelivered item only when no lease on it is live.** With a
   live lease the close is refused `OUTBOUND_IN_FLIGHT`, so a close that succeeded cannot race a
   post already under way. Delivered items are historical and are not unsent.

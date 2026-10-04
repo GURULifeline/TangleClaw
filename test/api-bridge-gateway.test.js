@@ -543,7 +543,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal((await report(a, { leaseId: lease(a), reason: 'rejected-by-chat' }, asMaster())).status, 200);
     const part = await call('POST', `/api/bridge/helper/outbound/${b}/parts`, { headers: asHelper(), body: { leaseId: lease(b), partIndex: 0, partCount: 2, externalId: `p${++seq}x` } });
     assert.deepEqual([part.status, part.body.replayed], [200, false]);
-    assert.equal((await report(b, { leaseId: lease(b), reason: 'chat-configuration' })).body.state, 'blocked');
+    assert.equal((await report(b, { leaseId: lease(b), reason: 'part-conflict' })).body.state, 'blocked');
     for (const [method, apiPath] of [['POST', `/api/bridge/helper/outbound/${a}/failure`], ['POST', `/api/bridge/helper/outbound/${a}/parts`]]) {
       assert.equal((await call(method, apiPath, { headers: asMaster(), body: { leaseId: lease(a) } })).status, 401, 'the helper\'s routes are the helper\'s');
     }
@@ -551,7 +551,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const blocked = await call('GET', '/api/bridge/master/outbound/blocked', { headers: asMaster() });
     const mine = blocked.body.items.filter((i) => [a, b].includes(i.outboundId));
     assert.deepEqual(mine.map((i) => [i.outboundId, i.notifyType, i.blockCode, i.attempts, i.partsPosted]),
-      [[a, 'operator-needed', 'rejected-by-chat', 1, 0], [b, 'operator-needed', 'chat-configuration', 1, 1]]);
+      [[a, 'operator-needed', 'rejected-by-chat', 1, 0], [b, 'operator-needed', 'part-conflict', 1, 1]]);
     assert.ok(!JSON.stringify(blocked.body).includes('notice a'), 'what is set aside is listed without its text');
 
     const listed = await tc(['bridge', 'blocked']);
@@ -581,6 +581,48 @@ describe('bridge API: the round trip (#2031)', () => {
     const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/outbound/:outboundId/requeue'),
       { req: AMBIENT, headers: AMBIENT.headers, params: { outboundId: String(a) }, body: { requestId: `req-op-${++seq}-0000` } });
     assert.equal(ambient.status, 403, 'a dashboard-shaped request on an open gate decides nothing');
+  });
+
+  it('a closed chat stops every claim over the route until the Master or the operator resets it', async () => {
+    const text = 'notice for a closed chat';
+    const id = bridgeStore.outbound.enqueue({
+      idemKey: `notify:operator-needed:circuit-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text)
+    }).outboundId;
+    const item = (await claim()).body.items.find((i) => i.outboundId === id);
+    const reported = await call('POST', `/api/bridge/helper/outbound/${id}/failure`, { headers: asHelper(), body: { leaseId: item.leaseId, reason: 'chat-channel-missing' } });
+    assert.deepEqual([reported.status, reported.body.state, reported.body.circuit.opened], [200, 'blocked', true]);
+    const episodeId = reported.body.circuit.episodeId;
+
+    for (const headers of [asHelper(), asHelper()]) {
+      const blocked = await claim(headers);
+      assert.deepEqual([blocked.status, blocked.body.code, blocked.body.episodeId, blocked.body.reason], [409, 'BRIDGE_CONFIGURATION_BLOCKED', episodeId, 'chat-channel-missing']);
+    }
+    // The operator and the Master both see it where they look, with no chat needed to tell them.
+    const forOperator = await asOperator('GET', '/api/bridge/operator/status');
+    assert.deepEqual([forOperator.body.configurationCircuit.episodeId, forOperator.body.configurationCircuit.reason], [episodeId, 'chat-channel-missing']);
+    const shown = await tc(['bridge', 'status']);
+    assert.match(shown.stdout, /CONFIGURATION CIRCUIT OPEN since .* \(chat-channel-missing\)/);
+
+    // Only the Master or a signed-in operator resets it.
+    const reset = (headers, body) => call('POST', '/api/bridge/master/circuit/reset', { headers, body });
+    assert.equal((await reset(asHelper(), { requestId: `req-r-${++seq}-0000`, decision: 'requeue' })).status, 401);
+    assert.equal((await reset({}, { requestId: `req-r-${++seq}-0000`, decision: 'requeue' })).status, 401);
+    const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/circuit/reset'),
+      { req: AMBIENT, headers: AMBIENT.headers, params: {}, body: { requestId: `req-r-${++seq}-0000`, decision: 'requeue' } });
+    assert.equal(ambient.status, 403);
+    assert.equal((await reset(asMaster(), { requestId: `req-r-${++seq}-0000` })).body.code, 'DECISION_REQUIRED');
+    assert.equal((await reset(asMaster(), { requestId: `req-r-${++seq}-0000`, decision: 'ignore' })).body.code, 'DECISION_REQUIRED');
+    assert.equal(bridgeStore.circuit.open().episodeId, episodeId, 'none of those closed it');
+
+    const usage = await tc(['bridge', 'reset']);
+    assert.equal(usage.code, 1);
+    const done = await tc(['bridge', 'reset', '--requeue']);
+    assert.deepEqual([done.code, done.stdout], [0, `Configuration circuit reset: episode ${episodeId} is closed, 1 item(s) put back.\n`]);
+    assert.equal(bridgeStore.circuit.open(), null);
+    assert.equal((await claim()).body.items.some((i) => i.outboundId === id), true, 'and the item is handed over again');
+    const none = await tc(['bridge', 'reset', '--withdraw']);
+    assert.deepEqual([none.code, /CIRCUIT_NOT_OPEN/.test(none.stderr)], [2, true]);
+    assert.doesNotMatch((await tc(['bridge', 'status'])).stdout, /CIRCUIT/);
   });
 
   it('answers 410 over the route, for good, to an acknowledgement of an item that was let go', async () => {

@@ -29,6 +29,8 @@ All notable changes to TangleClaw are documented in this file.
 - **What the helper cannot post is set aside, not discarded** (#2031, ADR 0023 Decision 23). Still off by default.
   - **A typed failure report.** The helper reports why an item could not be posted, from a closed list, with the parts that did post. A failure a retry may fix leaves the item waiting. One it will not sets the item aside and raises one `operator-needed` notice.
   - **The Master or the operator decides.** `tc bridge blocked` lists what was set aside; `tc bridge requeue <item-id>` puts one back and `tc bridge withdraw <item-id>` gives it up. The operator has the same two decisions from a signed-in session. The helper has neither.
+  - **A chat closed to the bot opens one circuit.** If Discord says the channel or server is gone, the bot may not post, or its token is refused, the bridge sets aside the item in hand, opens one episode, records one notice and hands nothing more over. Every later claim gets `BRIDGE_CONFIGURATION_BLOCKED` and changes nothing. `tc bridge status` shows it; `tc bridge reset --requeue` or `--withdraw` closes it once the configuration is fixed. It never clears by time.
+  - **A missing reply target is not a broken channel.** The answer is posted by itself.
   - **Closing a route withdraws its unposted answer,** unless the helper holds it at that moment: then the close is refused `OUTBOUND_IN_FLIGHT` and can be asked again once the lease settles. What was delivered is not unsent.
 
 - **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023 Decision 21). Still off by default. `docs/operator-bridge.md` has the detail.

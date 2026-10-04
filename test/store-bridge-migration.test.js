@@ -246,6 +246,7 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
     db.exec('DROP TABLE bridge_outbound_leases');
     db.exec('DROP TABLE bridge_outbound_claims');
     db.exec('DROP TABLE bridge_outbound_parts');
+    db.exec('DROP TABLE bridge_config_circuit');
     db.exec('DROP TABLE bridge_route_reply_context');
     db.exec('DROP TRIGGER bridge_routes_delete_reply_context');
     db.exec('DROP TABLE bridge_helper_tokens');
@@ -280,7 +281,7 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
       db.exec(`DROP TRIGGER IF EXISTS ${trigger.name}`);
     }
     // Dropping a table takes its own indexes and triggers with it; put back those v53 had.
-    db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/).filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context/.test(stmt)).join(';\n'));
+    db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/).filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context|bridge_config_circuit/.test(stmt)).join(';\n'));
     if (populate) populate(db);
     db.exec('DELETE FROM schema_version WHERE version >= 54');
     db.exec('INSERT INTO schema_version (version) VALUES (53)');

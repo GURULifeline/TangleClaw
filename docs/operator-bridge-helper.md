@@ -166,7 +166,8 @@ to refuse a repeat for a few minutes.
 | A post's outcome is unknown (a timeout, a server error) | The helper reports `outcome-unknown` and retries with the same nonce for up to 2 minutes; Discord returns the message it already made. |
 | Past those 2 minutes | A retry could duplicate the post, so the helper holds the item as `uncertain` and reports `outcome-unverifiable`. The bridge sets the item aside and tells you. |
 | Discord rejects the item's content (HTTP 400) | The helper reports `rejected-by-chat`. The bridge sets the item aside and tells you. The items after it keep moving. |
-| The bot may not post in the channel (401, 403, 404) | The helper reports `chat-configuration`, the bridge sets that item aside and tells you, and the pass stops. Until the channel is put right, each pass sets one more item aside. |
+| Discord says the chat is closed to the bot | The helper believes only a code Discord gave: unknown channel, unknown server, missing access or permissions, or a refused bot token (401). It reports that, the bridge sets the item in hand aside and opens its configuration circuit, and nothing more is handed over until the Master or the operator resets it. A bare 403 or 404 with no such code is treated as passing. |
+| The message an answer replies to is gone | The answer is posted by itself, not as a reply. That is not a broken channel. |
 | The bridge's record of an item's parts disagrees with the helper's | The helper reports `part-conflict` and posts nothing more of it. The bridge sets it aside. |
 | The helper token was replaced | The old token's leases are no longer the helper's, and the bridge says nothing about their items. Items still waiting are handed to the new token with their parts. |
 | The bridge let the item go, or the Master withdrew it | The helper drops its record and stops trying. Anything already posted stays in the channel. |
@@ -190,8 +191,19 @@ something was set aside. The Project Master lists these with `tc bridge blocked`
 The operator can make the same two decisions from a signed-in session
 ([operator-bridge.md](operator-bridge.md), "The operator's routes").
 
-For `rejected-by-chat` and `chat-configuration` that is all there is to do: put right what
-Discord refused, or the bot's permissions, then requeue.
+For `rejected-by-chat` that is all there is to do: put right what Discord refused, then
+requeue.
+
+### When the whole chat is closed to the bot
+
+If the channel or server is missing, the bot may not post there, or its token is refused, the
+bridge opens its **configuration circuit**. The helper logs `bridge-configuration-blocked` on
+every pass and posts nothing. The notice cannot reach you through Discord; `tc bridge status`
+and the operator's status page show it.
+
+Put the configuration right (the bot's permissions in the channel, or `set-secret bot` for a
+new token, then restart the helper). Then the Master runs `tc bridge reset --requeue`, or
+`--withdraw` to give up what was caught. Nothing closes the circuit by itself.
 
 ### Settling an `uncertain` item
 
@@ -242,6 +254,9 @@ TangleClaw's answer is echoed.
 | `state-write-failed` | `state.json` could not be written: a full disk, or permissions. The helper keeps trying and posts nothing it could not record. |
 | `helper-already-running` | Another helper is running, or the helper could not check whether one is (`ps` failed): it does not start on a guess. With `pid: -1` the lock file `helper.pid` is unreadable. Either way, check that no helper runs (`pgrep -fl tc-bridge-helper`), then delete the lock file. |
 | `gateway-fatal` | Discord refused the connection for a reason a retry cannot fix. 4004 is a bad bot token (run `set-secret bot`); 4014 means Message Content Intent is off. The helper keeps posting, but reads nothing until it is restarted. |
+| `bridge-configuration-blocked` | The bridge's configuration circuit is open; see "When the whole chat is closed to the bot". |
+| `outbound-chat-closed` | Discord said the chat is closed to the bot, and the bridge was told. |
+| `outbound-reply-target-missing` | The message an answer replied to is gone; the answer was posted by itself. Nothing to do. |
 | `claim-failed` | The bridge could not be asked what to post. The status is in the line: `0` is no answer, `401` a replaced token, `409` a disabled bridge. |
 | `redirect-refused` | A server answered with a redirect, which the helper never follows. Check `--base-url`. |
 | `outbound-uncertain` | An item is held here and set aside at the bridge; see "Settling an `uncertain` item". |
