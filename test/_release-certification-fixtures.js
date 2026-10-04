@@ -108,4 +108,49 @@ function sample(t, obs = observations(), extra = {}) {
   return { wallAt: T0 + t, monoAt: t, runnerInstance: 'r1', observations: obs, ...extra };
 }
 
-module.exports = { SHA, WTID, GEN, MIN, T0, RUN_ID, BOOT_ID, RULESET, ISOLATED, manifest, guestManifest, isolationPair, observations, sample };
+/**
+ * A soak judgement (`tc.soak-judgement/v1`) that passed and is bound to one
+ * run, as the soak judge would record it for a sound evidence bundle.
+ * @param {object} m - The run's manifest
+ * @param {string} digest - The manifest's digest as stored
+ * @param {object} [over] - Fields to override on the judgement
+ * @returns {object} The judgement
+ */
+function soakJudgement(m, digest, over = {}) {
+  return {
+    schema: 'tc.soak-judgement/v1', verdict: 'pass', reasons: [], findings: [], disposition: null,
+    binding: {
+      candidateSha: m.candidateSha, runId: m.runId, manifestDigest: digest, bundleManifestSha256: '1'.repeat(64), bundleCandidateSha: m.candidateSha,
+      scheduleDigest: '2'.repeat(64), logBytes: 10, logSha256: '3'.repeat(64), soakStartedAt: T0, soakCompletedAt: T0 + MIN, ownershipVerified: true
+    },
+    ...over
+  };
+}
+
+/** The sha256 of the disposition proposal `soakWithFindings` records. */
+const DISPOSITION_SHA = '4'.repeat(64);
+
+/**
+ * A soak judgement that is awaiting review for one failed load event, with a
+ * disposition proposal that covers it: what the soak judge records when it is
+ * given a valid proposal. It is not a pass.
+ * @param {object} m - The run's manifest
+ * @param {string} digest - The manifest's digest as stored
+ * @param {object} [over] - Fields to override on the judgement
+ * @returns {object} The judgement
+ */
+function soakWithFindings(m, digest, over = {}) {
+  const finding = { type: 'event', index: 7, kind: 'api.health', eventCode: 'HTTP_STATUS', skipped: false };
+  return soakJudgement(m, digest, {
+    verdict: 'awaiting-review',
+    reasons: [{ index: 7, kind: 'api.health', eventCode: 'HTTP_STATUS', count: 1, code: 'EVENT_FAILED', class: 'reviewable' }],
+    findings: [finding],
+    disposition: {
+      sha256: DISPOSITION_SHA, state: 'covers',
+      findings: [{ ...finding, classification: 'harness', rationale: 'the stub hub dropped the request', evidence: [{ path: 'soak-log.ndjson', sha256: '3'.repeat(64) }], trackingIssue: { repo: 'o/r', number: 1 } }]
+    },
+    ...over
+  });
+}
+
+module.exports = { SHA, WTID, GEN, MIN, T0, RUN_ID, BOOT_ID, RULESET, ISOLATED, manifest, guestManifest, isolationPair, observations, sample, soakJudgement, soakWithFindings, DISPOSITION_SHA };

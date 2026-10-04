@@ -4,6 +4,24 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A soak's evidence now decides whether a release candidate is certified** (#1949). Before this, a host-attested certification run could be certified of record without anything having read the soak's evidence bundle. The v5.30.0 soak was evaluated by hand.
+  - **The certification judge.** `lib/soak/judge.js` reads one evidence bundle for one certification run and gives a verdict of `pass`, `awaiting-review` or `fail`.
+    - It trusts nothing the manifest's summary says. It re-hashes every listed file, refuses unlisted ones, re-validates the schedule, re-reads the log with the driver, re-reads the samples and re-checks the database snapshot.
+    - **Terminal reasons make it `fail`, and nothing waives them.** These are a bundle whose bytes are not the manifest's, evidence not bound to the run, a schedule that is not the certifying 72-hour one, a log that is not whole, a run shorter than its schedule, samples that do not cover the log, data corruption, a server that did not come back, and any fault event that was not `ok`.
+    - **Reviewable findings make it `awaiting-review`, which does not certify.** These are a load event that failed or was skipped with its record intact, and a log the driver recorded as ownership-unverified.
+  - **Findings pass only on the operator's own acceptance of them.** There are two steps, and neither works alone.
+    - `rc-cert host-finalize --soak-disposition <file>` takes a disposition proposal (`tc.soak-disposition/v1`). It names each finding one at a time, with a classification (`harness`, `environment` or `candidate-finding`), a rationale, evidence and a tracking issue. It must be bound to the exact candidate, run, bundle and log, and must name exactly the findings: no ranges, no patterns. Evidence must be a file the bundle's manifest lists, by its digest. The judge records the proposal's sha256. The verdict stays `awaiting-review`, because a proposal approves nothing and carries no approver.
+    - `rc-cert accept --soak-disposition-sha256 <hex>` binds that sha256, with the candidate and run, into the run's acceptance record. `rc-cert host-publish` certifies a run with findings only when the two digests are equal.
+    - A scorecard accepted this way carries `acceptance.soakDisposition`, so a run certified with findings says so in public.
+  - **The host gates on it.** `rc-cert host-finalize` now requires `--soak-bundle <dir>` and records the judgement in the finalization (`SOAK_JUDGEMENT_MISSING`, `SOAK_JUDGEMENT_FAILED`, `SOAK_JUDGEMENT_AWAITING_REVIEW`, `SOAK_JUDGEMENT_UNBOUND`).
+  - **A soak run lasts its full duration.** `soak run` now waits after the last event until the schedule's horizon before writing `end`, so the log proves the whole 72 hours. A stop and a lost lock are still caught during that wait.
+  - **The bundle names its candidate.** `soak bundle` now requires `--candidate-sha <40-hex>`, the SHA the operator pinned, and records it as the manifest's top-level `candidateSha`. Nothing infers it.
+  - **Two commands now need a flag they did not before.** `soak bundle` refuses without `--candidate-sha`, and `rc-cert host-finalize` refuses without `--soak-bundle`. A soak already in progress is bundled with the new flag when it ends. A run finalized before this change keeps its finalization, but that finalization holds no soak judgement, so `rc-cert host-publish` records it as not certified.
+  - **v5.30.0 is unchanged.** It is recorded as hand-evaluated and is not re-judged. Its bundle predates both bundle changes above, so the judge applies from the next candidate.
+  - **Reference:** `deploy/soak/README.md` ("Judging the bundle"), the bundle runbook's steps 7 and 8, and ADR 0021 point 14. Supersedes #2056.
+
 ### Fixed
 
 - **A release can no longer leave a tag with no Release because its notes are too long** (#2080). v5.30.0's notes were about 191,000 characters, GitHub refused them at its 125,000-character limit, and the tag was already pushed. Before any tag, push or release, `release.yml` now measures the exact UTF-8 bytes of the notes and stops, with a message saying what to do, when they are empty or over 120,000 bytes. The notes are never truncated: shorten the version's `CHANGELOG.md` section and release again, as `docs/release-process.md` describes. A new test also fails a pull request that takes `[Unreleased]` past 110,000 bytes, so the problem shows up at merge time and not at the release.

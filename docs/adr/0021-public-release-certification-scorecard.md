@@ -167,7 +167,8 @@ to be able to trust it. That creates two problems:
    exact commit, fast-forward only and never forced; and the remote is read back, which must name
    that commit and hold the candidate's admission and scorecard byte for byte. Only then does the
    host write its record, and the record says a run is certified only for a `passed` scorecard
-   judged by canonical thresholds with an `ok` finalization. Only the host process ever names the
+   judged by canonical thresholds with an `ok` finalization whose soak judgement is bound to that
+   run and certifies it (point 14). Only the host process ever names the
    public remote, so no credential enters the guest, and GitHub's availability decides when a
    result is published, never how much time a run earned.
 
@@ -215,6 +216,38 @@ to be able to trust it. That creates two problems:
    or ruleset other than the admission's (`BOOT_CHANGED`, `ISOLATION_CHANGED`). The digests of
    both planes travel with each sample, and the host's finalization requires them, from the
    admitted boot, on the admission sample and on every sample that earned time.
+
+14. **No certification of record without a soak judgement bound to the run, and no soak finding
+   passes without the operator's own acceptance of it** (#1949, Architect rulings of 2026-10-04).
+   `rc-cert host-finalize` takes the soak's evidence bundle (`--soak-bundle`) and runs the soak's
+   certification judge (`lib/soak/judge.js`) on it for that run's candidate SHA, run id, manifest
+   digest and window. The judge re-derives everything from the bundle's files and fails closed.
+   - **Two classes of reason.** Integrity and provenance failures, a run shorter than its 72-hour
+     schedule (the soak driver writes `end` only at its horizon), samples that do not cover the
+     log, corruption, a server that did not recover, and any fault event that was not `ok` are
+     *terminal*: the verdict is `fail` and nothing waives it. A load event that failed or was
+     skipped with its record intact, and the driver's exact ownership-unverified state, are
+     *reviewable*: the verdict is `awaiting-review`, which does not certify.
+   - **A proposal is not an approval.** A disposition proposal (`tc.soak-disposition/v1`) names each
+     reviewable finding individually, bound to the candidate, the run and the bundle's digests,
+     with a classification, a rationale, evidence from the bundle and a tracking issue. The judge
+     validates it and records its sha256. The verdict stays `awaiting-review`. The proposal carries
+     no approver and no date, because a file can claim anything.
+   - **The approval is the acceptance.** The operator-only `rc-cert accept` binds the proposal's
+     sha256, with the candidate and run, into the acceptance record. `certifiedFrom` certifies a
+     run with findings only when that digest equals the one the finalization's judgement recorded.
+     The approver and the time are the acceptance record's.
+   - **The record shows it.** The judgement, with its findings, is recorded in the finalization.
+     The relay record binds the finalization's sha256, so it binds the judgement and, through its
+     digests, the soak evidence. A scorecard accepted with findings carries `acceptance.soakDisposition`.
+   - **The bundle must be judgeable as generated.** It names the candidate it ran as an explicit
+     full SHA, which the operator states and nothing infers. The judge is not loosened for a bundle
+     that lacks it.
+
+   The judge lives with the soak and release certification does not depend on it: they share only
+   the schema name `tc.soak-judgement/v1`, and `rc-cert` is where the two meet. This gate is the
+   host-attested path's; a local run's `passed` scorecard is unchanged. v5.30.0 predates the judge:
+   it was evaluated by hand from its evidence and is recorded that way, not re-judged.
 
 ## Consequences
 

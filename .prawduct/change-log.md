@@ -35,6 +35,23 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-04 — #1949: soak certification judge, successor to #2056
+
+<!-- prawduct: type=feature | scope=1949-soak-judge -->
+
+PM dispatch (Medusa 93e011e0), Architect ruling (011fef17) and corrections (6c0b466f). Supersedes #2056, whose code never landed.
+
+**Why.** The v5.30.0 soak's evidence was evaluated by hand, and `rc-cert host-finalize` certified without reading the bundle. #2056's judge would have closed that gap but failed the soak that shipped: it treated every failed event as fatal, with no path for an Operator to review one.
+
+**What.**
+- `lib/soak/judge.js`: verdicts `pass`, `awaiting-review`, `fail`. Terminal reasons are never waived, and any fault event that is not `ok` is terminal. A failed or skipped load event and the driver's ownership-unverified state are reviewable. A disposition proposal (`tc.soak-disposition/v1`) is validated and bound by digest, and never changes the verdict.
+- `lib/release-certification/state-machine.js#accept`, `scorecard.js`: the operator's acceptance binds the proposal's sha256 with the candidate and run, and the scorecard publishes it.
+- `lib/release-certification/host-checks.js`, `host-publish.js`: the finalization is `ok` for a pass or for covered findings; `certifiedFrom` certifies covered findings only when the acceptance names that exact digest.
+- `scripts/rc-cert.js`: `host-finalize --soak-bundle [--soak-disposition]`, `accept --soak-disposition-sha256`.
+- `lib/soak/bundle.js`, `lib/soak/driver.js`, `scripts/soak.js`: carried over from #2056. The bundle records its candidate SHA, and a run writes `end` at its horizon.
+- Docs: `deploy/soak/README.md` ("Judging the bundle"), ADR 0021 point 14, the bundle runbook.
+
+**Not done, by ruling.** v5.30.0 is not re-judged. RM09's monitoring layer stays outside the repo (#2079).
 ## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
 
 <!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->
