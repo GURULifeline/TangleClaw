@@ -53,6 +53,30 @@ PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out o
 - The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
 
 **Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
+## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
+
+<!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
+
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane C). It re-lands the fix from PR #1969 on a fresh branch off current main, because that branch had fallen dozens of merges behind; the test file had since changed under #1955 and #1978, so the fix was re-applied by hand rather than cherry-picked.
+
+**Problem.** `test/startup-control-codex.test.js`, *accepted on the echoed clientId + bytes notification…*: the fake app-server sent `turn/started` and `item/completed` on a 20 ms timer, and the completion on an 80 ms one. On a slow runner both fired before the adapter's post-subscribe read-back, the fire settled, and the read-back was skipped, so `one read-back` saw 0.
+
+**The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
+
+**Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
+## 2026-10-04 — Inline handlers in every page script take their values through jsArg (#1902)
+
+<!-- prawduct: type=bugfix | scope=inline-handler-jsarg-1902 -->
+
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane D). It re-lands PR #1965 on a fresh branch off current main, because that branch had fallen dozens of merges behind. The old diff applied cleanly; `landing.js` and `session.js` had changed on main since, and the widened scan confirms nothing added there uses the old form.
+
+**Problem.** #1384 fixed `'${esc(v)}'` inside inline handler attributes in `ui.js` only. The HTML parser decodes `&#39;` back to `'` before the handler runs, so an apostrophe ends the string. The same form survived in `setup.js` (the wizard project checkbox, which is reachable with a project named O'Brien, plus two redirect buttons), `session.js` (the group pill), `landing.js` (the launch-mode radio) and `history-drawer.js` (three `safeSid` values, already constrained to `[A-Za-z0-9_-]`, converted for uniformity).
+
+**The change.** Every one of those sites uses `${jsArg(v)}`. The widened scan also found two `wizardCopyInstall(${esc(JSON.stringify(command))})` handlers in `setup.js`: correct, but a second spelling of the encoder, so they now use `jsArg` too. `session.html` doesn't load `landing.js`, so `session.js` gets its own `jsArg` beside its own `esc`, and a test pins its output to `landing.js`'s. Giving the encoders one owner is #1605, not this change. The service-worker cache needs no bump: the cache guard reports no cache-first asset changed.
+
+**Tests.** `test/inline-handler-args.test.js`: the scan runs over every `public/*.js` file (plus a self-check that it still flags the old form), and the one-encoder check covers every file. Behavioural round trips with apostrophes: the wizard checkbox, both redirect buttons, the copy buttons, the launch-mode radio, the group pill (through `session.js`'s own `jsArg`), and the history drawer. Mutation-checked: against current main's page scripts, 10 of the new tests fail.
+
+**Test harnesses.** Sandboxes that run `setup.js` and `landing.js`'s launch picker supplied `esc` but not `jsArg`; the product was unaffected, since `jsArg` is a page global in the browser. Those harnesses load the production declaration through `test/_page-globals.js`, and `session-header-cleanup` lifts `session.js`'s own copy. Three assertions move to the `jsArg` form and stay exact: two group-pill markup regexes (`'g1'` becomes `&quot;g1&quot;`), and the proxy-redirect source pin, which had been pinning the broken `'${esc(redirectUrl)}'` spelling.
 
 ## 2026-09-30 — #2020: dry-run attempt-2 fix, stub hub plist written by the workload
 
