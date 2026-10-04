@@ -335,8 +335,7 @@ name or a count the server resolved, never anything a session or the operator ty
   every reading is unknown, because no engine has been observed at rest yet.
 - **Not kept for a late helper.** A notification nobody collected is let go after its limit
   (see Retention), so a helper that attaches late does not post stale news ahead of current
-  answers. A helper that had already fetched an item and posts it after it expired is still
-  believed when it acknowledges.
+  answers. An item that was let go cannot be acknowledged afterwards.
 - **An episode's identity outlives a restart.** Its notice is the record of it. When the
   server starts and finds the same lanes idle, that is the episode resumed, not a new one.
 
@@ -357,7 +356,7 @@ also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never u
 Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
 `413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `400 BAD_ACK`, `404 OUTBOUND_NOT_FOUND`,
-`409 ACK_MISMATCH`, `409 OUTBOUND_NOT_READY`, `409 ACK_NOT_APPLIED`.
+`409 ACK_MISMATCH`, `409 OUTBOUND_NOT_READY`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`.
 
 Acknowledging an answer marks it delivered and closes and clears its route in one transaction.
 
@@ -426,7 +425,8 @@ a day, whether or not the bridge is enabled. Revoked pins and helper tokens leav
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
 | Delivered or dropped outbound items | 30 days |
 | Decided candidates | 30 days |
-| A reply, or a delivery-failure notice | Never let go while it waits |
+| A reply | Never let go while it waits |
+| A delivery-failure notice | Let go after 30 days, then kept 30 days |
 | An undecided or uncollected `milestone` candidate | Let go after 7 days, then kept 30 days |
 | An undecided or uncollected `operator-action-required` candidate | Let go after 30 days, then kept 30 days |
 | An uncollected `work-blocked` or `operator-needed` notification | Let go after 7 days, then kept 30 days |
@@ -439,7 +439,16 @@ age.
 
 "Let go" means an undecided candidate is rejected as expired and an uncollected item is
 dropped. Something is let go when it has waited strictly longer than its limit. Each one is
-audited by itself, with the reason `expired` and its own id. Nothing let go is raised again:
+audited by itself, with its own id and a fixed reason: `undecided-expired`,
+`approved-uncollected-expired` or `uncollected-expired`.
+
+A candidate has two clocks. Waiting to be decided runs from submission; waiting to be collected
+runs from approval, which is a new fact about how fresh it is. A milestone can therefore live
+up to 7 days undecided and a further 7 approved; an operator action 30 and 30.
+
+Being let go is final. An acknowledgement for an item that was let go is refused with
+`410 OUTBOUND_EXPIRED`, even if the helper fetched it earlier: nothing records that fetch. A
+helper lease that would allow an acknowledgement to cross the limit is not built. Nothing let go is raised again:
 its row and its idempotency key stay until retention removes them, so the event that caused it
 remains accounted for.
 

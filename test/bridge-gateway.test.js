@@ -876,12 +876,14 @@ describe('bridge gateway (#2031)', () => {
       await gateway.tick();
       assert.deepEqual(gateway.outboundForHelper(), [], 'a week-old notification is not handed to a helper that attaches late');
       const expiry = store.getDb().prepare("SELECT * FROM bridge_audit WHERE op = 'expire'").get();
-      assert.deepEqual([expiry.actor, expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['gateway', 'expired', fetched.outboundId],
+      assert.deepEqual([expiry.actor, expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['gateway', 'uncollected-expired', fetched.outboundId],
         'what was let go is on the record, by its id');
       assert.equal((await gateway.tick()).notifications.workBlocked, 0, 'and it is not raised again');
-      // A helper that had already fetched it and posted it late is still believed.
-      assert.equal(gateway.acknowledgeOutbound(fetched.outboundId, 'posted-late').status, 200);
-      assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'delivered');
+      // Being let go is final: a helper that fetched it earlier and posts it
+      // now cannot acknowledge it. Nothing recorded that fetch.
+      const late = gateway.acknowledgeOutbound(fetched.outboundId, 'posted-late');
+      assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'dropped');
     });
 
     it('one route that fails does not hold up the others', async () => {

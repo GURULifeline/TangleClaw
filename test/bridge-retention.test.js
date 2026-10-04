@@ -114,7 +114,11 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
     assert.deepEqual(bridgeStore.EXPIRY_MS, {
       candidate: { milestone: 7 * DAY, 'operator-action-required': 30 * DAY },
       notification: { 'work-blocked': 7 * DAY, 'operator-needed': 7 * DAY, 'fleet-idle': DAY },
-      status: DAY
+      status: DAY,
+      failure: 30 * DAY
+    });
+    assert.deepEqual(bridgeStore.EXPIRY_REASONS, {
+      undecided: 'undecided-expired', approvedUncollected: 'approved-uncollected-expired', uncollected: 'uncollected-expired'
     });
   });
 
@@ -125,7 +129,7 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       assert.equal(itemState(id), 'ready');
       assert.deepEqual(bridgeStore.expire({ now: at(limit + 1) }), { outbound: 1, candidates: 0 });
       const item = bridgeStore.outbound.get(id);
-      assert.deepEqual([item.state, item.dropCode, item.text], ['dropped', 'expired', null]);
+      assert.deepEqual([item.state, item.dropCode, item.text], ['dropped', 'uncollected-expired', null]);
     });
   }
 
@@ -154,7 +158,7 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       bridgeStore.expire({ now: at(limit) });
       assert.equal(itemState(id), 'ready');
       assert.equal(bridgeStore.expire({ now: at(limit + 1) }).outbound, 1);
-      assert.equal(itemState(id), 'dropped');
+      assert.deepEqual([itemState(id), bridgeStore.outbound.get(id).dropCode], ['dropped', 'approved-uncollected-expired']);
     });
   }
 
@@ -223,27 +227,80 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
     assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_outbound').get().n, 0);
   });
 
-  it('never lets go of a reply or a failure notice, whatever its age', () => {
+  it('a candidate has two clocks: approval starts a new wait of the same length', () => {
+    for (const [kind, limit, id] of [['milestone', 7 * DAY, 'cd_m'], ['operator-action-required', 30 * DAY, 'cd_o']]) {
+      candidate(kind, id);
+      // Approved on the last instant it could still be decided.
+      const result = bridgeStore.applyCandidateWrite({
+        op: 'candidate-approve', requestId: `req-late-${id}`, candidateId: id, expectedVersion: 1, masterGeneration: 1, at: at(limit),
+        change: () => ({ state: 'approved', outbound: { idemKey: `candidate:${id}`, kind: 'candidate', sourceLabel: 'Project Master', text: 'x', digest, releasedGeneration: 1 } })
+      });
+      assert.equal(result.outcome, 'applied');
+      const itemId = store.getDb().prepare('SELECT outbound_id FROM bridge_outbound WHERE candidate_id = ?').get(id).outbound_id;
+      bridgeStore.expire({ now: at(2 * limit) });
+      assert.equal(itemState(itemId), 'ready', `${kind}: its item waits a full limit from approval, not from submission`);
+      bridgeStore.expire({ now: at(2 * limit + 1) });
+      assert.equal(itemState(itemId), 'dropped');
+    }
+  });
+
+  it('keeps a delivery-failure notice for 30 days, to the millisecond', () => {
+    route('rt_1');
+    const id = bridgeStore.outbound.enqueue({ idemKey: 'route:rt_1:failure', kind: 'failure', routeId: 'rt_1', sourceLabel: 'TangleClaw', text: 'x', digest, at: T0 }).outboundId;
+    bridgeStore.expire({ now: at(30 * DAY) });
+    assert.equal(itemState(id), 'ready');
+    assert.equal(bridgeStore.expire({ now: at(30 * DAY + 1) }).outbound, 1);
+    assert.deepEqual([itemState(id), bridgeStore.outbound.get(id).dropCode], ['dropped', 'uncollected-expired']);
+  });
+
+  it('a reply alone is never let go, whatever its age', () => {
     route('rt_1');
     bridgeStore.applyRouteWrite({
       op: 'answer', requestId: 'req-answer-0001', routeId: 'rt_1', expectedVersion: 1, actor: 'master', proof: 'master-launch', masterGeneration: 1, at: T0,
       change: () => ({ set: { state: 'released' }, outbound: { idemKey: 'route:rt_1:answer', kind: 'reply', sourceLabel: 'Project Master', text: 'the answer', digest, releasedGeneration: 1 } })
     });
-    const failure = bridgeStore.outbound.enqueue({ idemKey: 'route:rt_1:failure', kind: 'failure', routeId: 'rt_1', sourceLabel: 'TangleClaw', text: 'x', digest, at: T0 }).outboundId;
     assert.deepEqual(bridgeStore.expire({ now: at(3650 * DAY) }), { outbound: 0, candidates: 0 });
     const reply = store.getDb().prepare("SELECT * FROM bridge_outbound WHERE kind = 'reply'").get();
     assert.deepEqual([reply.state, reply.text], ['ready', 'the answer']);
-    assert.equal(itemState(failure), 'ready');
   });
 
-  it('audits each thing it lets go by its own id, with one fixed reason', () => {
+  it('an acknowledgement is taken up to the limit and refused for good once the item is let go', () => {
+    const gateway = require('../lib/bridge-gateway');
+    const realNow = gateway._deps.now;
+    try {
+      const onTime = notification('work-blocked');
+      gateway._deps.now = () => at(7 * DAY);
+      bridgeStore.expire({ now: at(7 * DAY) });
+      assert.equal(gateway.acknowledgeOutbound(onTime, 'posted-1').status, 200, 'at exactly the limit it is still waiting');
+
+      const late = bridgeStore.outbound.enqueue({
+        idemKey: 'notify:operator-needed:y', kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text: 'x', digest, at: T0
+      }).outboundId;
+      gateway._deps.now = () => at(7 * DAY + 1);
+      bridgeStore.expire({ now: at(7 * DAY + 1) });
+      const refused = gateway.acknowledgeOutbound(late, 'posted-2');
+      assert.deepEqual([refused.status, refused.body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.deepEqual(gateway.acknowledgeOutbound(late, 'posted-2').body.code, 'OUTBOUND_EXPIRED', 'and again, whenever it is tried');
+      const item = bridgeStore.outbound.get(late);
+      assert.deepEqual([item.state, item.deliveredRef], ['dropped', null], 'it is not marked delivered');
+    } finally {
+      gateway._deps.now = realNow;
+    }
+  });
+
+  it('audits each thing it lets go by its own id, with the reason for its kind of wait', () => {
     const blocked = notification('work-blocked');
     const idle = notification('fleet-idle');
     const waiting = candidate('milestone', 'cd_wait');
     const item = approved(candidate('milestone', 'cd_done'));
     bridgeStore.expire({ now: at(30 * DAY) });
     const rows = store.getDb().prepare("SELECT * FROM bridge_audit WHERE op = 'expire' ORDER BY audit_seq").all();
-    assert.ok(rows.every((r) => r.actor === 'gateway' && r.outcome === 'expired'));
+    assert.ok(rows.every((r) => r.actor === 'gateway'));
+    const reasonOf = (match) => rows.find((r) => { const d = JSON.parse(r.detail_json); return Object.entries(match).every(([k, v]) => d[k] === v); }).outcome;
+    assert.equal(reasonOf({ candidateId: waiting }), 'undecided-expired');
+    assert.equal(reasonOf({ outboundId: item }), 'approved-uncollected-expired');
+    assert.equal(reasonOf({ outboundId: blocked }), 'uncollected-expired');
+    assert.equal(reasonOf({ outboundId: idle }), 'uncollected-expired');
     assert.deepEqual(rows.map((r) => JSON.parse(r.detail_json)).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))), [
       { what: 'candidate', candidateId: waiting, kind: 'milestone' },
       { what: 'outbound', outboundId: blocked, kind: 'notification', type: 'work-blocked' },
