@@ -3,9 +3,8 @@
 // #2031 (ADR 0023): the activation and rollback runbooks, held to the code.
 //
 // A runbook is followed by a tired person under worse conditions than it was
-// written in, and four reviews in a row each found a step in these two that
-// could not be carried out. What is mechanical is therefore pinned here: the
-// snapshot block is RUN, the two rule texts are word for word, every button
+// written in. What is mechanical is therefore pinned here: the snapshot and
+// restore blocks are RUN, the two rule texts are word for word, every button
 // and line a step quotes exists in the code under that exact name, and the
 // rollback's order and end state are what the Architect ruled (2026-10-04).
 
@@ -114,8 +113,7 @@ describe('the operator bridge runbooks (#2031)', () => {
       assert.ok(!/GET \/api\/health/.test(ACTIVATE + ROLLBACK), 'no route is called by hand');
       assert.ok(!/server is not running the merged commit/.test(text), 'the precondition that the new code runs first is gone');
       // The restore uses that snapshot and no other file.
-      assert.match(flat(ROLLBACK), /`<snapshot>` and `<commit>` are the `snapshot:` and `commit:` lines in the cutover receipt, and no other file or commit\./);
-      assert.ok(ROLLBACK.includes('git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" checkout --detach <commit>'));
+      assert.match(flat(ROLLBACK), /`TC_COMMIT` and `TC_SNAPSHOT` to the `commit:` and `snapshot:` lines of the cutover receipt, and no other commit or file\./);
       assert.ok(!/tangleclaw\.pre-bridge\.db/.test(ACTIVATE + ROLLBACK), 'no fixed backup name that a second activation would overwrite');
     });
 
@@ -126,26 +124,22 @@ describe('the operator bridge runbooks (#2031)', () => {
       for (const doc of [ACTIVATE, ROLLBACK]) {
         for (const m of doc.matchAll(/`(git [^`]+)`/g)) oneLiners.push(m[1]);
       }
-      assert.deepEqual(oneLiners.map((c) => c.replace(guard, 'G')), ['git -C "G" describe --tags', 'git -C "G" checkout --detach <commit>'],
-        'the two git commands outside the block, each naming its checkout through the guard');
-      assert.ok(!/TC_CHECKOUT"/.test(ACTIVATE.replace(/```sh[\s\S]*?```/, '') + ROLLBACK), 'no bare "$TC_CHECKOUT" outside the guarded block');
+      assert.deepEqual(oneLiners.map((c) => c.replace(guard, 'G')), ['git -C "G" describe --tags'],
+        'the one git command outside a block names its checkout through the guard');
+      assert.ok(!/TC_CHECKOUT"/.test((ACTIVATE + ROLLBACK).replace(/```sh[\s\S]*?```/g, '')), 'no bare "$TC_CHECKOUT" outside the guarded block');
       const lines = block().split('\n');
       assert.ok(lines.indexOf(`: "${guard}"`) > -1 && lines.indexOf(`: "${guard}"`) < lines.findIndex((l) => /\bgit\b|sqlite3/.test(l)),
         'the block checks it before its first git or sqlite3 command');
-      // The restore checks it before it stops the server, so a refusal leaves everything as it was.
-      const restore = ROLLBACK.slice(ROLLBACK.indexOf('8. Only if the server itself will not start'));
-      assert.ok(restore.indexOf('`: "' + guard + '"`') > -1 && restore.indexOf('`: "' + guard + '"`') < restore.indexOf('launchctl bootout'));
-
       // Run as printed, with a git that records being called. Unset and empty both refuse, and git is never reached.
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-guard-'));
       try {
         const called = path.join(dir, 'git-was-called');
         const bin = path.join(dir, 'bin');
         fs.mkdirSync(bin);
-        for (const tool of ['git', 'sqlite3', 'launchctl']) {
+        for (const tool of ['git', 'sqlite3']) {
           fs.writeFileSync(path.join(bin, tool), `#!/bin/sh\necho "${tool} $*" >> "${called}"\n`, { mode: 0o755 });
         }
-        const scripts = [block(), ...oneLiners.map((c) => c.replace('<commit>', '0123456789abcdef')), ': "' + guard + '"\nlaunchctl bootout gui/501/com.tangleclaw.server'];
+        const scripts = [block(), ...oneLiners];
         for (const script of scripts) {
           for (const value of [undefined, '']) {
             const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir };
@@ -160,6 +154,80 @@ describe('the operator bridge runbooks (#2031)', () => {
         const set = spawnSync('sh', ['-c', oneLiners[0]], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, TC_CHECKOUT: '/some/checkout' }, encoding: 'utf8' });
         assert.equal(set.status, 0);
         assert.equal(fs.readFileSync(called, 'utf8'), 'git -C /some/checkout describe --tags\n');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('the restore is one block, run as printed: it changes nothing until everything it needs is there, and stops at the first failure', () => {
+      const m = /```sh\n([\s\S]*?)```/.exec(ROLLBACK);
+      assert.ok(m, 'rollback has a shell block');
+      const restore = m[1].split('\n').map((line) => line.replace(/^ {3}/, '')).join('\n');
+      assert.match(restore.trim(), /^\(\nset -eu\n[\s\S]*\n\)$/, 'a subshell that stops at the first failure');
+      assert.ok(!/`(launchctl|cp|git) [^`]*`/.test(ROLLBACK.replace(/```sh[\s\S]*?```/g, '').split('8. Only if')[1].split('## Done when')[0]),
+        'no restore command is printed outside the block, where a failed guard would not stop the next line');
+      assert.ok(fs.existsSync(path.join(ROOT, 'deploy', 'com.tangleclaw.server.plist')));
+
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-restore-'));
+      try {
+        const log = path.join(dir, 'calls');
+        const bin = path.join(dir, 'bin');
+        fs.mkdirSync(bin);
+        // Each tool records its call. git fails where GIT_FAILS names its subcommand; launchctl bootout fails where told to.
+        fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\necho "git $*" >> "${log}"\ncase " $* " in *" $GIT_FAILS "*) exit 1;; esac\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $1" >> "${log}"\n[ "$1" != "$LAUNCHCTL_FAILS" ]\n`, { mode: 0o755 });
+        fs.writeFileSync(path.join(bin, 'cp'), `#!/bin/sh\necho "cp $*" >> "${log}"\n`, { mode: 0o755 });
+        const snapshot = path.join(dir, 'snap.db');
+        fs.writeFileSync(snapshot, 'a snapshot');
+        const storePath = path.join(dir, 'live.db');
+        const good = { TC_CHECKOUT: '/some/checkout', TC_COMMIT: '0123456789abcdef', TC_SNAPSHOT: snapshot, TC_STORE: storePath };
+        const run = (vars) => {
+          fs.rmSync(log, { force: true });
+          const res = spawnSync('sh', ['-c', restore], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ...vars }, encoding: 'utf8' });
+          return { status: res.status, stderr: res.stderr, stdout: res.stdout, calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : [] };
+        };
+
+        // Anything missing or empty: refused, by name, with nothing run at all.
+        for (const name of ['TC_CHECKOUT', 'TC_COMMIT', 'TC_SNAPSHOT']) {
+          for (const value of [undefined, '']) {
+            const vars = { ...good };
+            if (value === undefined) delete vars[name]; else vars[name] = value;
+            const res = run(vars);
+            assert.notEqual(res.status, 0, `${name} ${value === undefined ? 'unset' : 'empty'}`);
+            assert.match(res.stderr, new RegExp(`${name}: set ${name} to `));
+            assert.deepEqual(res.calls, [], 'nothing ran');
+          }
+        }
+        // A snapshot that is not there, or a commit the checkout does not have: refused before the server is stopped.
+        const noFile = run({ ...good, TC_SNAPSHOT: path.join(dir, 'missing.db') });
+        assert.notEqual(noFile.status, 0);
+        assert.match(noFile.stderr, /no such snapshot: /);
+        assert.deepEqual(noFile.calls, []);
+        const noCommit = run({ ...good, GIT_FAILS: 'cat-file' });
+        assert.notEqual(noCommit.status, 0);
+        assert.deepEqual(noCommit.calls, ['git -C /some/checkout cat-file -e 0123456789abcdef^{commit}'], 'only the read-only check ran');
+        // git refuses the checkout: the store is not replaced and the server is not started on the wrong build.
+        const dirty = run({ ...good, GIT_FAILS: 'checkout' });
+        assert.notEqual(dirty.status, 0);
+        assert.deepEqual(dirty.calls.slice(-2), ['launchctl bootout', 'git -C /some/checkout checkout --detach 0123456789abcdef']);
+        assert.ok(!dirty.calls.some((c) => /^cp |bootstrap/.test(c)), 'no copy and no start after a refused checkout');
+
+        // Everything there: the ruled order, the receipt's commit and snapshot and no other, into the store.
+        const order = [
+          'git -C /some/checkout cat-file -e 0123456789abcdef^{commit}', 'launchctl bootout',
+          'git -C /some/checkout checkout --detach 0123456789abcdef', `cp ${snapshot} ${storePath}`, 'launchctl bootstrap'
+        ];
+        const ok = run(good);
+        assert.equal(ok.status, 0, ok.stderr);
+        assert.deepEqual(ok.calls, order);
+        assert.match(ok.stdout, /^restored: 0123456789abcdef with /m);
+        // A server that was never loaded does not stop the restore: that is the case the step is for.
+        const notLoaded = run({ ...good, LAUNCHCTL_FAILS: 'bootout' });
+        assert.equal(notLoaded.status, 0, notLoaded.stderr);
+        assert.deepEqual(notLoaded.calls, order);
+        // The default store is the one the server opens.
+        const dflt = run({ TC_CHECKOUT: good.TC_CHECKOUT, TC_COMMIT: good.TC_COMMIT, TC_SNAPSHOT: snapshot });
+        assert.ok(dflt.calls.includes(`cp ${snapshot} ${path.join(dir, '.tangleclaw', 'tangleclaw.db')}`));
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -316,7 +384,7 @@ describe('the operator bridge runbooks (#2031)', () => {
       assert.match(done, /"Nothing is queued without a route\."/);
       assert.match(done, /`helper: not running`/);
       // And the server can be started again after it was booted out.
-      assert.match(text, /launchctl bootstrap gui\/\$\(id -u\) ~\/Library\/LaunchAgents\/com\.tangleclaw\.server\.plist/);
+      assert.ok(ROLLBACK.includes('launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.tangleclaw.server.plist"'));
       assert.ok(fs.existsSync(path.join(ROOT, 'deploy', 'com.tangleclaw.server.plist')));
     });
 
@@ -332,6 +400,16 @@ describe('the operator bridge runbooks (#2031)', () => {
       assert.match(text, /Other posts headed `TangleClaw` may appear: those are the server's own notices\./);
       assert.match(text, /Message Content Intent on, and the bot in the server with View Channel, Send Messages, Read Message History and Add Reactions/);
       assert.match(text, /The \*\*Master\*\* runs `tc bridge candidates`, then `tc bridge approve <candidate-id> --version <n>`/);
+      // Step 17 looks for the verb where it arrives: the section a session is given as it starts, and
+      // nowhere a session can re-read. Held to the code that renders that section and serves a review.
+      assert.match(text, /ask it: "In the TangleClaw Ecosystem section of your opening context, does the list of `tc` verbs name `candidate`\?"/);
+      assert.ok(!/have it run `tc start review`/.test(text));
+      const primer = require('../lib/ecosystem-primer');
+      const ctx = { apiOrigin: 'http://127.0.0.1:3102', projectId: 7, projectName: 'p', workspaceId: 'w' };
+      const section = (switches) => primer.renderEcosystemPrimerSection(ctx, switches).join('\n');
+      assert.match(section(['bridge-candidates']), /^## TangleClaw Ecosystem/);
+      assert.ok(/`candidate`/.test(section(['bridge-candidates'])) && !/`candidate`/.test(section([])), 'the section names the verb only with the switch on');
+      assert.match(read('lib/sessions.js'), /add\(null, _yieldable\(0,\s+ecosystemPrimer\.buildEcosystemPrimerSection\(primerCtx\)/, 'the section belongs to no launch step, so a review of the steps never serves it');
     });
   });
 });

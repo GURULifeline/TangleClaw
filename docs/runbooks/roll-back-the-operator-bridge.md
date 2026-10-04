@@ -74,17 +74,34 @@ server is down, do steps 3, 7 and 8.
    former direct route, until the bridge is enabled again.
 
 8. Only if the server itself will not start on v5.31.0: stop it, put back the snapshot and the
-   build it came from, and start it. `<snapshot>` and `<commit>` are the `snapshot:` and
-   `commit:` lines in the cutover receipt, and no other file or commit.
-   `: "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"`
-   `launchctl bootout gui/$(id -u)/com.tangleclaw.server`
-   `git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" checkout --detach <commit>`
-   `cp <snapshot> ~/.tangleclaw/tangleclaw.db`
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tangleclaw.server.plist`
-   → The first line answers naming `TC_CHECKOUT`: it is not set in this terminal, and nothing
-   has been stopped or changed. Set it to the checkout the service runs from and start the step
-   again. Unset, git would act on whatever directory the terminal is in.
-   → Expected: the dashboard loads, and
+   build it came from, and start it. In a terminal, set `TC_CHECKOUT` to the checkout the service
+   runs from, and `TC_COMMIT` and `TC_SNAPSHOT` to the `commit:` and `snapshot:` lines of the
+   cutover receipt, and no other commit or file. Then paste this as it is. The parentheses
+   matter: the first thing that fails stops the block, and nothing after it runs.
+
+   ```sh
+   (
+   set -eu
+   : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
+   : "${TC_COMMIT:?set TC_COMMIT to the commit: line of the cutover receipt}"
+   : "${TC_SNAPSHOT:?set TC_SNAPSHOT to the snapshot: line of the cutover receipt}"
+   STORE="${TC_STORE:-$HOME/.tangleclaw/tangleclaw.db}"
+   [ -s "$TC_SNAPSHOT" ] || { echo "no such snapshot: $TC_SNAPSHOT" >&2; exit 1; }
+   git -C "$TC_CHECKOUT" cat-file -e "$TC_COMMIT^{commit}"
+   launchctl bootout "gui/$(id -u)/com.tangleclaw.server" || echo "the server was not loaded: going on"
+   git -C "$TC_CHECKOUT" checkout --detach "$TC_COMMIT"
+   cp "$TC_SNAPSHOT" "$STORE"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.tangleclaw.server.plist"
+   echo "restored: $TC_COMMIT with $TC_SNAPSHOT"
+   )
+   ```
+
+   → It stops naming `TC_CHECKOUT`, `TC_COMMIT` or `TC_SNAPSHOT`, or saying "no such snapshot",
+   or with git not knowing the commit: nothing has been stopped or changed. Set what it names and
+   paste it again.
+   → It stops at `checkout`: the server is stopped, the store is untouched, and git says why,
+   usually files changed in the checkout. Tell the Architect before doing anything else.
+   → Expected: a last line beginning `restored:`, the dashboard loads, and
    `sqlite3 ~/.tangleclaw/tangleclaw.db 'SELECT MAX(version) FROM schema_version'` prints the
    `schema:` line of the receipt.
    > 🚧 **UNVERIFIED** — this restore has not been rehearsed on this install · check the

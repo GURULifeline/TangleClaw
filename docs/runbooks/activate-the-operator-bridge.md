@@ -224,10 +224,14 @@ If any step's expected result does not appear, stop and go to
     > install: a rule added under "Add a wrap rule…" would reach no session at launch · the
     > Architect confirms where both rules are before this step is run.
 
-17. Launch one **project session**, and have it run `tc start review`. Then **Operator:** press
+17. Launch one **project session** and ask it: "In the TangleClaw Ecosystem section of your
+    opening context, does the list of `tc` verbs name `candidate`?" Then **Operator:** press
     **Refresh** in the panel.
-    → Expected: the line still says only `on`, and the session's review of its launch context
-    names `candidate` in its list of `tc` verbs.
+    → Expected: the session says yes, and the line still says only `on`.
+    The verb is named only in what a session is given as it starts. `tc start review` re-reads
+    the launch steps, which do not carry that section, so it cannot show this.
+    → The session says no and the line says only `on`: do not roll back for this. Sessions can be
+    told the command, as in step 14. Tell the Architect, and go on.
     → If the line adds "a session of project <id> was not told", with this session's project and
     a time after you launched it: that session's context had no room for the verb. The switch is
     on and nothing is posted wrongly. Tell the Architect the two numbers it shows, and go on.
