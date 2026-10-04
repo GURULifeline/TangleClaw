@@ -263,8 +263,51 @@ describe('bridge candidates (#2031)', () => {
     assert.equal(bridgeStore.candidates.receipts(kept).length, 2, 'the survivor rests on both');
     assert.equal(bridgeStore.candidates.receipts(folded).length, 1, 'the folded one keeps its own record');
     assert.equal((await master(folded, 'approve', { expectedVersion: 2 })).body.code, 'ALREADY_DECIDED');
-    await master(kept, 'approve');
+    assert.equal((await master(kept, 'approve', { expectedVersion: 2 })).status, 200);
     assert.equal(candidateItems().filter((i) => [kept, folded].includes(i.candidate_id)).length, 1, 'one release for the pair');
+  });
+
+  it('after a merge the survivor\'s version moves, and a faithful replay of either submission is still a replay', async () => {
+    const session = liveSession();
+    const one = reports(session);
+    const two = reports(session, 'working');
+    const keptBody = { requestId: 'req-merge-kept-1', receipts: [{ kind: 'workload', seq: one }] };
+    const foldedBody = { requestId: 'req-merge-fold-1', receipts: [{ kind: 'workload', seq: two }] };
+    const kept = (await offers(session, keptBody)).body.candidateId;
+    const folded = (await offers(session, foldedBody)).body.candidateId;
+    await master(folded, 'merge', { into: kept });
+
+    assert.equal(bridgeStore.candidates.get(kept).version, 2, 'what it rests on changed');
+    const stale = await master(kept, 'approve', { expectedVersion: 1 });
+    assert.equal(stale.body.code, 'VERSION_CONFLICT', 'a decision made on the survivor as it was before the merge is stale');
+
+    const again = await offers(session, keptBody);
+    assert.deepEqual([again.status, again.body.replayed, again.body.candidateId], [200, true, kept]);
+    const foldedAgain = await offers(session, foldedBody);
+    assert.deepEqual([foldedAgain.status, foldedAgain.body.replayed, foldedAgain.body.state], [200, true, 'merged']);
+    assert.equal((await master(kept, 'approve', { expectedVersion: 2 })).status, 200);
+  });
+
+  it('the receipt digest covers every column of the receipts table', () => {
+    const columns = store.getDb().prepare('PRAGMA table_info(workload_receipts)').all().map((c) => c.name).sort();
+    assert.deepEqual([...bridgeStore.WORKLOAD_RECEIPT_COLUMNS].sort(), columns);
+  });
+
+  it('lets go of a candidate the Master never decided, and of an approved item nobody collected', async () => {
+    const session = liveSession();
+    reports(session);
+    const waiting = (await offers(session)).body.candidateId;
+    const approved = (await offers(session)).body.candidateId;
+    await master(approved, 'approve');
+    const now = Date.now();
+
+    assert.deepEqual(bridgeStore.expire({ now: new Date(now + bridgeStore.CANDIDATE_TTL_MS - 60000).toISOString() }), { outbound: 0, candidates: 0 });
+    const expired = bridgeStore.expire({ now: new Date(now + bridgeStore.CANDIDATE_TTL_MS + 60000).toISOString() });
+    assert.ok(expired.candidates >= 1 && expired.outbound >= 1);
+    assert.equal(bridgeStore.candidates.get(waiting).state, 'rejected');
+    const item = candidateItems().find((i) => i.candidate_id === approved);
+    assert.deepEqual([item.state, item.drop_code, item.text], ['dropped', 'expired', null]);
+    assert.equal((await master(waiting, 'approve', { expectedVersion: 2 })).body.code, 'ALREADY_DECIDED');
   });
 
   it('refuses to approve a candidate whose receipt is no longer what it was', async () => {

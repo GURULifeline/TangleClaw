@@ -272,7 +272,8 @@ tc candidate submit --kind milestone --receipt workload:<seq> --text "PR 12 merg
 - **Idempotent.** A request id is scoped to the launch. Repeating it with the same payload
   returns the same candidate; the same id with a different payload is refused.
 - **Bounded.** At most five undecided candidates per launch, text of at most 1800 characters
-  with no control or text-direction characters.
+  with no control or text-direction characters. A candidate the Master has not decided within
+  7 days is rejected as expired.
 - **Nothing is posted.** A candidate never reaches the helper by itself.
 
 The Master decides, through `tc bridge`:
@@ -283,14 +284,15 @@ The Master decides, through `tc bridge`:
 | `tc bridge candidate <id>` | Shows one, with its receipts. What a session wrote is a claim to judge, not the operator's word. |
 | `tc bridge approve <id> --version <n> [--text "<text>"]` | Verifies every receipt again: present, and its digest unchanged. Then creates one item for the helper, in the Master's words if given, otherwise the session's. Decision and item are one transaction. |
 | `tc bridge reject <id> --version <n>` | Declines it. Nothing is posted. |
-| `tc bridge merge <id> --version <n> --into <id>` | Folds a duplicate into another candidate. The survivor gains every receipt of the folded one; the folded one can never be approved. |
+| `tc bridge merge <id> --version <n> --into <id>` | Folds a duplicate into another candidate. The survivor gains every receipt of the folded one and its version moves, so read it again before approving it; the folded one can never be approved. |
 
 Refusals: `403 VERIFIED_LAUNCH_REQUIRED`, `409 BRIDGE_DISABLED`, `404 RECEIPT_NOT_FOUND`,
 `400 BAD_RECEIPT`, `400 RECEIPTS_REQUIRED`, `409 REQUEST_ID_CONFLICT`, `429 CANDIDATE_LIMIT`,
 `400 UNKNOWN_CANDIDATE_KIND`, `400 CANDIDATE_TEXT_REQUIRED`, `413 CANDIDATE_TOO_LONG`,
 `400 CANDIDATE_NOT_DISPLAY_SAFE`; and for the Master `404 CANDIDATE_NOT_FOUND`,
-`409 VERSION_CONFLICT`, `409 ALREADY_DECIDED`, `409 RECEIPTS_DO_NOT_HOLD`,
-`400 MERGE_TARGET_REQUIRED`, `409 MERGE_TARGET_NOT_OPEN`.
+`409 VERSION_CONFLICT`, `409 REQUEST_ID_REUSED`, `409 ALREADY_DECIDED`,
+`409 RECEIPTS_DO_NOT_HOLD`, `409 NOT_DISPLAY_SAFE`, `400 REQUEST_ID_REQUIRED`,
+`400 EXPECTED_VERSION_REQUIRED`, `400 MERGE_TARGET_REQUIRED`, `409 MERGE_TARGET_NOT_OPEN`.
 
 `tc candidate` works in any pane, but it is not yet in the verb list panes are primed with: the
 bridge it feeds is disabled until cutover, and that list has a size budget.
@@ -305,19 +307,27 @@ name or a count the server resolved, never anything a session or the operator ty
 |---|---|---|
 | `work-blocked` | a lane's workload receipt enters `blocked`. A lane that stays blocked and reports again is not a new event. | that workload receipt |
 | `operator-needed` | the Medusa watchdog raises an exchange to its operator rung | that exchange |
-| `fleet-idle` | every live lane has finished and is clear | the exact set of lanes, launches and receipts that made it so |
+| `fleet-idle` | the fleet is seen to become idle: every live lane finished and clear | the episode: when it began and which lanes were in it |
 
 - **Found, not pushed.** Nothing calls the bridge when an event happens. The gateway's pass
   reads the records that are the events and enqueues a notification for each that has none,
   under a key naming that record. One that could not be enqueued is found again on the next
-  pass; one that was is never made twice.
+  pass, for up to 24 hours after its event; one that was is never made twice.
 - **No backlog.** Only events from after the bridge was last enabled are considered, and none
-  from while it was disabled.
+  from while it was disabled. Enabling records the time, and nothing looks behind it.
 - **`fleet-idle` fails closed.** The fleet must be non-empty, and every live lane must be at a
-  known launch with a current receipt and read `AVAILABLE`: a fresh `complete`,
-  `safe-to-clear` receipt of the live launch with the engine at rest. A lane that is working,
-  waiting, blocked, stale or unknown means the fleet is not idle. Any change in membership or
-  in a lane's receipt ends the episode.
+  known launch with a current receipt and read `AVAILABLE` in the same lane composition the
+  fleet roster uses: a fresh `complete`, `safe-to-clear` receipt of the live launch with the
+  engine at rest. A lane that is working, waiting, blocked, stale or unknown means the fleet is
+  not idle.
+- **One notice per idle episode.** An episode is one unbroken spell of an idle fleet with the
+  same members. It is notified when it is seen to begin. A lane that stays finished and
+  reports again is the same episode; a fleet that works and goes idle again, or gains or loses
+  a lane, is a new one. A fleet that was already idle when the bridge was enabled, or when the
+  server started, is not announced: nothing saw it begin.
+- **Not kept for a late helper.** A notification or status notice nobody collected within 24
+  hours is dropped, and an approved candidate within 7 days, so a helper that attaches late
+  does not post stale news ahead of current answers. A reply is never dropped.
 
 `release-action-needed` and `certification-state-changed` remain reserved, with no producer.
 
@@ -405,11 +415,14 @@ a day, whether or not the bridge is enabled. Revoked pins and helper tokens leav
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
 | Delivered or dropped outbound items | 30 days |
 | Decided candidates | 30 days |
+| Undecided candidates | Rejected as expired after 7 days, then kept 30 days |
+| Uncollected notifications and status notices | Dropped after 24 hours, then kept 30 days |
+| Uncollected approved candidates | Dropped after 7 days, then kept 30 days |
 | Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
 | Audit rows | 90 days, then compacted |
 
-An open route, an undecided candidate, the live credential and an undelivered item that belongs
-to no route are never removed, whatever their age. A closed route takes its outbound items with
+An open route, an undelivered reply and the live credential are never removed, whatever their
+age. A closed route takes its outbound items with
 it in any state: a route closes only once its answer has been relayed or abandoned. An audit row of a route that is still open is never compacted, and
 neither is any row written after it.
 

@@ -4806,6 +4806,11 @@ const BRIDGE_TICK_MS = 15 * 1000;
 
 // Each route is declared in `lib/bridge-api.js` with the principal it belongs
 // to, and `bridgeApi.handle` proves that principal before the handler runs.
+// The fleet-idle notification reads the same lane composition the fleet roster
+// does, so the two cannot disagree about whether a lane is clear. Wired where
+// the routes are, not at boot, so anything that loads the server has it.
+bridgeNotify.setLaneReader(() => bridgeNotify.readLanes(_composedLane));
+
 for (const entry of bridgeApi.ROUTES) {
   route(entry.method, entry.path, async (req, res, params, body) => {
     const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
@@ -12236,20 +12241,6 @@ if (require.main === module) {
     master.reconcileBridgeCredential();
     // The gateway listens exactly while the bridge is enabled, and its pass
     // carries on any route a restart interrupted. Both do nothing while it is off.
-    // The fleet-idle notification reads the same lane composition the fleet
-    // roster does, so the two cannot disagree about whether a lane is clear.
-    bridgeNotify.setLaneReader(() => store.sessions.listLiveAll().map((session) => {
-      const project = store.projects.get(session.projectId);
-      const lane = _composedLane(session, project ? project.name : null);
-      const sequence = store.launchSequences.getBySession(session.id);
-      const receipt = lane.workload && lane.workload.receipt;
-      return {
-        sessionId: session.id,
-        launchId: sequence ? sequence.launchId : null,
-        receiptSeq: receipt ? receipt.seq : null,
-        availability: lane.composed ? lane.composed.availability : 'UNKNOWN'
-      };
-    }));
     try {
       bridgeGateway.syncListener();
     } catch (err) {

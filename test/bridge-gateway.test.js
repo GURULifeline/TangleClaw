@@ -852,6 +852,30 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(lines.filter((l) => l.includes('it has no Medusa listener')).length, 1);
     });
 
+    it('the pass raises the server notifications and lets go of what nobody collected', async (t) => {
+      const bridgeNotify = require('../lib/bridge-notify');
+      const alpha = liveProject('Alpha');
+      const realNotifyNow = bridgeNotify._deps.now;
+      bridgeNotify._deps.now = () => clock;
+      t.after(() => { bridgeNotify._deps.now = realNotifyNow; });
+      bridgeStore.settings.set(bridgeNotify.ENABLED_AT, clock);
+      later(2000);
+      store.workloadReceipts.append({
+        project_id: alpha.project.id, session_id: alpha.sessionId, launch_id: alpha.launchId, assignment_id: null,
+        state: 'blocked', clearance: 'do-not-clear', summary: 'stuck', wait_kind: null, wait_detail: null,
+        refs_json: '{}', branch: null, head_sha: null, source: 'tc-cli', received_at: clock
+      }, { minIntervalMs: 0, nowMs: Date.parse(clock) });
+
+      const pass = await gateway.tick();
+      assert.equal(pass.notifications.workBlocked, 1);
+      assert.deepEqual(gateway.outboundForHelper().map((i) => [i.kind, i.text, i.inReplyTo]),
+        [['notification', 'Alpha reports its work is blocked.', null]]);
+
+      later(bridgeStore.OUTBOUND_TTL_MS.notification + 60000);
+      await gateway.tick();
+      assert.deepEqual(gateway.outboundForHelper(), [], 'a day-old notification is not handed to a helper that attaches late');
+    });
+
     it('one route that fails does not hold up the others', async () => {
       liveProject('Alpha');
       bridgeStore.routes.accept({ routeId: 'rt_a', externalId: 'ma', ...ALLOWED, text: '@alpha one', digest: bridgeStore.digest('@alpha one'), at: clock });

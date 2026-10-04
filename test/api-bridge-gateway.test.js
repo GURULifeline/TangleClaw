@@ -427,6 +427,18 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.ok(!dump.includes(helperToken) && !dump.includes(ALLOWED.authorId), 'no token and no chat id in the audit');
     });
 
+    it('enabling records when, which is the line no notification looks behind', async () => {
+      const bridgeNotify = require('../lib/bridge-notify');
+      await asOperator('POST', '/api/bridge/operator/disable');
+      const before = new Date().toISOString();
+      assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
+      const enabledAt = bridgeStore.settings.get(bridgeNotify.ENABLED_AT);
+      assert.ok(enabledAt >= before && enabledAt <= new Date().toISOString());
+      await asOperator('POST', '/api/bridge/operator/disable');
+      await asOperator('POST', '/api/bridge/operator/enable');
+      assert.ok(bridgeStore.settings.get(bridgeNotify.ENABLED_AT) >= enabledAt, 'each enable moves it forward');
+    });
+
     it('cannot be enabled before it has an allowlist and a helper token', async () => {
       await asOperator('POST', '/api/bridge/operator/disable');
       await asOperator('DELETE', '/api/bridge/operator/helper-token');
