@@ -144,9 +144,20 @@ describe('lib/ecosystem-primer (#1122)', () => {
     const { VERB_ROSTER } = require('../lib/tc-verbs');
     const md = primer.tcBootstrapLines('md').join('\n');
     const comment = primer.tcBootstrapLines('comment').join('\n');
-    for (const v of VERB_ROSTER) {
+    // Every verb a project pane can use is named. A verb only the Project
+    // Master can use (#2031) is deliberately not: it would be refused in every
+    // pane this line is read in.
+    const { verbsFor } = require('../lib/tc-verbs');
+    const forPanes = verbsFor('pane');
+    assert.equal(forPanes.length + verbsFor('master').length, VERB_ROSTER.length, 'every roster entry belongs to exactly one audience');
+    assert.ok(forPanes.length > 0);
+    for (const v of forPanes) {
       assert.ok(md.includes(`\`${v.id}\``), `md form names ${v.id}`);
       assert.ok(comment.includes(v.id), `comment form names ${v.id}`);
+    }
+    for (const v of VERB_ROSTER.filter((x) => x.audience === 'master')) {
+      assert.ok(!md.includes(`\`${v.id}\``), `md form does not advertise the Master-only ${v.id}`);
+      assert.ok(!new RegExp(`\\b${v.id}\\b`).test(comment), `comment form does not advertise the Master-only ${v.id}`);
     }
   });
 
