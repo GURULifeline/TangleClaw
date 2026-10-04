@@ -37,6 +37,20 @@ refuses red, naming both SHAs, when it does not:
   from a different commit, and this commit reuses its number.
 - **After a push**, the tag on origin is checked again before publishing.
 
+**Release notes are measured before anything is tagged (#2080).** `gh release create` runs after
+the tag is pushed, so a body GitHub refuses would leave a tag with no Release. The run therefore
+measures the exact UTF-8 bytes of the extracted notes first (`scripts/release-notes-gate.js`), and
+refuses red, before any tag, push or release, when they are empty or over **120,000 bytes**. That
+ceiling is conservatively below GitHub's limit and counts bytes, not characters. The notes are never
+truncated. An oversized section is fixed by shortening it in `CHANGELOG.md`; "If a release did not
+go out" below has the steps, because the fix is a new commit and touches the released-section lock.
+
+That refusal should never be the first warning. `test/changelog-unreleased-size.test.js` fails the
+suite once `[Unreleased]` would publish more than **110,000 bytes**. It runs the workflow's own
+extractor command and counts the file that command writes, trailing newline included, so the pull
+request whose entry crosses the line goes red while there is still room to condense the section or
+to release what has accumulated.
+
 The workflow never moves or deletes a tag. A refusal is for the Operator to resolve.
 
 Only the publishing job holds `contents: write`. The workflow's default token, which the suite runs
@@ -133,7 +147,7 @@ How to recover depends on whether the failed run **pushed the tag**. Step 3 abov
 the tag is on origin or it is not.
 
 **The tag is NOT on origin** (the run stopped before tagging: a red `test` job, a missing
-`CHANGELOG.md` section, a network error):
+`CHANGELOG.md` section, release notes refused as empty or oversized, a network error):
 
 - **The fix is a new commit** (the usual case: a promoted CHANGELOG section, a test fix). Land it
   on `main`, then run the manual trigger (`workflow_dispatch`) **from `main`**. This is a **new
@@ -141,6 +155,22 @@ the tag is on origin or it is not.
   current head and creates the still-absent tag on that commit, which carries the same
   `version.json`. Do not re-run the original run: it checks out the old commit, which still lacks
   the fix, and fails again.
+- **The notes were refused as oversized** (the `notes-gate` step). This is the new-commit
+  case with one extra step, because the cut already recorded this version's section in
+  `test/fixtures/changelog-released-sections.lock.json`:
+  1. Confirm with step 3 that the tag is not on origin. The section was then never published, so
+     it may still change. If the tag *is* on origin, stop: see the next heading.
+  2. Shorten the version's section in `CHANGELOG.md`. Keep every entry; cut narration.
+  3. Delete **that one version's line** from the lock file, then run
+     `node scripts/release-prepare.js`. It re-adds only that line, from the shortened section, and
+     still refuses if any other released section has drifted.
+  4. Land both files in one commit on `main`, then dispatch from `main`.
+
+  Do not do what the failing test seems to ask. With the section shortened and the lock untouched,
+  `test/changelog-released-immutable.test.js` says to move the edits back and not relock, and
+  `release-prepare.js` refuses the same way. Both are right for a section that was published,
+  which this one was not. Never regenerate the whole lock: that would accept every other drift
+  the lock exists to catch.
 - **Nothing needed fixing** (a flaky test, a network error): open the original run and choose
   **Re-run all jobs**. That is the default. A dispatch from `main` is equivalent only while main's
   head is still that run's commit. If `main` has moved on, a dispatch releases a *different*
@@ -152,6 +182,13 @@ the tag is on origin or it is not.
 the failed ones, so that commit is freshly tested. A dispatch from `main` heals it too, but only
 while main's head is still the tagged commit. Once a later commit has landed, a dispatch refuses,
 because the tag names an earlier commit. That refusal is intended, not a fault.
+
+**One case a re-run cannot heal: the tag is on origin and the notes are refused as oversized.** The
+workflow no longer produces this state, since the notes are measured before it tags, but a tag
+pushed by an older workflow or by hand can still meet it. The re-run tests the same commit, extracts
+the same notes and is refused again. Shortening the section does not help either: the fix would be
+a new commit, and the tag names the old one. Do not shorten, relock, move the tag or dispatch.
+Escalate to the Operator, who decides how that tag gets its Release.
 
 **GitHub allows re-running a run for 30 days.** If a tag is on origin with no Release and the
 original run can no longer be re-run, do not work around it. Stop and escalate to the Operator.
@@ -186,5 +223,6 @@ old version.
 
 - `docs/adr/0002-wrap-pipeline-contract.md` — the wrap pipeline's step contract.
 - `lib/changelog-notes.js` — release-notes extraction, shared by the workflow and its tests.
+- `scripts/release-notes-gate.js` — refuses empty or oversized release notes before tagging.
 - `scripts/release-tag-gate.js` — decides whether a tag on origin dereferences to the released
   commit; `test/release-workflow.test.js` pins how the workflow calls it and what publishing waits on.

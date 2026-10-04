@@ -35,6 +35,35 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-04 — Release notes are measured before anything is tagged (#2080)
+
+<!-- prawduct: type=bugfix | scope=2080-release-notes-gate -->
+
+PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out of #1951, which carried this gate together with the mkcert trust-anchor fix for governed hooks (#1947). The two halves share no code, and the trust-anchor change needs its own security review, so the gate lands alone and #1951 keeps the hooks work.
+
+**Why.** v5.30.0's publish step failed with GitHub's `body is too long (maximum is 125000 characters)`: the promoted section was about 191,000 characters. `release.yml` pushes the tag before `gh release create`, so the tag existed with no Release until it was recovered by hand.
+
+**What.**
+- `scripts/release-notes-gate.js` and a `notes-gate` step between extraction and tagging, taken from #1951 unchanged apart from the issue it cites. It refuses empty notes and notes over 120,000 UTF-8 bytes, and never truncates (the Architect's earlier ruling on #1947). The tag step requires `steps.notes-gate.outcome == 'success'`.
+- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in a scratch copy and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
+- `docs/release-process.md`, `FEATURES.md`, `CHANGELOG.md`.
+
+**After review of PR #2085 (the Architect and Pilot-B1, independently).**
+- The size test counted the extractor's return value, one byte short of the file the workflow publishes, because the extractor command appends a newline. It now runs that command and counts the file it writes; 110,000 passes and 110,001 fails. The same file is also run through the gate CLI at the 120,000 boundary.
+- The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
+
+**Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
+## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
+
+<!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
+
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane C). It re-lands the fix from PR #1969 on a fresh branch off current main, because that branch had fallen dozens of merges behind; the test file had since changed under #1955 and #1978, so the fix was re-applied by hand rather than cherry-picked.
+
+**Problem.** `test/startup-control-codex.test.js`, *accepted on the echoed clientId + bytes notification…*: the fake app-server sent `turn/started` and `item/completed` on a 20 ms timer, and the completion on an 80 ms one. On a slow runner both fired before the adapter's post-subscribe read-back, the fire settled, and the read-back was skipped, so `one read-back` saw 0.
+
+**The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
+
+**Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
 ## 2026-10-04 — Inline handlers in every page script take their values through jsArg (#1902)
 
 <!-- prawduct: type=bugfix | scope=inline-handler-jsarg-1902 -->
