@@ -273,3 +273,8 @@ without a rollback.
 `test/medusa-exchanges.test.js`, `test/api-medusa-exchanges.test.js`,
 `test/medusa-watchdog.test.js`, `test/medusa-escalation.test.js`,
 `test/medusa-watchdog-e2e.test.js`, `test/store-medusa-exchange-migration.test.js`.
+
+What each wake tick and watchdog pass cost is recorded in memory by `lib/tick-meter.js`
+(`medusaWake.tickMetrics()`, `medusaWatchdog.tickMetrics()`); it observes and decides nothing.
+[medusa-wake-measurements.md](medusa-wake-measurements.md) holds the scale and lifecycle
+measurements taken with it (#2086).
