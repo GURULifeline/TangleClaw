@@ -551,10 +551,14 @@ describe('bridge gateway (#2031)', () => {
       assert.ok(alpha.sessionId);
     });
 
-    it('when the Hub takes the message and the exchange row cannot be updated, the Hub\'s answer is adopted: one send, one delivery', async () => {
+    it('when the exchange row cannot take the Hub\'s answer at first, the gateway binds it itself and the reply is held', async () => {
       const alpha = liveProject('Alpha');
       const realBind = exchanges.bindHubId;
-      exchanges.bindHubId = () => { throw new Error('database is locked'); };
+      let failures = 1;
+      exchanges.bindHubId = (...args) => {
+        if (failures-- > 0) throw new Error('database is locked');
+        return realBind(...args);
+      };
       let r;
       try {
         r = await operatorSays('m1', '@alpha hello');
@@ -564,36 +568,62 @@ describe('bridge gateway (#2031)', () => {
       const routeId = r.body.routeId;
       const sent = hub.fromGateway();
       assert.equal(sent.length, 1);
-      const route = bridgeStore.routes.get(routeId);
-      assert.deepEqual([route.state, route.failureCode], ['routed', null], 'not a failure: the message is on the Hub');
-      const proof = bridgeStore.proofs.latestToTarget(routeId);
-      assert.equal(proof.hubId, sent[0].hubId, 'the Hub id comes from the Hub\'s own answer');
-      assert.equal(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`).hub_id, null, 'the exchange row never learned it');
-      assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'dispatch').detail.hubIdFrom, 'hub-answer');
+      assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['routed', null]);
+      assert.equal(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`).hub_id, sent[0].hubId,
+        'a routed route always rests on an exchange that carries its Hub id');
 
-      gateway._reset();
-      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
-      assert.equal(hub.fromGateway().length, 1, 'one Hub send, however many passes and restarts follow');
-      assert.equal(hub.fromGateway().filter((m) => m.to === alpha.workspaceId).length, 1, 'and one delivery to the target');
-      assert.ok(!gateway.outboundForHelper().some((i) => i.kind === 'failure'), 'the operator is not told it failed');
+      const reply = await hub.sessionSends(alpha, { inReplyTo: sent[0].hubId, text: 'got it' });
+      assert.equal(reply.status, 200, 'so the target can reply to it');
+      assert.equal(gateway.drainInbox().held, 1);
+      assert.equal(hub.fromGateway().length, 1, 'one Hub send');
     });
 
-    it('when the row cannot be updated and the server stops before recording it, the send stays unconfirmed and is not repeated', async () => {
+    it('while the row still cannot be bound the route waits unconfirmed, is not resent, and is recorded as sent once it binds', async () => {
+      const alpha = liveProject('Alpha');
+      const realBind = exchanges.bindHubId;
+      exchanges.bindHubId = () => { throw new Error('database is locked'); };
+      let routeId;
+      try {
+        routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+        assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed'],
+          'not routed: nothing could reply to it yet');
+        gateway._reset();
+        later(10 * 60 * 1000);
+        await gateway.tick();
+        assert.equal(bridgeStore.routes.get(routeId).state, 'accepted');
+      } finally {
+        exchanges.bindHubId = realBind;
+      }
+      assert.equal(hub.fromGateway().length, 1);
+
+      // The store recovers. The Hub's answer was kept, across the restart above.
+      gateway._reset();
+      await gateway.tick();
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode], ['routed', null]);
+      const hubId = hub.fromGateway()[0].hubId;
+      assert.equal(bridgeStore.proofs.latestToTarget(routeId).hubId, hubId);
+      await hub.sessionSends(alpha, { inReplyTo: hubId, text: 'got it' });
+      assert.equal(gateway.drainInbox().held, 1);
+      assert.equal(hub.fromGateway().length, 1, 'one Hub send and one target delivery, through a failure and two restarts');
+    });
+
+    it('when the server stops before the Hub\'s answer is kept, the send stays unconfirmed and is not repeated', async () => {
       liveProject('Alpha');
       const realBind = exchanges.bindHubId;
       exchanges.bindHubId = () => { throw new Error('database is locked'); };
       bridgeStore.routes.accept({ routeId: 'rt_crash', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
-      // The server stops between the Hub's answer and the gateway's record of it.
-      const realStep = bridgeStore.applyRouteWrite;
-      bridgeStore.applyRouteWrite = (write) => {
-        if (write.op === 'dispatch') throw new Error('the server stopped here');
-        return realStep(write);
+      // The server stops between the Hub's answer and the gateway keeping it.
+      const realAppend = bridgeStore.audit.append;
+      bridgeStore.audit.append = (entry) => {
+        if (entry.op === 'hub-answer') throw new Error('the server stopped here');
+        return realAppend(entry);
       };
       try {
         await gateway.advance('rt_crash').catch(() => {});
       } finally {
         exchanges.bindHubId = realBind;
-        bridgeStore.applyRouteWrite = realStep;
+        bridgeStore.audit.append = realAppend;
       }
       assert.equal(hub.fromGateway().length, 1, 'the message did reach the Hub');
       assert.equal(bridgeStore.routes.get('rt_crash').state, 'accepted');
@@ -601,9 +631,38 @@ describe('bridge gateway (#2031)', () => {
       gateway._reset();
       for (let i = 0; i < 4; i++) { later(10 * 60 * 1000); await gateway.tick(); }
       assert.equal(hub.fromGateway().length, 1, 'no second send after the restart');
-      assert.equal(bridgeStore.routes.get('rt_crash').failureCode, 'send-unconfirmed');
+      assert.deepEqual([bridgeStore.routes.get('rt_crash').state, bridgeStore.routes.get('rt_crash').failureCode], ['accepted', 'send-unconfirmed']);
       assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM medusa_exchanges WHERE request_id LIKE 'bridge:rt_crash:%'").get().n, 1,
         'one request id for the attempt, for good');
+    });
+
+    it('a recipient that retires does not make an unconfirmed send sendable again', async () => {
+      liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      hub.failSend = null;
+      // The session ends. That says nothing about whether the first send arrived.
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'recipient_retired' WHERE request_id = ?").run(`bridge:${routeId}:send1`);
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode], ['accepted', 'send-unconfirmed']);
+      assert.equal(hub.fromGateway().length, 0);
+    });
+
+    it('a send the Hub refused is proven undelivered, and only then may the Master route it again', async () => {
+      const alpha = liveProject('Alpha');
+      hub.failSend = 'refused';
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      hub.failSend = null;
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', 'exchange-undeliverable', null]);
+      bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-0003', routeId, expectedVersion: route.version, actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      await gateway.advance(routeId);
+      assert.equal(hub.fromGateway().length, 1, 'a new attempt under a new request id');
+      assert.ok(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send2`));
     });
   });
 

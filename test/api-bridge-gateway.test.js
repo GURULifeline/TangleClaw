@@ -322,6 +322,31 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
   });
 
+  it('a send that could not be confirmed is the Master\'s to answer, and cannot be routed again', async () => {
+    const name = liveProject(`Alpha${++seq}`).project.name;
+    hub.failSend = 'unknown';
+    const routeId = (await operatorSays(`m${++seq}`, `@${name} hello`)).body.routeId;
+    hub.failSend = null;
+    const version = () => bridgeStore.routes.get(routeId).version;
+    assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed']);
+
+    const reroute = await masterWrites(routeId, 'route', { expectedVersion: version(), to: name });
+    assert.deepEqual([reroute.status, reroute.body.code], [409, 'NOT_AWAITING_MASTER']);
+    assert.equal(hub.fromGateway().length, 0, 'the Master\'s route does not send it either');
+
+    const answered = await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'I could not confirm that reached them. I will follow up.' });
+    assert.deepEqual([answered.status, answered.body.route.state], [200, 'released']);
+    const externalId = bridgeStore.routes.get(routeId).externalId;
+    const items = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items
+      .filter((i) => i.inReplyTo && i.inReplyTo.externalId === externalId);
+    assert.deepEqual(items.map((i) => i.kind).sort(), ['failure', 'reply'], 'one notice that it is unconfirmed, and one answer');
+
+    // An accepted route with no such mark is still being resolved or sent: not the Master's to answer.
+    bridgeStore.routes.accept({ routeId: 'rt_plain', externalId: `m${++seq}`, ...ALLOWED, text: 'x', digest: bridgeStore.digest('x') });
+    const plain = await masterWrites('rt_plain', 'answer', { expectedVersion: 1, text: 'too early' });
+    assert.deepEqual([plain.status, plain.body.code], [409, 'NOT_ANSWERABLE']);
+  });
+
   it('an acknowledgement and the route\'s close land together, and a repeat changes nothing', async () => {
     const accepted = await operatorSays(`m${++seq}`, 'hello');
     const routeId = accepted.body.routeId;

@@ -97,13 +97,14 @@ it finds decides what happens:
 |---|---|
 | No exchange, and the send is refused before the Hub is called | Nothing was sent. The route goes back to the Master to route again. |
 | An exchange with the Hub's message id | The message is on the Hub. It is recorded and the route is `routed`. |
-| The Hub answered with a message id, but the exchange row could not be updated | The Hub's own answer is used. The route is `routed`; this is not a failure. |
-| An exchange proven undelivered (`undeliverable`, `recipient_retired`) | The route goes back to the Master. |
+| The Hub answered with a message id, but the exchange row could not take it | The id is kept in the audit and the gateway binds the row itself, on this pass and every later one. Until it binds, the route waits as unconfirmed; once it does, the route is `routed`. A route is never `routed` on an exchange without its Hub id, because the target's reply is found through that id. |
+| The Hub refused the message (`undeliverable`) | Proven undelivered. The route goes back to the Master. |
 | Anything else: still pending, or the outcome unknown | The route stays where it is. After two minutes it is marked `send-unconfirmed`, the operator gets one notice saying so, and the Master is told. |
 
 **An unconfirmed send is never sent again**, by a later pass, after a restart, or by the Master
 routing it: the request id of an attempt changes only when the attempt is recorded as sent or
-proven undelivered, so the existing exchange is always found first. The Master can answer an
+proven undelivered, so the existing exchange is always found first. A recipient session that
+ends does not prove an unconfirmed send was undelivered, and does not reopen it. The Master can answer an
 unconfirmed route in its own words or close it. Only a proven failure reopens routing.
 
 ### Addresses
