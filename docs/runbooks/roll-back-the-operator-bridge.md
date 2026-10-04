@@ -38,8 +38,10 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    → Expected: the Helper token line says **none**. A helper started by mistake now gets
    `401 HELPER_TOKEN_REQUIRED`.
 
-4. If Rule #145 had been replaced: the **Operator** restores its text. Tell the Architect, who
-   posts directly again under it.
+4. Tell the Architect the bridge is rolled back. No rule is edited. If Rule #145 was never
+   replaced, it is still in force as it was. If it was replaced, the replacement itself lets the
+   Architect, and nobody else, post milestones and operator-needed notices by the direct route
+   until the bridge is enabled again.
 
 5. Only if the server itself will not start on the merged build: stop it, restore the store, and
    start the previous build.
