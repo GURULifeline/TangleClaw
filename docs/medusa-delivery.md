@@ -165,6 +165,30 @@ the escalation that follows.
 The exception recovers from a lost Enter. It does not prevent one: why the Enter
 after the paste is sometimes lost has not been established.
 
+**Panes are read without blocking the server (#2086).** The monitor's tick
+runs its gates, asks tmux for the pane of every session holding mail at the
+same time, and returns. Each answer is judged when it arrives:
+
+- **Every gate runs again on the answer**, on the session as it is then. A
+  wrap or rotation that began, mail already read, a listener that dropped or
+  a wake recorded meanwhile refuses the nudge. A read for a session that has
+  ended, whose id names another pane, or whose workspace changed
+  (`pane-read-stale`) is discarded.
+- **A read is given 4 seconds.** A pane that does not answer is left alone for
+  10 seconds, then 30, then 60 (`pane-read-backoff`). One ordinary read ends
+  that. A hung pane delays no other session.
+- **One read per session at a time**, and none is acted on after the monitor
+  stops.
+- **A tick that got no look at a pane is not an observation of it.** A
+  timeout, a failed read, a backoff and an answer that took 3 seconds or more
+  each end the idle streak, and a nudge needs two fresh at-rest observations
+  at least 4 seconds apart.
+- **Judging an answer asks tmux nothing**, so a wedged tmux server cannot hold
+  the server through it.
+
+None of this types anything a tick would not have typed. The measurements are
+in [medusa-wake-measurements.md](medusa-wake-measurements.md).
+
 **Elapsed time alone never re-arms and never spends the budget.** A nudge
 with no trigger stays unconfirmed and escalates by age instead. Re-arms back
 off (2, 4, then 8 minutes) up to 3 times. The count and the next eligible time

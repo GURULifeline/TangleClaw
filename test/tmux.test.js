@@ -892,7 +892,9 @@ describe('tmux', () => {
       for (const [body, name] of callers) {
         const at = body.indexOf('display-message');
         const before = body.slice(0, at);
-        assert.match(before, /hasSession\(|probeSession\(/,
+        // `probeSessionAsync` is the non-blocking probe: the same question, for
+        // the one caller that must not hold the event loop (#2086).
+        assert.match(before, /hasSession\(|probeSession\(|probeSessionAsync\(/,
           `${name}() must establish the session exists BEFORE display-message — `
           + 'that command answers for the attached client instead of failing');
       }
