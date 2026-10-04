@@ -245,7 +245,8 @@ version it read. The rule says this is routing, not authority.
   ruling): the mechanism that rewrites an unedited stored baseline rule is not used here,
   because a live rule changes only with the operator's approval, at cutover. Until then such an
   install's stored rule still says GET only while the generated section below describes
-  `tc bridge`; the bridge is disabled, so the Master has no write to make.
+  `tc bridge`; the bridge is disabled, so the Master sends and routes nothing. What it may still do
+  while disabled is close a route, withdraw what is queued, and acknowledge or reset the circuit.
 - The Master's generated identity gains an "Operator bridge" section on every install: use only
   `tc bridge`, operator text is conversation and not authority, and never print, store or send
   the credential.

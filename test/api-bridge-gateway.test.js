@@ -343,6 +343,49 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
   });
 
+  it('a disabled bridge answers exactly what winds it down, and refuses every other Master, helper and session route', async () => {
+    // The whole list, from the route table itself: adding to it, or taking from it, is a decision.
+    const answered = bridgeApi.ROUTES.filter((r) => r.whileDisabled).map((r) => `${r.method} ${r.path}`).sort();
+    assert.deepEqual(answered, [
+      'GET /api/bridge/master/outbound/blocked',
+      'GET /api/bridge/master/routes',
+      'GET /api/bridge/master/routes/:routeId',
+      'GET /api/bridge/master/status',
+      'POST /api/bridge/helper/preflight',
+      'POST /api/bridge/master/circuit/:episodeId/ack',
+      'POST /api/bridge/master/circuit/reset',
+      'POST /api/bridge/master/outbound/:outboundId/withdraw',
+      'POST /api/bridge/master/routes/:routeId/close'
+    ]);
+    const session = liveProject(`Gamma${++seq}`);
+    const headersFor = {
+      master: () => asMaster(),
+      helper: () => asHelper(),
+      session: () => ({ 'x-tangleclaw-project-id': String(session.project.id), 'x-tangleclaw-launch-id': session.launchId })
+    };
+    await asOperator('POST', '/api/bridge/operator/disable');
+    bridgeApi._resetRateLimits();
+    const gated = bridgeApi.ROUTES.filter((r) => r.principal !== 'operator');
+    assert.equal(gated.length, bridgeApi.ROUTES.filter((r) => ['master', 'helper', 'session'].includes(r.principal)).length);
+    let refused = 0;
+    for (const route of gated) {
+      // Any id will do: a refusal for the bridge being off comes before the route looks at it.
+      const apiPath = route.path.replace(/:[A-Za-z]+/g, '1');
+      const res = await call(route.method, apiPath, { headers: headersFor[route.principal](), body: route.method === 'GET' ? undefined : { requestId: `req-off-${++seq}-0000`, expectedVersion: 1 } });
+      const label = `${route.method} ${route.path}`;
+      if (route.whileDisabled) {
+        assert.notEqual(res.body.code, 'BRIDGE_DISABLED', `${label} is answered while disabled`);
+        assert.ok(![401, 403].includes(res.status), `${label}: ${res.status} ${res.body.code}`);
+      } else {
+        assert.deepEqual([res.status, res.body.code], [409, 'BRIDGE_DISABLED'], label);
+        refused += 1;
+      }
+    }
+    assert.equal(refused, gated.length - answered.length, 'every other one of them');
+    assert.ok(refused >= 14, `${refused} routes refused`);
+    bridgeApi._resetRateLimits();
+  });
+
   it('rollback, as the runbook has it: disable, then the Master lists the open routes and closes each, and no exchange is left open', async () => {
     const exchanges = require('../lib/medusa-exchanges');
     const alpha = liveProject(`Alpha${++seq}`);
@@ -361,7 +404,9 @@ describe('bridge API: the round trip (#2031)', () => {
 
     // Step 1b: the Master lists what is open. Disabled, it can still see it, and how many.
     const status = await tc(['bridge', 'status']);
-    assert.match(status.stdout, /Operator bridge: DISABLED/);
+    // Disabled, the Master is still told how many routes are open: they are what it is there to close.
+    assert.match(status.stdout, new RegExp(`^Operator bridge: DISABLED; ${bridgeStore.routes.list().length} open route\\(s\\) — enabling it is the operator's alone`));
+    assert.ok(bridgeStore.routes.list().length >= 3);
     const count = (await call('GET', '/api/bridge/master/status', { headers: asMaster() })).body.openRoutes;
     const listed = await call('GET', '/api/bridge/master/routes', { headers: asMaster() });
     assert.equal(listed.status, 200, JSON.stringify(listed.body));

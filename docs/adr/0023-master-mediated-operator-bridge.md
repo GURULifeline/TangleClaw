@@ -308,6 +308,18 @@ bridge's own message. Three things hold the cap now:
 An alert the watchdog raises for an exchange between sessions is a different thing and is meant
 to reach the operator through the bridge, as `operator-needed`, once, in words that say why.
 
+**What a disabled bridge still answers (Architect rulings, 2026-10-04).** Disabled means nothing
+is sent, started or resolved. It does not mean the bridge cannot be seen or wound down. While
+disabled the Master, with its live credential, is still answered on: `status`, with the true
+count of open routes; the route list and the read of one route; `close`; the list of items set
+aside and `withdraw`; and the circuit's acknowledgement and reset. The helper is still answered
+on `preflight`. The operator's own routes need no bridge to be enabled. Everything else, for
+the Master, the helper and a session alike, answers `409 BRIDGE_DISABLED`. The reads are there
+because a rollback has the Master close the routes still open, and it cannot close what it
+cannot see. The Master's baseline rule says the same: while disabled it may only close a route,
+withdraw what is queued, and acknowledge or reset the circuit. The list is pinned by a test
+derived from the route table, so a route added to it, or taken from it, is a decision.
+
 ### 18. Pins and aliases (R5)
 
 - **Persistent global aliases and pins are the operator's alone**, managed through an

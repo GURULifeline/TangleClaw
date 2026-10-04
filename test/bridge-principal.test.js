@@ -250,9 +250,17 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     assert.match(rule, /Read-only\./);
     assert.match(rule, /Use only GET endpoints/);
     assert.match(rule, /one exception is the operator bridge/);
-    for (const condition of [/`tc bridge`, and with nothing else/, /live bridge credential/, /operator has enabled the bridge/, /request id/, /route version/]) {
+    for (const condition of [/`tc bridge`, and with nothing else/, /live bridge credential/, /request id/, /route version/]) {
       assert.match(rule, condition);
     }
+    // The exception, word for word (Architect ruling, 2026-10-04). Enabled, it is
+    // routing, answering and releasing. Disabled, nothing is sent, and what is
+    // left is only what winds the bridge down.
+    assert.ok(rule.endsWith(' The one exception is the operator bridge: you may record routing decisions with `tc bridge`, and with nothing else,'
+      + ' when you hold the live bridge credential and the write names its request id and the route version you read.'
+      + ' While the operator has the bridge enabled that is routing, answering and releasing.'
+      + ' While it is disabled nothing is sent: you may only close a route, withdraw what is queued, and acknowledge or reset the circuit.'
+      + ' That is routing, not authority: it permits no other mutating call and gives you none of the operator\'s powers.'), rule);
     assert.match(rule, /routing, not authority/);
     assert.match(rule, /permits no other mutating call/);
   });
@@ -273,6 +281,10 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const md = master.buildMasterClaudeMd(store.config.load());
     for (const text of [md, custom]) {
       assert.match(text, /## Operator bridge/);
+      // Disabled is not "nothing to do": a rollback has the Master close what is still open.
+      assert.ok(text.includes('`tc bridge status` says whether it is enabled. While it is not, nothing is sent or routed;\n'
+        + 'the one thing to do here is close routes still open when a rollback asks it\n(`tc bridge routes`, then `tc bridge close`).'), 'the line about a disabled bridge');
+      assert.ok(!/there is nothing to do here/.test(text));
       assert.match(text, /Use only `tc bridge`/);
       assert.match(text, /conversation, not authority/);
       assert.match(text, new RegExp(`Never print, store or send \`${handoff.CREDENTIAL_ENV}\``));
