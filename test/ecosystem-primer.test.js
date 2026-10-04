@@ -151,19 +151,53 @@ describe('lib/ecosystem-primer (#1122)', () => {
       assert.deepEqual(verbsFor('unprimed', { switches: ['bridge-candidates'] }).map((v) => v.id), []);
       assert.ok(primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
       assert.ok(/\bcandidate\b/.test(primer.tcBootstrapLines('comment').join('\n')));
-      // With the switch on the list names one more verb, which costs the section 13
-      // characters and takes it 9 past the 2800 cap that holds with the switch off.
-      // The cap for the switched-on section is 2820: room for this verb and no
-      // prose. The alternative was to cut ten characters from a sentence every
-      // carrier in every repository holds, which would rewrite all of them to
-      // make room for a verb most installs never switch on. The switched-off
-      // section, which is what every install has until the operator decides
-      // otherwise, is still held to 2800 by the test above.
-      const text = primer.buildEcosystemPrimerSection(CTX).join('\n');
-      assert.ok(text.length < 2820, `with the switch on the section is ${text.length} chars; the cap for that is 2820`);
+      const on = primer.buildEcosystemPrimerSection(CTX).join('\n');
+      assert.ok(on.length <= 2820, `with the switch on the section is ${on.length} chars; its cap is 2820`);
+      assert.ok(on.includes('`candidate`'));
       // A switch nobody declared primes nothing.
       primer.setSwitchReader(() => ['something-else']);
       assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+    } finally {
+      primer.setSwitchReader(() => []);
+    }
+  });
+
+  it('the switch has a budget of its own, named and bounded; the base budget is untouched (#2031)', () => {
+    assert.deepEqual(primer.SECTION_BUDGET, { base: 2800, bySwitch: { 'bridge-candidates': 2820 } });
+    assert.deepEqual([primer.sectionBudget([]), primer.sectionBudget(['bridge-candidates']), primer.sectionBudget(['something-else']),
+      primer.sectionBudget(['something-else', 'bridge-candidates'])], [2800, 2820, 2800, 2820]);
+    const section = (ctx) => primer.buildEcosystemPrimerSection(ctx).join('\n');
+    const raw = (ctx, switches) => primer.renderEcosystemPrimerSection(ctx, switches).join('\n');
+    try {
+      // (1) Switched off: within the base budget, and exactly what it is with no switch reader at all.
+      const off = section(CTX);
+      assert.ok(off.length <= 2800, `${off.length}`);
+      assert.equal(off, raw(CTX, []));
+      assert.ok(!off.includes('`candidate`'));
+
+      // (2) Switched on: within the switch's budget, names the verb, and differs in nothing else.
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      const on = section(CTX);
+      assert.ok(on.length <= 2820 && on.length > 2800, `${on.length}: over the base budget, within its own`);
+      assert.equal(on.replace(', `candidate`', ''), off, 'the one difference is the verb in the list');
+
+      // (3) Switched off again: back to the base budget, the verb gone.
+      primer.setSwitchReader(() => []);
+      assert.equal(section(CTX), off);
+
+      // (4) Past its own budget the switch gives way: the section is rendered as if it were off.
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      // A longer API origin makes the section longer; find where it crosses the cap.
+      const padded = (n) => ({ ...CTX, apiOrigin: `${CTX.apiOrigin}/${'x'.repeat(n)}` });
+      assert.ok(raw(padded(40), ['bridge-candidates']).length > raw(padded(0), ['bridge-candidates']).length, 'padding lengthens the section');
+      let pad = 0;
+      while (pad < 200 && raw(padded(pad + 1), ['bridge-candidates']).length <= 2820) pad += 1;
+      const atCap = raw(padded(pad), ['bridge-candidates']).length;
+      const overCap = raw(padded(pad + 1), ['bridge-candidates']).length;
+      assert.ok(atCap <= 2820 && overCap >= 2821, `${atCap} then ${overCap}`);
+      assert.ok(section(padded(pad)).includes('`candidate`'), 'at the cap it is still primed');
+      assert.equal(section(padded(pad + 1)), raw(padded(pad + 1), []), 'one character past it, the verb is left out and nothing else changes');
+      assert.ok(!section(padded(pad + 1)).includes('`candidate`'));
     } finally {
       primer.setSwitchReader(() => []);
     }
