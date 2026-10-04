@@ -101,6 +101,9 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     ws.sockets[0].receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
     const [identify] = ws.sockets[0].sent;
     assert.deepEqual([identify.op, identify.d.token, identify.d.intents], [OP.IDENTIFY, BOT_TOKEN, 33281]);
+    // The bot is how the operator sees the bridge from Discord: it says it is online, and nothing more.
+    assert.deepEqual(identify.d.presence, { status: 'online', afk: false, since: null, activities: [] });
+    assert.deepEqual(Object.keys(identify.d).sort(), ['intents', 'presence', 'properties', 'token']);
     assert.deepEqual(timers.waiting(), [{ kind: 'timeout', ms: 20000 }], 'the first heartbeat is jittered inside the interval');
     assert.ok(!JSON.stringify(codes).includes(BOT_TOKEN));
   });

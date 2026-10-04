@@ -30,7 +30,7 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    `launchctl bootout gui/$(id -u)/com.tangleclaw.bridge-helper`
    `bin/tc-bridge-helper uninstall-launchd`
    then `bin/tc-bridge-helper status`
-   → Expected: `helper: not running`.
+   → Expected: `helper: not running`. In Discord the bot shows as offline within about a minute.
 
 3. **Operator:** revoke the helper token (`DELETE /api/bridge/operator/helper-token`).
    → Expected: `200`. A helper started by mistake now gets `401 HELPER_TOKEN_REQUIRED`.
