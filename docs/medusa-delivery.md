@@ -239,9 +239,13 @@ use it (#2086):
 Two rules decide the doubtful cases. A reason code the classifier does not
 know is `configuration`, to be investigated, and is logged once. A row is
 `historical` only when something positively says its session is not live: the
-store holds no active session under that id, or the monitor's last tick found
-the Master not running. Where that cannot be established the row is
-`configuration`, never `historical`.
+store holds no active session under that id. Where that cannot be established
+the row is `configuration`, never `historical`.
+
+The Project Master is the one exception to "not live means historical". It is
+a single identity that stops and starts, so a stopped Master holding mail is
+`configuration`, to be started, and its mail waits for it. A project session
+that ended is replaced by a different session, and stays `historical`.
 
 `since` is when the ledger recorded the current verdict. `lastAssessedAt` is
 when the monitor last looked at a live session, and is null until it has. The

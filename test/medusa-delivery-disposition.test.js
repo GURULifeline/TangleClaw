@@ -122,6 +122,27 @@ describe('delivery disposition — the doubtful cases fail towards someone looki
     assert.equal(d.classifyDelivery(row({ skipReason: 'session-ended' }), { live: true, now: NOW }).class, 'configuration');
   });
 
+  it('a stopped recipient that is the same identity when it runs again is configuration, to be started, never historical', () => {
+    const item = d.classifyDelivery(row({ sessionId: 'master' }), { live: false, restartable: true, now: NOW });
+    assert.deepEqual([item.class, item.nextAction, item.live], ['configuration', 'start-recipient', false]);
+  });
+
+  it('being restartable changes nothing for a recipient that is live or whose liveness is unknown', () => {
+    assert.equal(d.classifyDelivery(row(), { live: true, restartable: true, now: NOW }).class, 'actionable');
+    assert.deepEqual(
+      [d.classifyDelivery(row(), { live: null, restartable: true, now: NOW }).class, d.classifyDelivery(row(), { live: null, restartable: true, now: NOW }).nextAction],
+      ['configuration', 'investigate']
+    );
+  });
+
+  it('a class of none is never given to a row of the list', () => {
+    for (const skipReason of ['nudged', 'no-mail']) {
+      for (const live of [true, false, null]) {
+        assert.notEqual(d.classifyDelivery(row({ skipReason }), { live, now: NOW }).class, 'none');
+      }
+    }
+  });
+
   it('a non-live row is historical whatever its last reason was, including an undeclared one', () => {
     for (const skipReason of ['wrap-running', 'wake-not-opted-in', 'brand-new-gate']) {
       assert.equal(d.classifyDelivery(row({ skipReason }), { live: false, now: NOW }).class, 'historical');

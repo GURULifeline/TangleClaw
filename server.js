@@ -5545,7 +5545,7 @@ const _unknownDeliveryReasons = new Set();
  * not running. Anything that could not be established is null, never false.
  *
  * @param {{sessionId: (string|number)}} row - A `sessionsWithUndeliveredMail` row
- * @returns {{live: (boolean|null), lastAssessedAt: (string|null)}}
+ * @returns {{live: (boolean|null), restartable?: boolean, lastAssessedAt: (string|null)}}
  */
 function _deliveryFacts(row) {
   const key = String(row.sessionId);
@@ -5556,8 +5556,10 @@ function _deliveryFacts(row) {
     return { live, lastAssessedAt: verdict ? verdict.observedAt : null };
   }
   if (key === master.MASTER_MEDUSA_KEY) {
+    // The Master is one identity that stops and starts. Stopped, its mail waits
+    // for it, so it is something to start and never a historical record.
     const verdict = medusaWake.verdictFor(key);
-    return { live: medusaWake.masterIsLive(), lastAssessedAt: verdict ? verdict.observedAt : null };
+    return { live: medusaWake.masterIsLive(), restartable: true, lastAssessedAt: verdict ? verdict.observedAt : null };
   }
   return { live: null, lastAssessedAt: null };
 }

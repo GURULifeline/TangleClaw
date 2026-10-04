@@ -2796,6 +2796,32 @@ describe('medusa delivery ledger (#792)', () => {
       assert.deepEqual([item.class, item.live], ['historical', false]);
     });
 
+    it('a stopped Master with mail deferred is configuration, to be started, and never historical', async () => {
+      const wake = require('../lib/medusa-wake');
+      const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
+      store.medusaDeliveries.record({ sessionId: masterKey, messageKey: 'mm1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'pane-turn-in-flight' });
+      const saved = { ...wake._internal };
+      try {
+        // The monitor's last tick found no Master running.
+        wake._internal.listLiveAll = () => [];
+        wake._internal.masterWakeRecord = () => null;
+        wake._internal.tick();
+        assert.equal(wake.masterIsLive(), false);
+        const { data } = await get('/api/medusa/deliveries');
+        const item = data.undelivered.find((r) => String(r.sessionId) === masterKey);
+        assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', false, 'start-recipient']);
+        assert.ok(data.configuration.includes(data.configuration.find((r) => String(r.sessionId) === masterKey)));
+        assert.equal(data.historical.find((r) => String(r.sessionId) === masterKey), undefined);
+      } finally {
+        Object.assign(wake._internal, saved);
+        wake.stop();
+      }
+      // With no tick to say either way, the Master's liveness is unknown: still not historical.
+      const { data } = await get('/api/medusa/deliveries');
+      const unknown = data.undelivered.find((r) => String(r.sessionId) === masterKey);
+      assert.deepEqual([unknown.class, unknown.live, unknown.nextAction], ['configuration', null, 'investigate']);
+    });
+
     it('undelivered is still the whole list in its old order, and every old field is still there', async () => {
       const { data } = await get('/api/medusa/deliveries');
       const stored = store.medusaDeliveries.sessionsWithUndeliveredMail();
