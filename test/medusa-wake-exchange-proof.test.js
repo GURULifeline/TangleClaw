@@ -247,11 +247,77 @@ describe('wakes on the real exchange record (#2086)', () => {
 
     // The Hub redelivers mail that was never marked handled, so after a restart
     // the listener counts it unread again while the record says it was read.
-    it('is not nudged again by a restart', () => {
+    // A restart is not a miss and not a readiness change.
+    it('is not nudged again by a restart, however many there are', () => {
+      const first = phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
+      const nonce = attemptNonces(exchange(first, 'h1'));
+      for (let i = 0; i < 4; i++) {
+        const restarted = phase([{ op: 'ticks', n: 8 }]);
+        assert.equal(restarted.injected.length, 0, `lifetime ${lifetimes}`);
+        assert.equal(nudges(restarted).length, 1);
+        assert.deepEqual(attemptNonces(exchange(restarted, 'h1')), nonce);
+        assert.equal(exchange(restarted, 'h1').rearmCount, 0);
+      }
+    });
+
+    it('does not hide new mail: old fetched mail and one new message get exactly one new nudge', () => {
       phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
-      const restarted = phase([{ op: 'ticks', n: 8 }]);
-      assert.equal(restarted.injected.length, 0, 'a nudge is never repeated without a recorded miss or readiness change');
-      assert.equal(nudges(restarted).length, 1);
+      phase([{ op: 'send', hubId: 'h2' }]);
+      const woken = phase([{ op: 'ticks', n: 8 }]);
+      assert.equal(woken.injected.length, 1);
+      assert.equal(attemptNonces(exchange(woken, 'h2')).length, 1);
+      assert.equal(attemptNonces(exchange(woken, 'h1')).length, 1, 'the fetched message gains nothing');
+      for (let i = 0; i < 2; i++) assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 0);
+    });
+
+    it('several old and several new: one nudge covers the new ones, and restarts add none', () => {
+      phase([
+        { op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'send', hubId: 'h2' }, { op: 'ticks', n: 4 },
+        { op: 'read', hubIds: ['h1', 'h2'] }
+      ]);
+      const arrived = phase([{ op: 'send', hubId: 'h3' }, { op: 'send', hubId: 'h4' }]);
+      assert.equal(arrived.injected.length, 0);
+      const woken = phase([{ op: 'ticks', n: 8 }]);
+      assert.equal(woken.injected.length, 1);
+      const nonce = attemptNonces(exchange(woken, 'h3'));
+      assert.equal(nonce.length, 1);
+      assert.deepEqual(attemptNonces(exchange(woken, 'h4')), nonce);
+      assert.equal(nudges(woken).length, 2);
+      assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 0);
+    });
+
+    it('handled mail is not counted in: after old mail is acknowledged or answered, new mail is still nudged after a restart', () => {
+      phase([
+        { op: 'setup' }, { op: 'send', hubId: 'h1', body: { replyRequired: true } }, { op: 'send', hubId: 'h2' }, { op: 'ticks', n: 4 },
+        { op: 'read', hubIds: ['h1', 'h2'] }, { op: 'ack', hubIds: ['h1', 'h2'] }
+      ]);
+      phase([{ op: 'send', hubId: 'h3' }]);
+      const woken = phase([{ op: 'ticks', n: 8 }]);
+      assert.equal(woken.injected.length, 1, 'two handled exchanges do not account for one new message');
+      assert.equal(attemptNonces(exchange(woken, 'h3')).length, 1);
+      assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 0);
+    });
+  });
+
+  describe('mail the record cannot vouch for fails conservative: it is treated as not yet nudged', () => {
+    it('an untracked message beside owned mail is nudged after a restart', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
+      phase([{ op: 'sendUntracked', hubId: 'u1' }]);
+      assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 1);
+    });
+
+    it('a message with no exchange record beside owned mail is nudged after a restart', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
+      phase([{ op: 'deliverUnrecorded', hubId: 'system-1' }]);
+      assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 1);
+    });
+
+    it('wherever it sits in the inbox: every message is asked about, not only the newest', () => {
+      phase([
+        { op: 'setup' }, { op: 'deliverUnrecorded', hubId: 'system-1' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 },
+        { op: 'read', hubIds: ['h1'] }
+      ]);
+      assert.equal(phase([{ op: 'ticks', n: 8 }]).injected.length, 1, 'the newest message is owned; the older one cannot be vouched for');
     });
   });
 });

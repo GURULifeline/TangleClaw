@@ -125,6 +125,20 @@ const STEPS = {
     mx.recordArrival({ hubId: step.hubId, recipientWorkspaceId: RECIPIENT_WS });
     world.inbox.push(step.hubId);
   },
+  /** Mail the Hub delivers that this host keeps no tracked exchange for. */
+  sendUntracked(step) {
+    const pm = byName('proof-pm');
+    const x = mx.createSendIntent({
+      meta: mx.validateSendMeta({}, { kind: 'project', projectId: pm.id }, pm.id),
+      sender: { projectId: pm.id, workspaceId: SENDER_WS },
+      recipient: { workspaceId: RECIPIENT_WS },
+      tracking: 'untracked'
+    });
+    mx.bindHubId(x.exchange_id, step.hubId);
+    world.inbox.push(step.hubId);
+  },
+  /** Mail in the inbox that has no exchange record at all (a system broadcast). */
+  deliverUnrecorded(step) { world.inbox.push(step.hubId); },
   /** Fire the monitor's tick `n` times, five seconds apart, letting each pane read answer. */
   async ticks(step) {
     for (let i = 0; i < step.n; i++) {
