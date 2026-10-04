@@ -57,8 +57,26 @@ The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cl
 - all three loaders call the wrapper;
 - each panel's real rendered HTML puts the content element immediately after the toggle row, which is the adjacency in-place folding relies on.
 
-Against current main's `ui.js` and `landing.js`, 14 of the file's tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
+Against main's `ui.js` and `landing.js`, 15 of the file's 28 tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
 
+## 2026-10-04 — Release notes are measured before anything is tagged (#2080)
+
+<!-- prawduct: type=bugfix | scope=2080-release-notes-gate -->
+
+PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out of #1951, which carried this gate together with the mkcert trust-anchor fix for governed hooks (#1947). The two halves share no code, and the trust-anchor change needs its own security review, so the gate lands alone and #1951 keeps the hooks work.
+
+**Why.** v5.30.0's publish step failed with GitHub's `body is too long (maximum is 125000 characters)`: the promoted section was about 191,000 characters. `release.yml` pushes the tag before `gh release create`, so the tag existed with no Release until it was recovered by hand.
+
+**What.**
+- `scripts/release-notes-gate.js` and a `notes-gate` step between extraction and tagging, taken from #1951 unchanged apart from the issue it cites. It refuses empty notes and notes over 120,000 UTF-8 bytes, and never truncates (the Architect's earlier ruling on #1947). The tag step requires `steps.notes-gate.outcome == 'success'`.
+- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in a scratch copy and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
+- `docs/release-process.md`, `FEATURES.md`, `CHANGELOG.md`.
+
+**After review of PR #2085 (the Architect and Pilot-B1, independently).**
+- The size test counted the extractor's return value, one byte short of the file the workflow publishes, because the extractor command appends a newline. It now runs that command and counts the file it writes; 110,000 passes and 110,001 fails. The same file is also run through the gate CLI at the 120,000 boundary.
+- The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
+
+**Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
 ## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
 
 <!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
