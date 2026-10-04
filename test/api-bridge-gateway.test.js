@@ -21,9 +21,11 @@ const bridgeStore = require('../lib/bridge-store');
 const bridgeApi = require('../lib/bridge-api');
 const gateway = require('../lib/bridge-gateway');
 const handoff = require('../lib/bridge-handoff');
-const { bindProject, operatorHeaders } = require('./_shared-docs-callers');
+const { operatorHeaders } = require('./_shared-docs-callers');
+const { install } = require('./_bridge-hub');
+const { execFile } = require('node:child_process');
 
-const GATEWAY_WS = 'operator-bridge-ws';
+const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
 
 let tmpDir;
@@ -108,34 +110,47 @@ function operatorSays(externalId, text) {
  * @returns {{project: object, sessionId: number, workspaceId: string}}
  */
 function liveProject(name) {
-  const project = store.projects.create({ name, path: path.join(tmpDir, name) });
-  const bound = bindProject(project);
-  const workspaceId = `${name.toLowerCase()}-ws`;
-  hub.workspaces.set(String(bound.sessionId), workspaceId);
-  return { project, sessionId: bound.sessionId, workspaceId };
+  return hub.liveProject(name, tmpDir);
 }
 
 /**
- * Record that a session replied over Medusa, and deliver it to the gateway.
+ * The session replies over Medusa through the real send path, and the
+ * gateway takes the arrival.
  * @param {object} target - What {@link liveProject} returned.
- * @param {string} hubId - The reply's Hub id.
  * @param {string} inReplyTo - The Hub id it answers.
  * @param {string} text - The reply.
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function sessionReplies(target, hubId, inReplyTo, text) {
-  const at = new Date().toISOString();
-  const row = {
-    exchange_id: `mx_${hubId}`, request_id: `req-${hubId}`, hub_id: hubId, origin: 'send', tracking: 'untracked',
-    sender_project_id: target.project.id, sender_session_id: String(target.sessionId), sender_workspace_id: target.workspaceId,
-    sender_verified: 1, sender_proof: 'launch', recipient_workspace_id: GATEWAY_WS, priority: 'normal', reply_required: 0,
-    in_reply_to: inReplyTo, created_at: at, state: 'untracked', updated_at: at
-  };
-  const columns = Object.keys(row);
-  store.getDb().prepare(`INSERT INTO medusa_exchanges (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
-    .run(...columns.map((c) => row[c]));
-  hub.inbox.push({ id: hubId, from: target.workspaceId, message: text });
+async function sessionReplies(target, inReplyTo, text) {
+  const sent = await hub.sessionSends(target, { inReplyTo, text });
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
   gateway.drainInbox();
+}
+
+/**
+ * The signed-in operator calls one of the operator's routes.
+ * @param {string} method - HTTP method.
+ * @param {string} apiPath - Declared path.
+ * @param {object} [request] - `body`, `params`; `req` defaults to the signed-in operator.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+function asOperator(method, apiPath, request = {}) {
+  return bridgeApi.handle(bridgeApi.routeFor(method, apiPath), { req: SIGNED_IN, headers: {}, ...request });
+}
+
+/**
+ * Run the real `bin/tc` as the Master pane would.
+ * @param {string[]} args - Arguments.
+ * @returns {Promise<{code: number, stdout: string, stderr: string}>}
+ */
+function tc(args) {
+  const env = {
+    PATH: process.env.PATH, HOME: process.env.HOME, TANGLECLAW_API: origin, TANGLECLAW_ROLE: 'master',
+    [handoff.CREDENTIAL_ENV]: masterCredential
+  };
+  return new Promise((resolve) => {
+    execFile(TC_BIN, args, { env, encoding: 'utf8' }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
+  });
 }
 
 describe('bridge API: the round trip (#2031)', () => {
@@ -152,29 +167,16 @@ describe('bridge API: the round trip (#2031)', () => {
 
   after(async () => {
     Object.assign(gateway._deps, realDeps);
+    if (hub) hub.restore();
     await new Promise((resolve) => server.close(resolve));
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  beforeEach(() => {
-    hub = { sent: [], system: [], inbox: [], workspaces: new Map(), n: 0 };
+  beforeEach(async () => {
+    if (hub) hub.restore();
+    hub = install();
     Object.assign(gateway._deps, {
-      medusa: () => ({
-        getStatus: (key) => ({ workspaceId: key === gateway.GATEWAY_KEY ? GATEWAY_WS : (hub.workspaces.get(String(key)) || null), state: 'listening' }),
-        getMessages: () => hub.inbox.slice(),
-        markHandled: (_key, ids) => { hub.inbox = hub.inbox.filter((m) => !ids.includes(m.id)); },
-        sendSystemMessage: async (m) => { hub.system.push(m); return { status: 'received' }; },
-        startSession: () => ({ state: 'listening', workspaceId: GATEWAY_WS }),
-        stopSession: () => {}
-      }),
-      medusaSend: () => ({
-        sendTracked: async (c) => {
-          const id = `hub-${++seq}`;
-          hub.sent.push({ ...c, hubId: id });
-          return { status: 200, body: { id, exchange: { exchangeId: `mx_${id}` } } };
-        }
-      }),
       master: () => ({
         masterLiveness: () => ({ live: true, answered: true }),
         ensureMasterSession: () => ({ created: false }),
@@ -189,10 +191,10 @@ describe('bridge API: the round trip (#2031)', () => {
     masterCredential = minted.credential;
 
     // The operator sets the bridge up, through the operator's own handlers.
-    bridgeApi.operatorSwitch(false)({ req: SIGNED_IN });
-    assert.equal(bridgeApi.operatorAllowlist({ req: SIGNED_IN, body: ALLOWED }).status, 200);
-    helperToken = bridgeApi.operatorMintHelperToken({ req: SIGNED_IN }).body.token;
-    assert.equal(bridgeApi.operatorSwitch(true)({ req: SIGNED_IN }).status, 200);
+    await asOperator('POST', '/api/bridge/operator/disable');
+    assert.equal((await asOperator('POST', '/api/bridge/operator/allowlist', { body: ALLOWED })).status, 200);
+    helperToken = (await asOperator('POST', '/api/bridge/operator/helper-token')).body.token;
+    assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
   });
 
   it('carries a message to a project and its answer back, releasing nothing until the Master does', async () => {
@@ -201,9 +203,9 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal(accepted.status, 202);
     const routeId = accepted.body.routeId;
     assert.equal(accepted.body.state, 'routed');
-    assert.equal(hub.sent[0].body.to, alpha.workspaceId);
+    assert.equal(hub.fromGateway()[0].to, alpha.workspaceId);
 
-    sessionReplies(alpha, `reply-${++seq}`, hub.sent[0].hubId, 'yes, all green');
+    await sessionReplies(alpha, hub.fromGateway()[0].hubId, 'yes, all green');
     assert.deepEqual((await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items, [],
       'a held reply is not handed to the helper');
 
@@ -235,7 +237,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const routeId = accepted.body.routeId;
     const answered = await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'Two sessions are working.' });
     assert.equal(answered.body.route.state, 'released');
-    assert.equal(hub.sent.length, 0);
+    assert.equal(hub.fromGateway().length, 0);
     const item = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items[0];
     assert.deepEqual([item.kind, item.sourceLabel, item.text], ['reply', 'Project Master', 'Two sessions are working.']);
   });
@@ -252,7 +254,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const routed = await masterWrites(routeId, 'route', { expectedVersion: bridgeStore.routes.get(routeId).version, to: alpha.project.name });
     assert.deepEqual([routed.status, routed.body.route.state, routed.body.route.resolvedBy, routed.body.route.destination.projectId],
       [200, 'routed', 'master', alpha.project.id]);
-    assert.equal(hub.sent.length, 1);
+    assert.equal(hub.fromGateway().length, 1);
 
     const again = await masterWrites(routeId, 'route', { expectedVersion: bridgeStore.routes.get(routeId).version, to: 'master' });
     assert.equal(again.body.code, 'NOT_AWAITING_MASTER');
@@ -281,8 +283,58 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([pin.scope, pin.destination.projectId], ['conversation', alpha.project.id]);
 
     const next = await operatorSays(`m${++seq}`, 'and this');
-    assert.deepEqual([bridgeStore.routes.get(next.body.routeId).resolvedBy, hub.sent.length], ['pin', 1]);
-    assert.equal(bridgeApi.operatorRevokePin({ req: SIGNED_IN, params: { pinId: pin.pinId } }).status, 200);
+    assert.deepEqual([bridgeStore.routes.get(next.body.routeId).resolvedBy, hub.fromGateway().length], ['pin', 1]);
+    assert.equal((await asOperator('DELETE', '/api/bridge/operator/pins/:pinId', { params: { pinId: pin.pinId } })).status, 200);
+  });
+
+  it('the Master drives every routing verb through the real tc', async () => {
+    const alpha = liveProject(`Alpha${++seq}`);
+    const waiting = (await operatorSays(`m${++seq}`, '@nobody look at this')).body.routeId;
+    const version = (id) => String(bridgeStore.routes.get(id).version);
+
+    // A project id on the command line is a number, not a name.
+    const routed = await tc(['bridge', 'route', waiting, '--version', version(waiting), '--to', String(alpha.project.id)]);
+    assert.equal(routed.code, 0, routed.stderr);
+    assert.match(routed.stdout, new RegExp(`is now routed, to project #${alpha.project.id}`));
+    assert.equal(hub.fromGateway()[0].to, alpha.workspaceId);
+
+    await sessionReplies(alpha, hub.fromGateway()[0].hubId, 'done');
+    const released = await tc(['bridge', 'release', waiting, '--version', version(waiting)]);
+    assert.equal(released.code, 0, released.stderr);
+    assert.match(released.stdout, /held reply .* is released to the operator as your answer/);
+
+    const own = (await operatorSays(`m${++seq}`, 'a question for the Master')).body.routeId;
+    const pinned = await tc(['bridge', 'pin', own, '--version', version(own), '--to', alpha.project.name]);
+    assert.equal(pinned.code, 0, pinned.stderr);
+    const file = path.join(tmpDir, 'answer.txt');
+    fs.writeFileSync(file, 'An answer from a file.');
+    const answered = await tc(['bridge', 'answer', own, '--version', version(own), '--text-file', file]);
+    assert.equal(answered.code, 0, answered.stderr);
+    assert.equal(bridgeStore.routes.body(own, 'answer').text, 'An answer from a file.');
+
+    const usage = await tc(['bridge', 'answer', own, '--version', '1']);
+    assert.deepEqual([usage.code, /exactly one of --text or --text-file/.test(usage.stderr)], [1, true]);
+    const missing = await tc(['bridge', 'answer', own, '--version', '1', '--text-file', path.join(tmpDir, 'none.txt')]);
+    assert.deepEqual([missing.code, /could not read/.test(missing.stderr)], [1, true]);
+    const refused = await tc(['bridge', 'answer', own, '--version', version(own), '--text', 'again']);
+    assert.deepEqual([refused.code, /NOT_ANSWERABLE/.test(refused.stderr)], [2, true]);
+    const noTo = await tc(['bridge', 'route', own, '--version', '1']);
+    assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
+  });
+
+  it('an acknowledgement and the route\'s close land together, and a repeat changes nothing', async () => {
+    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const routeId = accepted.body.routeId;
+    await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
+    const externalId = bridgeStore.routes.get(routeId).externalId;
+    const item = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items
+      .find((i) => i.kind === 'reply' && i.inReplyTo.externalId === externalId);
+    const ack = () => call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { deliveredRef: 'posted-9' } });
+    assert.deepEqual([(await ack()).body.replayed, (await ack()).body.replayed], [false, true]);
+    assert.equal(bridgeStore.routes.get(routeId).state, 'closed');
+    assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'delivered').length, 1);
+    const other = await call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { deliveredRef: 'posted-10' } });
+    assert.equal(other.body.code, 'ACK_MISMATCH');
   });
 
   describe('who may call what', () => {
@@ -327,19 +379,21 @@ describe('bridge API: the round trip (#2031)', () => {
         const r = await call(method, apiPath, { headers: operatorHeaders(server), body: method === 'POST' ? {} : undefined });
         assert.deepEqual([r.status, r.body.code], [403, 'OPERATOR_SESSION_REQUIRED'], `${method} ${apiPath}`);
       }
-      assert.equal(bridgeApi.operatorSwitch(false)({ req: AMBIENT }).body.code, 'OPERATOR_SESSION_REQUIRED');
+      const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/disable'), { req: AMBIENT, headers: {} });
+      assert.equal(ambient.body.code, 'OPERATOR_SESSION_REQUIRED');
       assert.equal(bridgeStore.settings.isEnabled(), true, 'the refused request changed nothing');
       assert.ok(gateway.verifyHelperToken(helperToken), 'and revoked nothing');
     });
 
-    it('a signed-in operator\'s changes are audited with who made them, and never with a secret', () => {
-      const status = bridgeApi.operatorStatus({ req: SIGNED_IN });
+    it('a signed-in operator\'s changes are audited with who made them, and never with a secret', async () => {
+      const status = await asOperator('GET', '/api/bridge/operator/status');
       assert.deepEqual([status.status, status.body.enabled, status.body.allowlist], [200, true, ALLOWED]);
+      assert.deepEqual(status.body.droppedArrivals, { count: 0, recent: [] });
       assert.ok(!JSON.stringify(status.body).includes(helperToken));
 
-      assert.equal(bridgeApi.operatorSetAlias({ req: SIGNED_IN, body: { alias: 'Master', to: 'master' } }).body.code, 'ALIAS_RESERVED');
-      assert.equal(bridgeApi.operatorSetAlias({ req: SIGNED_IN, body: { alias: 'boss', to: 'master' } }).status, 200);
-      assert.equal(bridgeApi.operatorRemoveAlias({ req: SIGNED_IN, params: { alias: 'boss' } }).status, 200);
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: 'Master', to: 'master' } })).body.code, 'ALIAS_RESERVED');
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: 'boss', to: 'master' } })).status, 200);
+      assert.equal((await asOperator('DELETE', '/api/bridge/operator/aliases/:alias', { params: { alias: 'boss' } })).status, 200);
 
       const rows = store.getDb().prepare("SELECT * FROM bridge_audit WHERE actor = 'operator'").all();
       assert.ok(rows.length >= 5);
@@ -348,24 +402,59 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.ok(!dump.includes(helperToken) && !dump.includes(ALLOWED.authorId), 'no token and no chat id in the audit');
     });
 
-    it('cannot be enabled before it has an allowlist and a helper token', () => {
-      bridgeApi.operatorSwitch(false)({ req: SIGNED_IN });
-      bridgeApi.operatorRevokeHelperToken({ req: SIGNED_IN });
-      assert.equal(bridgeApi.operatorSwitch(true)({ req: SIGNED_IN }).body.code, 'HELPER_TOKEN_NOT_SET');
+    it('cannot be enabled before it has an allowlist and a helper token', async () => {
+      await asOperator('POST', '/api/bridge/operator/disable');
+      await asOperator('DELETE', '/api/bridge/operator/helper-token');
+      assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).body.code, 'HELPER_TOKEN_NOT_SET');
       bridgeStore.settings.set('allow.channel', null);
-      assert.equal(bridgeApi.operatorSwitch(true)({ req: SIGNED_IN }).body.code, 'ALLOWLIST_NOT_SET');
+      assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).body.code, 'ALLOWLIST_NOT_SET');
       assert.equal(bridgeStore.settings.isEnabled(), false);
+    });
+
+    it('every declared route refuses a caller with no proof, before its handler runs', async () => {
+      assert.equal(new Set(bridgeApi.ROUTES.map((r) => `${r.method} ${r.path}`)).size, bridgeApi.ROUTES.length);
+      for (const entry of bridgeApi.ROUTES) {
+        assert.ok(['master', 'helper', 'operator'].includes(entry.principal), `${entry.method} ${entry.path} declares its principal`);
+        let reached = false;
+        const guarded = { ...entry, handler: () => { reached = true; return { status: 200, body: {} }; } };
+        const refused = await bridgeApi.handle(guarded, { req: { headers: {} }, headers: {}, params: {}, body: {} });
+        assert.ok([401, 403].includes(refused.status), `${entry.method} ${entry.path} answered ${refused.status}`);
+        assert.equal(reached, false, `${entry.method} ${entry.path} ran its handler unauthenticated`);
+        // And over HTTP, as registered.
+        const apiPath = entry.path.replace(/:[A-Za-z]+/g, 'x');
+        const http = await call(entry.method, apiPath, { body: entry.method === 'GET' ? undefined : {} });
+        assert.ok([401, 403].includes(http.status), `${entry.method} ${apiPath} over HTTP answered ${http.status}`);
+      }
+    });
+
+    it('a principal\'s proof opens only that principal\'s routes', async () => {
+      const proofs = {
+        master: { headers: asMaster(), req: { headers: {} } },
+        helper: { headers: asHelper(), req: { headers: {} } },
+        operator: { headers: {}, req: SIGNED_IN }
+      };
+      for (const entry of bridgeApi.ROUTES) {
+        for (const [who, proof] of Object.entries(proofs)) {
+          if (who === entry.principal) continue;
+          let reached = false;
+          const guarded = { ...entry, handler: () => { reached = true; return { status: 200, body: {} }; } };
+          await bridgeApi.handle(guarded, { ...proof, headers: who === 'helper' ? asHelper() : proof.headers, params: {}, body: {} });
+          assert.equal(reached, false, `${who}'s proof reached ${entry.method} ${entry.path}`);
+        }
+      }
     });
 
     it('a disabled bridge refuses the helper and every Master write', async () => {
       const accepted = await operatorSays(`m${++seq}`, 'hello');
       const routeId = accepted.body.routeId;
-      bridgeApi.operatorSwitch(false)({ req: SIGNED_IN });
+      await asOperator('POST', '/api/bridge/operator/disable');
       assert.equal((await operatorSays(`m${++seq}`, 'hello again')).body.code, 'BRIDGE_DISABLED');
       assert.equal((await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.code, 'BRIDGE_DISABLED');
-      for (const op of ['route', 'answer', 'release', 'pin', 'close']) {
+      for (const op of ['route', 'answer', 'release', 'pin']) {
         assert.equal((await masterWrites(routeId, op, { expectedVersion: 1, to: 'master', text: 'x' })).body.code, 'BRIDGE_DISABLED', op);
       }
+      const closed = await masterWrites(routeId, 'close', { expectedVersion: bridgeStore.routes.get(routeId).version });
+      assert.equal(closed.body.route.state, 'closed', 'a held message can still be let go while the bridge is off');
     });
   });
 });

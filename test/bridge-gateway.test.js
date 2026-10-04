@@ -1,11 +1,11 @@
 'use strict';
 
 // #2031 (ADR 0023): the operator bridge's gateway, driven through its real
-// store and real project, session and launch rows; only the Hub, the Master
-// pane and the clock are stand-ins. A message goes in from the helper, to its
-// destination, and comes back held; nothing a destination says is relayed
-// until Master releases it; and only the exact session the message was sent to
-// can answer it.
+// store, real project, session and launch rows, and the real tracked-send
+// path; only the Hub's wire, the Master pane and the clock are stand-ins. A
+// message goes in from the helper, to its destination, and comes back held;
+// nothing a destination says is relayed until Master releases it; and only the
+// exact session the message was sent to can answer it.
 
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -19,10 +19,8 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const gateway = require('../lib/bridge-gateway');
-const { bindProject } = require('./_shared-docs-callers');
+const { install, GATEWAY_WS, MASTER_WS } = require('./_bridge-hub');
 
-const GATEWAY_WS = 'operator-bridge-ws';
-const MASTER_WS = 'master-ws';
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
 
 let tmpDir;
@@ -32,74 +30,20 @@ let masterState;
 let realDeps;
 
 /**
- * A stand-in for the Hub and the listeners: records what was sent, holds the
- * gateway's inbox, and gives each session a workspace.
- * @returns {object}
- */
-function fakeHub() {
-  const state = { sent: [], system: [], inbox: [], handled: [], workspaces: new Map(), nextId: 1, failSend: null };
-  state.medusa = {
-    getStatus: (key) => ({
-      workspaceId: key === gateway.GATEWAY_KEY ? GATEWAY_WS : (state.workspaces.get(String(key)) || null), state: 'listening'
-    }),
-    getMessages: () => state.inbox.slice(),
-    markHandled: (_key, ids) => {
-      state.handled.push(...ids);
-      state.inbox = state.inbox.filter((m) => !ids.includes(m.id));
-    },
-    sendSystemMessage: async (m) => { state.system.push(m); return { status: 'received', id: `sys-${state.nextId++}`, to: m.to }; },
-    startSession: () => ({ state: 'listening', workspaceId: GATEWAY_WS }),
-    stopSession: () => {}
-  };
-  state.medusaSend = {
-    sendTracked: async (call) => {
-      if (state.failSend) return state.failSend;
-      const id = `hub-${state.nextId++}`;
-      state.sent.push({ ...call, hubId: id });
-      return { status: 200, body: { status: 'received', id, to: call.body.to, exchange: { exchangeId: `mx_${id}` } } };
-    }
-  };
-  return state;
-}
-
-/**
- * Record, as the server would, that a session sent a Medusa message, and put
- * the message in the gateway's inbox.
- * @param {object} reply
- * @param {string} reply.hubId - The reply's Hub id.
- * @param {string} reply.inReplyTo - The Hub id it answers.
- * @param {number} reply.projectId - Sending project.
- * @param {number} reply.sessionId - Sending session.
- * @param {string} reply.workspaceId - Sending workspace.
- * @param {string} [reply.text] - Reply body.
- * @param {object} [over] - Overrides for the exchange row.
- * @returns {void}
- */
-function sessionReplies(reply, over = {}) {
-  const row = {
-    exchange_id: `mx_${reply.hubId}`, request_id: `req-${reply.hubId}`, hub_id: reply.hubId, origin: 'send', tracking: 'untracked',
-    sender_project_id: reply.projectId, sender_session_id: String(reply.sessionId), sender_workspace_id: reply.workspaceId,
-    sender_verified: 1, sender_proof: 'launch', recipient_workspace_id: GATEWAY_WS, priority: 'normal', reply_required: 0,
-    in_reply_to: reply.inReplyTo, created_at: clock, state: 'untracked', updated_at: clock, ...over
-  };
-  const columns = Object.keys(row);
-  store.getDb().prepare(
-    `INSERT INTO medusa_exchanges (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
-  ).run(...columns.map((c) => row[c]));
-  hub.inbox.push({ id: reply.hubId, from: reply.workspaceId, message: reply.text ?? 'the answer' });
-}
-
-/**
  * A project with a live, launch-bound session and a workspace.
  * @param {string} name - Project name.
  * @returns {{project: object, sessionId: number, launchId: string, workspaceId: string}}
  */
 function liveProject(name) {
-  const project = store.projects.create({ name, path: path.join(tmpDir, name) });
-  const bound = bindProject(project);
-  const workspaceId = `${name.toLowerCase()}-ws`;
-  hub.workspaces.set(String(bound.sessionId), workspaceId);
-  return { project, sessionId: bound.sessionId, launchId: bound.launchId, workspaceId };
+  return hub.liveProject(name, tmpDir);
+}
+
+/**
+ * The reason each arrival was dropped, in order.
+ * @returns {string[]}
+ */
+function dropReasons() {
+  return gateway.droppedArrivals().recent.map((d) => d.reason);
 }
 
 /**
@@ -128,13 +72,11 @@ describe('bridge gateway (#2031)', () => {
     store._setBasePath(tmpDir);
     store.init();
     clock = '2026-10-04T00:00:00.000Z';
-    hub = fakeHub();
-    masterState = { live: true, ensures: 0, ensureError: null };
+    hub = install();
+    masterState = { live: true, ensures: 0, ensureError: null, listening: true };
     realDeps = { ...gateway._deps };
     let n = 0;
     Object.assign(gateway._deps, {
-      medusa: () => hub.medusa,
-      medusaSend: () => hub.medusaSend,
       master: () => ({
         masterLiveness: () => ({ live: masterState.live, answered: true, cause: null }),
         ensureMasterSession: () => {
@@ -143,7 +85,7 @@ describe('bridge gateway (#2031)', () => {
           masterState.live = true;
           return { created: true };
         },
-        getMasterMedusaStatus: () => ({ workspaceId: MASTER_WS })
+        getMasterMedusaStatus: () => ({ workspaceId: masterState.listening ? MASTER_WS : null })
       }),
       now: () => clock,
       id: (prefix) => `${prefix}_${++n}`
@@ -157,6 +99,7 @@ describe('bridge gateway (#2031)', () => {
 
   afterEach(() => {
     Object.assign(gateway._deps, realDeps);
+    hub.restore();
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -206,7 +149,7 @@ describe('bridge gateway (#2031)', () => {
       const r = await operatorSays('m1', 'what is the fleet doing?');
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.deepEqual([route.state, route.resolvedBy, route.destination.kind], ['routed', 'default', 'master']);
-      assert.equal(hub.sent.length, 0);
+      assert.equal(hub.fromGateway().length, 0);
       assert.equal(hub.system.length, 1);
       assert.equal(hub.system[0].to, MASTER_WS);
       assert.match(hub.system[0].message, new RegExp(`tc bridge read ${route.routeId}`));
@@ -218,16 +161,16 @@ describe('bridge gateway (#2031)', () => {
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.deepEqual([route.state, route.resolvedBy, route.destination.projectId, route.destination.workspaceId],
         ['routed', 'alias', alpha.project.id, alpha.workspaceId]);
-      assert.equal(hub.sent.length, 1);
-      const call = hub.sent[0];
-      assert.equal(call.body.to, alpha.workspaceId);
-      assert.ok(call.body.message.startsWith(gateway.FENCE_LINE));
-      assert.equal(call.body.replyRequired, true);
-      assert.equal(call.body.priority, undefined, 'never blocking or critical');
-      assert.deepEqual(call.caller, { kind: 'system' });
+      assert.equal(hub.fromGateway().length, 1);
+      const call = hub.fromGateway()[0];
+      assert.equal(call.to, alpha.workspaceId);
+      assert.ok(call.message.startsWith(gateway.FENCE_LINE));
+      const exchange = store.medusaExchanges.getByHubId(call.hubId, 'send');
+      assert.deepEqual([exchange.reply_required, exchange.priority, exchange.sender_proof, exchange.tracking],
+        [1, 'normal', 'system', 'tracked'], 'a tracked, reply-required, normal-priority exchange: never blocking or critical');
       const proof = bridgeStore.proofs.byHubId(call.hubId);
-      assert.deepEqual([proof.direction, proof.senderProof, proof.targetWorkspaceId, proof.targetSessionId, proof.targetLaunchId],
-        ['to-target', 'gateway', alpha.workspaceId, alpha.sessionId, alpha.launchId]);
+      assert.deepEqual([proof.direction, proof.senderProof, proof.exchangeId, proof.targetProjectId, proof.targetWorkspaceId, proof.targetSessionId, proof.targetLaunchId],
+        ['to-target', 'gateway', exchange.exchange_id, alpha.project.id, alpha.workspaceId, alpha.sessionId, alpha.launchId]);
     });
 
     it('resolves an operator alias, a project id and the reserved @master', async () => {
@@ -251,7 +194,7 @@ describe('bridge gateway (#2031)', () => {
       bridgeStore.aliases.set('alpha', { kind: 'project', projectId: beta.project.id });
       const ambiguous = bridgeStore.routes.get((await operatorSays('m2', '@alpha hi')).body.routeId);
       assert.deepEqual([ambiguous.state, ambiguous.failureCode], ['awaiting-master', 'address-ambiguous']);
-      assert.equal(hub.sent.length, 0);
+      assert.equal(hub.fromGateway().length, 0);
       assert.ok(alpha.project.id !== beta.project.id);
     });
 
@@ -293,59 +236,48 @@ describe('bridge gateway (#2031)', () => {
     it('holds the destination\'s reply for Master and posts nothing', async () => {
       const alpha = liveProject('Alpha');
       const r = await operatorSays('m1', '@alpha status?');
-      sessionReplies({ hubId: 'reply-1', inReplyTo: hub.sent[0].hubId, projectId: alpha.project.id, sessionId: alpha.sessionId, workspaceId: alpha.workspaceId, text: 'all green' });
+      const sent = await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId, text: 'all green' });
+      assert.equal(sent.status, 200);
       assert.deepEqual(gateway.drainInbox(), { held: 1, dropped: 0, waiting: 0 });
+      await gateway.tick();
 
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.equal(route.state, 'reply-held');
       assert.equal(bridgeStore.routes.body(route.routeId, 'reply').text, 'all green');
       assert.deepEqual(gateway.outboundForHelper(), [], 'nothing reaches the helper before Master releases it');
-      assert.deepEqual(hub.handled, ['reply-1']);
-      assert.match(hub.system[hub.system.length - 1].message, /reply held for your release/);
+      assert.deepEqual(hub.handled, [sent.body.id]);
+      assert.match(hub.system[hub.system.length - 1].message, /has a reply held for your release/);
       const audit = bridgeStore.audit.forRoute(route.routeId).pop();
       assert.deepEqual([audit.op, audit.actor, audit.proof], ['reply-held', 'session', 'launch']);
+      const proof = bridgeStore.proofs.byHubId(sent.body.id);
+      assert.deepEqual([proof.direction, proof.senderProof], ['from-target', 'launch']);
     });
 
     it('captures a reply once, however often it is seen', async () => {
       const alpha = liveProject('Alpha');
       const r = await operatorSays('m1', '@alpha status?');
-      const reply = { hubId: 'reply-1', inReplyTo: hub.sent[0].hubId, projectId: alpha.project.id, sessionId: alpha.sessionId, workspaceId: alpha.workspaceId };
-      sessionReplies(reply);
+      const sent = await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId });
       gateway.drainInbox();
-      hub.inbox.push({ id: 'reply-1', from: alpha.workspaceId, message: 'the answer' });
+      hub.inbox.push({ id: sent.body.id, from: alpha.workspaceId, message: 'the answer' });
       gateway.drainInbox();
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.equal(route.version, 4, 'resolve, dispatch, reply-held: no fourth write');
       assert.equal(bridgeStore.audit.forRoute(route.routeId).filter((a) => a.op === 'reply-held').length, 1);
     });
 
-    it('drops what does not prove itself, each for its own reason, and holds nothing', async () => {
+    it('does not accept a reply from another live session of the same project', async () => {
       const alpha = liveProject('Alpha');
-      const beta = liveProject('Beta');
       const r = await operatorSays('m1', '@alpha status?');
-      const asked = hub.sent[0].hubId;
-      const good = { inReplyTo: asked, projectId: alpha.project.id, sessionId: alpha.sessionId, workspaceId: alpha.workspaceId };
-
-      // A second live session of the SAME project, verified and launch-bound.
-      const sibling = bindProject(alpha.project);
-      hub.workspaces.set(String(sibling.sessionId), 'alpha-sibling-ws');
-
-      sessionReplies({ ...good, hubId: 'x1' }, { sender_verified: 0 });
-      sessionReplies({ ...good, hubId: 'x2' }, { sender_proof: 'ambient-open' });
-      sessionReplies({ ...good, hubId: 'x3' }, { recipient_workspace_id: 'someone-else' });
-      sessionReplies({ ...good, hubId: 'x4', inReplyTo: 'not-ours' });
-      sessionReplies({ ...good, hubId: 'x5' }, { in_reply_to: null });
-      sessionReplies({ ...good, hubId: 'x6', projectId: beta.project.id, sessionId: beta.sessionId, workspaceId: beta.workspaceId });
-      sessionReplies({ ...good, hubId: 'x7', sessionId: sibling.sessionId, workspaceId: 'alpha-sibling-ws' });
-      sessionReplies({ ...good, hubId: 'x8', workspaceId: 'alpha-other-ws' });
-      sessionReplies({ ...good, hubId: 'x9', text: '   ' });
-      hub.inbox.push({ id: 'sys-1', from: 'system', message: 'an escalation notice' });
-
-      assert.deepEqual(gateway.drainInbox(), { held: 0, dropped: 10, waiting: 0 });
+      // Verified, launch-bound, in the right project, answering the right
+      // message: everything but being the session it was sent to.
+      const target = alpha;
+      const sibling = hub.anotherSession(alpha.project);
+      const sent = await hub.sessionSends(sibling, { inReplyTo: hub.fromGateway()[0].hubId });
+      assert.equal(sent.status, 200, 'the Medusa layer accepts it: both sessions belong to the project');
+      assert.equal(gateway.drainInbox().dropped, 1);
+      assert.deepEqual(dropReasons(), ['sender-is-another-session']);
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
-      assert.equal(bridgeStore.routes.body(r.body.routeId, 'reply'), null);
-      assert.equal(hub.inbox.length, 0, 'a dropped message is not left to be judged again');
-      assert.deepEqual(gateway.outboundForHelper(), []);
+      assert.ok(target.sessionId !== sibling.sessionId);
     });
 
     it('does not accept a reply from the target after its session was relaunched', async () => {
@@ -353,9 +285,99 @@ describe('bridge gateway (#2031)', () => {
       const r = await operatorSays('m1', '@alpha status?');
       // The same session row now runs under a different launch.
       store.getDb().prepare('UPDATE launch_sequences SET launch_id = ? WHERE session_id = ?').run('a-newer-launch', alpha.sessionId);
-      sessionReplies({ hubId: 'reply-1', inReplyTo: hub.sent[0].hubId, projectId: alpha.project.id, sessionId: alpha.sessionId, workspaceId: alpha.workspaceId });
+      await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId });
       assert.equal(gateway.drainInbox().dropped, 1);
+      assert.deepEqual(dropReasons(), ['sender-is-another-launch']);
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+    });
+
+    it('drops, each for its own reason, what is not a reply to the message the bridge sent', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      const asked = hub.fromGateway()[0].hubId;
+
+      // An ordinary message to the gateway that answers nothing.
+      await hub.sessionSends(alpha, { text: 'unprompted' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+      // A reply addressed to someone else that reached the gateway's inbox anyway.
+      const elsewhere = await hub.sessionSends(alpha, { inReplyTo: asked, to: 'some-other-ws', deliver: false });
+      hub.inbox.push({ id: elsewhere.body.id, from: alpha.workspaceId, message: 'the answer' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+      // A watchdog or escalation notice.
+      hub.inbox.push({ id: 'sys-9', from: 'system', message: 'an escalation notice' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+      // Something with no id at all.
+      hub.inbox.push({ from: alpha.workspaceId, message: 'no id' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+
+      assert.deepEqual(dropReasons(), ['not-a-reply', 'not-addressed-to-the-gateway', 'system-notice', 'malformed']);
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+      assert.equal(bridgeStore.routes.body(r.body.routeId, 'reply'), null);
+      assert.deepEqual(gateway.outboundForHelper(), []);
+    });
+
+    it('the Medusa layer itself refuses a reply from an unverified caller or another project', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      await operatorSays('m1', '@alpha status?');
+      const asked = hub.fromGateway()[0].hubId;
+      const unbound = await hub.sessionSends(alpha, { inReplyTo: asked, caller: { kind: 'unbound' } });
+      assert.deepEqual([unbound.status, unbound.body.code], [403, 'EXCHANGE_BINDING_REQUIRED']);
+      const other = await hub.sessionSends(beta, { inReplyTo: asked });
+      assert.deepEqual([other.status, other.body.code], [404, 'REPLY_TARGET_UNKNOWN']);
+      assert.equal(hub.inbox.length, 0, 'neither was sent, so neither reached the gateway');
+    });
+
+    it('still drops a sender row the Medusa layer would never write: unverified, or not launch-proven', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      const bridgeExchange = bridgeStore.proofs.byHubId(hub.fromGateway()[0].hubId).exchangeId;
+      const forge = (hubId, over) => {
+        const row = {
+          exchange_id: `mx_${hubId}`, request_id: `req-${hubId}`, hub_id: hubId, origin: 'send', tracking: 'untracked',
+          sender_project_id: alpha.project.id, sender_session_id: String(alpha.sessionId), sender_workspace_id: alpha.workspaceId,
+          sender_verified: 1, sender_proof: 'launch', recipient_workspace_id: GATEWAY_WS, priority: 'normal', reply_required: 0,
+          in_reply_to: bridgeExchange, created_at: clock, state: 'untracked', updated_at: clock, ...over
+        };
+        const columns = Object.keys(row);
+        store.getDb().prepare(`INSERT INTO medusa_exchanges (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+          .run(...columns.map((c) => row[c]));
+        hub.inbox.push({ id: hubId, from: alpha.workspaceId, message: 'forged' });
+      };
+      forge('forged-1', { sender_verified: 0 });
+      forge('forged-2', { sender_proof: 'ambient-open' });
+      forge('forged-3', { sender_workspace_id: 'another-ws' });
+      forge('forged-4', { in_reply_to: 'mx_not_the_bridges' });
+      assert.equal(gateway.drainInbox().dropped, 4);
+      assert.deepEqual(dropReasons(), [
+        'sender-not-a-verified-launch', 'sender-not-a-verified-launch', 'sender-is-another-workspace', 'answers-nothing-the-bridge-sent'
+      ]);
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+    });
+
+    it('does not accept a reply to a message that was superseded by a reroute', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      const first = hub.fromGateway()[0].hubId;
+      // The first send is reported undeliverable; Master routes it again.
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE hub_id = ? AND origin = 'send'").run(first);
+      await gateway.tick();
+      const waiting = bridgeStore.routes.get(r.body.routeId);
+      assert.equal(waiting.state, 'awaiting-master');
+      bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-0001', routeId: waiting.routeId, expectedVersion: waiting.version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      await gateway.advance(waiting.routeId);
+      assert.equal(hub.fromGateway().length, 2, 'a reroute is a new send under a new request id');
+
+      await hub.sessionSends(alpha, { inReplyTo: first, text: 'answer to the old one' });
+      assert.equal(gateway.drainInbox().dropped, 1);
+      assert.deepEqual(dropReasons(), ['answers-a-superseded-message']);
+      await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[1].hubId, text: 'answer to the new one' });
+      assert.equal(gateway.drainInbox().held, 1);
+      assert.equal(bridgeStore.routes.body(waiting.routeId, 'reply').text, 'answer to the new one');
     });
 
     it('waits for a reply whose sender row has not been written yet, then gives up in bounded time', async () => {
@@ -366,6 +388,79 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(hub.inbox.length, 1, 'left in the inbox to be judged again');
       later(11 * 60 * 1000);
       assert.equal(gateway.drainInbox().dropped, 1);
+      assert.deepEqual(dropReasons(), ['no-sender-exchange']);
+    });
+  });
+
+  describe('sending exactly once', () => {
+    it('two callers advancing one route make one send and record one dispatch', async () => {
+      const alpha = liveProject('Alpha');
+      bridgeStore.routes.accept({ routeId: 'rt_race', externalId: 'm9', ...ALLOWED, text: '@alpha once only', digest: bridgeStore.digest('@alpha once only'), at: clock });
+      const [a, b] = await Promise.all([gateway.advance('rt_race'), gateway.advance('rt_race'), gateway.tick()]);
+      assert.equal(hub.fromGateway().length, 1);
+      assert.deepEqual([a.state, b.state], ['routed', 'routed']);
+      const audit = bridgeStore.audit.forRoute('rt_race');
+      assert.deepEqual(audit.filter((x) => x.outcome === 'applied').map((x) => x.op), ['resolve', 'dispatch']);
+      assert.equal(gateway.outboundForHelper().length, 0, 'no failure notice for a send that worked');
+      assert.ok(alpha.sessionId);
+    });
+
+    it('adopts a send that completed before the server stopped, and does not send it again', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha hello');
+      const routeId = r.body.routeId;
+      const first = hub.fromGateway()[0];
+      // The server stopped after the Hub took the message and before the
+      // dispatch was recorded: put the route back as it was at that instant.
+      const db = store.getDb();
+      db.exec('DROP TRIGGER bridge_route_proofs_need_route');
+      db.prepare('DELETE FROM bridge_route_proofs WHERE route_id = ?').run(routeId);
+      db.prepare("UPDATE bridge_routes SET state = 'accepted', destination_workspace_id = NULL WHERE route_id = ?").run(routeId);
+      db.exec('DROP TRIGGER bridge_audit_append_only_delete');
+      db.prepare("DELETE FROM bridge_audit WHERE route_id = ? AND op = 'dispatch'").run(routeId);
+      gateway._reset();
+
+      await gateway.tick();
+      assert.equal(hub.fromGateway().length, 1, 'the message already on the Hub is not sent a second time');
+      assert.equal(bridgeStore.routes.get(routeId).state, 'routed');
+      assert.equal(bridgeStore.proofs.latestToTarget(routeId).hubId, first.hubId);
+      await hub.sessionSends(alpha, { inReplyTo: first.hubId });
+      assert.equal(gateway.drainInbox().held, 1, 'and its reply is still recognised');
+    });
+
+    it('a pin made while the send was in flight does not lose the dispatch', async () => {
+      const alpha = liveProject('Alpha');
+      bridgeStore.routes.accept({ routeId: 'rt_pin', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      const realSend = require('../lib/medusa').sendMessage;
+      require('../lib/medusa').sendMessage = async (args) => {
+        const out = await realSend(args);
+        // Master pins the conversation while the gateway waits on the Hub.
+        const route = bridgeStore.routes.get('rt_pin');
+        bridgeStore.applyRouteWrite({
+          op: 'pin', requestId: 'req-pin-000001', routeId: 'rt_pin', expectedVersion: route.version,
+          actor: 'master', proof: 'master-launch', masterGeneration: 1, change: () => ({ set: {} })
+        });
+        return out;
+      };
+      await gateway.advance('rt_pin');
+      const route = bridgeStore.routes.get('rt_pin');
+      assert.equal(route.state, 'routed');
+      assert.ok(bridgeStore.proofs.latestToTarget('rt_pin'), 'the proof is recorded against the route as it now is');
+      assert.equal(gateway.outboundForHelper().length, 0);
+      assert.ok(alpha.sessionId);
+    });
+
+    it('a send the Hub never confirmed is waited on, then handed back, and never duplicated', async () => {
+      liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const r = await operatorSays('m1', '@alpha hello');
+      assert.equal(hub.fromGateway().length, 0);
+      const route = bridgeStore.routes.get(r.body.routeId);
+      assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'send-send-unknown']);
+      hub.failSend = null;
+      await gateway.tick();
+      assert.equal(hub.fromGateway().length, 0, 'it waits for Master to route it again');
+      assert.deepEqual(gateway.outboundForHelper().map((i) => i.kind), ['failure']);
     });
   });
 
@@ -386,10 +481,8 @@ describe('bridge gateway (#2031)', () => {
     it('turns a delivery failure on the exchange into one notice and a decision for Master', async () => {
       const alpha = liveProject('Alpha');
       const r = await operatorSays('m1', '@alpha hello');
-      const sent = hub.sent[0];
-      sessionReplies({ hubId: sent.hubId, inReplyTo: null, projectId: null, sessionId: 0, workspaceId: GATEWAY_WS },
-        { state: 'undeliverable', sender_verified: 1, sender_proof: 'system', recipient_workspace_id: alpha.workspaceId, in_reply_to: null });
-      hub.inbox = [];
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE hub_id = ? AND origin = 'send'")
+        .run(hub.fromGateway()[0].hubId);
       const first = await gateway.tick();
       const second = await gateway.tick();
       assert.deepEqual([first.failed, second.failed], [1, 0]);
@@ -435,6 +528,8 @@ describe('bridge gateway (#2031)', () => {
       await gateway.tick();
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'awaiting-master');
       assert.equal(hub.system.length, 1, 'Master is told once it is back');
+      await gateway.tick();
+      assert.equal(hub.system.length, 1, 'and not again for the same state');
     });
 
     it('carries on after a restart from wherever a route stopped', async () => {
@@ -448,9 +543,9 @@ describe('bridge gateway (#2031)', () => {
       const pass = await gateway.tick();
       assert.equal(pass.advanced, 1);
       assert.equal(bridgeStore.routes.get('rt_restart').state, 'routed');
-      assert.equal(hub.sent.length, 1);
+      assert.equal(hub.fromGateway().length, 1);
       await gateway.tick();
-      assert.equal(hub.sent.length, 1, 'a second pass does not send it again');
+      assert.equal(hub.fromGateway().length, 1, 'a second pass does not send it again');
       assert.ok(alpha.sessionId);
     });
 
@@ -460,7 +555,78 @@ describe('bridge gateway (#2031)', () => {
       later(60 * 60 * 1000);
       assert.deepEqual(await gateway.tick(), { advanced: 0, failed: 0, pendingNotices: 0 });
       assert.equal(bridgeStore.routes.get('rt_x').state, 'accepted');
-      assert.equal(hub.system.length + hub.sent.length + masterState.ensures, 0);
+      assert.equal(hub.system.length + hub.fromGateway().length + masterState.ensures, 0);
+    });
+
+    it('tells the Master again when a notice could not be sent, and for each new reason', async () => {
+      const alpha = liveProject('Alpha');
+      hub.systemFails = true;
+      const r = await operatorSays('m1', 'unaddressed, so it is the Master\'s');
+      assert.equal(hub.system.length, 0);
+      assert.equal(bridgeStore.routes.get(r.body.routeId).masterWakeAt, null, 'a notice that failed is not recorded as given');
+      hub.systemFails = false;
+      await gateway.tick();
+      assert.equal(hub.system.length, 1);
+      await gateway.tick();
+      assert.equal(hub.system.length, 1);
+
+      // A route handed back to the Master after a failure is a new reason.
+      const routed = await operatorSays('m2', '@alpha hello');
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'recipient_retired' WHERE hub_id = ? AND origin = 'send'")
+        .run(hub.fromGateway()[0].hubId);
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get(routed.body.routeId).state, 'awaiting-master');
+      assert.equal(hub.system.length, 2);
+      assert.ok(alpha.sessionId);
+    });
+
+    it('keeps trying to tell a Master that was away when a reply was held', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      masterState.listening = false;
+      await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId });
+      gateway.drainInbox();
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'reply-held');
+      assert.equal(hub.system.length, 0);
+      masterState.listening = true;
+      await gateway.tick();
+      assert.match(hub.system[0].message, /has a reply held for your release/);
+    });
+
+    it('one route that fails does not hold up the others', async () => {
+      liveProject('Alpha');
+      bridgeStore.routes.accept({ routeId: 'rt_a', externalId: 'ma', ...ALLOWED, text: '@alpha one', digest: bridgeStore.digest('@alpha one'), at: clock });
+      later(1000);
+      bridgeStore.routes.accept({ routeId: 'rt_b', externalId: 'mb', ...ALLOWED, text: '@alpha two', digest: bridgeStore.digest('@alpha two'), at: clock });
+      const realGet = store.projects.list;
+      let thrown = false;
+      store.projects.list = (...args) => {
+        if (!thrown) { thrown = true; throw new Error('a route that cannot be resolved this pass'); }
+        return realGet.apply(store.projects, args);
+      };
+      try {
+        await gateway.tick();
+      } finally {
+        store.projects.list = realGet;
+      }
+      assert.equal(bridgeStore.routes.get('rt_a').state, 'accepted');
+      assert.equal(bridgeStore.routes.get('rt_b').state, 'routed');
+    });
+
+    it('still runs retention while disabled, and lets go of nothing that is open', async () => {
+      const old = '2026-01-01T00:00:00.000Z';
+      bridgeStore.routes.accept({ routeId: 'rt_old', externalId: 'mo', ...ALLOWED, text: 'old', digest: bridgeStore.digest('old'), at: old });
+      const open = bridgeStore.routes.get('rt_old');
+      bridgeStore.applyRouteWrite({
+        op: 'close', requestId: 'req-old-000001', routeId: 'rt_old', expectedVersion: open.version, actor: 'operator', proof: 'verified-session', at: old,
+        change: () => ({ set: { state: 'closed', closed_by: 'operator', closed_at: old }, clearBodies: true })
+      });
+      bridgeStore.routes.accept({ routeId: 'rt_open', externalId: 'mp', ...ALLOWED, text: 'open', digest: bridgeStore.digest('open'), at: old });
+      bridgeStore.settings.set('enabled', 'false');
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get('rt_old'), null);
+      assert.ok(bridgeStore.routes.get('rt_open'));
     });
   });
 

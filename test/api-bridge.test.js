@@ -137,7 +137,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.equal(res.status, 401);
   });
 
-  it('reports status while disabled and refuses everything else', async () => {
+  it('reports status while disabled, still lets a route be closed, and refuses everything else', async () => {
     const routeId = acceptRoute('off');
     bridgeStore.settings.set('enabled', 'false');
     const status = await call('GET', '/api/bridge/master/status');
@@ -145,12 +145,16 @@ describe('bridge API: the Master surface (#2031)', () => {
     for (const [method, apiPath] of [
       ['GET', '/api/bridge/master/routes'],
       ['GET', `/api/bridge/master/routes/${routeId}`],
-      ['POST', `/api/bridge/master/routes/${routeId}/close`]
+      ['POST', `/api/bridge/master/routes/${routeId}/answer`]
     ]) {
-      const r = await call(method, apiPath, { body: method === 'POST' ? { requestId: 'req-off-00001', expectedVersion: 1 } : undefined });
+      const r = await call(method, apiPath, { body: method === 'POST' ? { requestId: 'req-off-00001', expectedVersion: 1, text: 'x' } : undefined });
       assert.deepEqual([r.status, r.body.code], [409, 'BRIDGE_DISABLED'], `${method} ${apiPath}`);
     }
     assert.equal(bridgeStore.routes.get(routeId).state, 'accepted');
+    // Turning the bridge off must not leave message text held with no way out.
+    const closed = await call('POST', `/api/bridge/master/routes/${routeId}/close`, { body: { requestId: 'req-off-00002', expectedVersion: 1 } });
+    assert.deepEqual([closed.status, closed.body.route.state], [200, 'closed']);
+    assert.equal(bridgeStore.routes.bodies(routeId)[0].text, null);
   });
 
   it('lists and reads routes, marking what the operator wrote as conversation only', async () => {

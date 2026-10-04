@@ -4800,48 +4800,18 @@ route('GET', '/api/tc/workload', (req, res) => {
 // with its own proof and none standing in for another; `lib/bridge-api.js`
 // holds the handlers.
 
-/** How often the operator bridge's gateway runs its pass. */
+/** How often the operator bridge's gateway runs its pass: often enough that a route never waits long on it, rarely enough to cost nothing while idle. */
 const BRIDGE_TICK_MS = 15 * 1000;
 
-/**
- * Hand a request to a bridge handler and send what it answers.
- * @param {(request: object) => ({status: number, body: object}|Promise<{status: number, body: object}>)} handler - A `lib/bridge-api.js` handler.
- * @returns {Function} A route handler.
- */
-function _bridgeRoute(handler) {
-  return async (req, res, params, body) => {
+// Each route is declared in `lib/bridge-api.js` with the principal it belongs
+// to, and `bridgeApi.handle` proves that principal before the handler runs.
+for (const entry of bridgeApi.ROUTES) {
+  route(entry.method, entry.path, async (req, res, params, body) => {
     const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
-    const result = await handler({ req, headers: req.headers, params, query, body });
+    const result = await bridgeApi.handle(entry, { req, headers: req.headers, params, query, body });
     return jsonResponse(res, result.status, result.body);
-  };
+  });
 }
-
-// The Project Master's surface: authorised by its live credential alone.
-route('GET', '/api/bridge/master/status', _bridgeRoute(bridgeApi.status));
-route('GET', '/api/bridge/master/routes', _bridgeRoute(bridgeApi.listRoutes));
-route('GET', '/api/bridge/master/routes/:routeId', _bridgeRoute(bridgeApi.readRoute));
-route('POST', '/api/bridge/master/routes/:routeId/close', _bridgeRoute(bridgeApi.closeRoute));
-route('POST', '/api/bridge/master/routes/:routeId/route', _bridgeRoute(bridgeApi.routeTo));
-route('POST', '/api/bridge/master/routes/:routeId/answer', _bridgeRoute(bridgeApi.answerRoute));
-route('POST', '/api/bridge/master/routes/:routeId/release', _bridgeRoute(bridgeApi.releaseRoute));
-route('POST', '/api/bridge/master/routes/:routeId/pin', _bridgeRoute(bridgeApi.pinRoute));
-
-// The chat helper's three routes: authorised by its scoped token alone.
-route('POST', '/api/bridge/helper/inbound', _bridgeRoute(bridgeApi.helperInbound));
-route('GET', '/api/bridge/helper/outbound', _bridgeRoute(bridgeApi.helperOutbound));
-route('POST', '/api/bridge/helper/outbound/:outboundId/ack', _bridgeRoute(bridgeApi.helperAck));
-
-// The operator's policy: a verified account session, nothing less.
-route('GET', '/api/bridge/operator/status', _bridgeRoute(bridgeApi.operatorStatus));
-route('POST', '/api/bridge/operator/enable', _bridgeRoute(bridgeApi.operatorSwitch(true)));
-route('POST', '/api/bridge/operator/disable', _bridgeRoute(bridgeApi.operatorSwitch(false)));
-route('POST', '/api/bridge/operator/allowlist', _bridgeRoute(bridgeApi.operatorAllowlist));
-route('POST', '/api/bridge/operator/helper-token', _bridgeRoute(bridgeApi.operatorMintHelperToken));
-route('DELETE', '/api/bridge/operator/helper-token', _bridgeRoute(bridgeApi.operatorRevokeHelperToken));
-route('POST', '/api/bridge/operator/aliases', _bridgeRoute(bridgeApi.operatorSetAlias));
-route('DELETE', '/api/bridge/operator/aliases/:alias', _bridgeRoute(bridgeApi.operatorRemoveAlias));
-route('POST', '/api/bridge/operator/pins', _bridgeRoute(bridgeApi.operatorSetPin));
-route('DELETE', '/api/bridge/operator/pins/:pinId', _bridgeRoute(bridgeApi.operatorRevokePin));
 
 // Governed coordinator context rotation (#2032). A coordinator prepares its
 // own rotation with a structured checkpoint; the server fences its new

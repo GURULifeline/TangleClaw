@@ -72,7 +72,28 @@ outbound   destination session ──▶ gateway (held) ──▶ Master release
    dropped, the route is closed and every body held for it is cleared.
 
 When the Master is the destination there is no Medusa round trip: the route waits, the Master is
-told once, and it answers with `tc bridge answer`.
+told, and it answers with `tc bridge answer`.
+
+### Telling the Master
+
+The gateway tells the Master through its Medusa listener, with a system notice the existing wake
+monitor turns into a nudge. It tells it once for each state a route reaches that needs it: a
+route to decide, a route that is the Master's to answer, a reply held for release, and again if
+a route is handed back after a failure. A notice that could not be sent is not recorded as
+given, so the next pass sends it.
+
+**If the Master's Medusa listener is off, nothing nudges it.** The route still waits, the status
+notice still goes to the operator and the gap is logged, but the Master only finds the route by
+running `tc bridge routes`. The Architect ruled on 2026-10-04 that this must be closed, failing
+closed, before cutover; it is not solved here.
+
+### Sending exactly once
+
+One route is advanced by one caller at a time. Before a message is sent, the gateway looks for
+an exchange already made for that attempt: if the message is on the Hub it is adopted, if the
+send is still unconfirmed it is waited on for up to two minutes, and only then is it handed
+back to the Master. A send interrupted by a restart is found again under the same request id
+and is never made twice.
 
 ### Addresses
 
@@ -205,12 +226,12 @@ Every write:
 | Refusal | Meaning |
 |---|---|
 | `401 BRIDGE_CREDENTIAL_REQUIRED` | The request did not carry the live Master generation's credential. |
-| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route but `status` answers this. |
+| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route but `status` and `close` answers this. `close` stays available so that turning the bridge off never leaves message text held. |
 | `404 ROUTE_NOT_FOUND` | No such route. |
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
 | `409 REQUEST_ID_REUSED` | The request id was already used for a different route. |
 | `409 NOT_AWAITING_MASTER` | `route` on a route that is not waiting for the Master. |
-| `409 NOT_ANSWERABLE` | `answer` on a route that already has an answer, or is closed. |
+| `409 NOT_ANSWERABLE` | `answer` on a route that is not waiting for one: it is still being resolved or sent, already has an answer, or is closed. |
 | `409 NO_REPLY_HELD` | `release` on a route with no held reply. |
 | `409 REPLY_NOT_DISPLAY_SAFE` | The held reply contains control or text-direction characters. Answer in your own words instead. |
 | `400 UNKNOWN_DESTINATION` | The destination is not `master`, a project id or an exact project name. |
@@ -231,7 +252,10 @@ also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never u
 
 Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
-`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `404 OUTBOUND_NOT_FOUND`, `409 ACK_MISMATCH`.
+`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `400 BAD_ACK`, `404 OUTBOUND_NOT_FOUND`,
+`409 ACK_MISMATCH`, `409 OUTBOUND_NOT_READY`, `409 ACK_NOT_APPLIED`.
+
+Acknowledging an answer marks it delivered and closes and clears its route in one transaction.
 
 ## The operator's routes
 
@@ -243,7 +267,7 @@ audit.
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins and what is waiting. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, what is waiting, and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
@@ -289,8 +313,7 @@ removes its bodies, proofs and outbound items.
 ### Retention
 
 `lib/bridge-store.js#prune` removes what has outlived its retention. The gateway runs it once
-a day while the bridge is enabled. While it is disabled nothing runs, and the only table that
-grows is `bridge_master_credentials`, by one row per Master launch.
+a day, whether or not the bridge is enabled. Revoked pins and helper tokens leave after 90 days.
 
 | Record | Kept for |
 |---|---|
@@ -321,6 +344,6 @@ check is refused, and the message names each object that is missing or misshapen
 - `lib/bridge-handoff.js`: minting, hashing and the FIFO handoff. It does not load the store.
 - `lib/bridge-principal.js`: when a credential exists and whether a presented one is live.
 - `lib/bridge-gateway.js`: accept, resolve, dispatch, reply capture, the periodic pass.
-- `lib/bridge-api.js`: the `/api/bridge/master/*`, `/api/bridge/helper/*` and
-  `/api/bridge/operator/*` handlers.
+- `lib/bridge-api.js`: every bridge route, declared with the principal it belongs to. One
+  function proves the principal before any handler runs.
 - `bin/tc-bridge-receive`: the pane-side reader.
