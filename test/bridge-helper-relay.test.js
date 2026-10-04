@@ -232,7 +232,8 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       master: () => ({
         masterLiveness: () => ({ live: true, answered: true }),
         ensureMasterSession: () => ({ created: false }),
-        getMasterMedusaStatus: () => ({ workspaceId: 'master-ws' })
+        getMasterMedusaStatus: () => ({ workspaceId: 'master-ws' }),
+        masterListenerEnabled: () => true
       })
     });
     gateway._reset();
@@ -1065,6 +1066,89 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.ok(logged().includes('outbound-ack-failed'), 'it is told its lease lapsed, not what became of the item');
       assert.deepEqual(relay.state.entries(), [], 'the helper does not keep trying');
       assert.equal(discord.posts.length, 1);
+    });
+  });
+
+  describe('preflight', () => {
+    /**
+     * Run `preflight` for a helper configured with the given ids.
+     * @param {object} [over] - `ids`, `token`, `bot`, and files to prepare.
+     * @returns {Promise<{code: number, lines: string[]}>}
+     */
+    async function preflight(over = {}) {
+      const home = path.join(tmpDir, `preflight-${++seq}`);
+      writeConfig(paths(home).config, { baseUrl: origin, ...IDS, ...(over.ids || {}), pollSeconds: 5 });
+      if (over.prepare) over.prepare(paths(home));
+      const lines = [];
+      const code = await main(['preflight'], {
+        home, repoDir: path.join(__dirname, '..'), nodePath: process.execPath, uid: 501, pid: process.pid,
+        out: (line) => lines.push(line), errLine: (line) => lines.push(line), stdin: null, launchctl: async () => 0, onStop: () => {},
+        secrets: { readSecret: async (name) => ({ bot: over.bot || BOT_TOKEN, helper: over.token || helperToken }[name]) },
+        discordApi: discord.api, sleep: async () => {}, isAlive: over.isAlive || (() => false)
+      });
+      return { code, lines };
+    }
+
+    /**
+     * Every row of the bridge's tables that a helper request could touch.
+     * @returns {string}
+     */
+    function everything() {
+      const db = store.getDb();
+      return JSON.stringify(['bridge_outbound', 'bridge_outbound_leases', 'bridge_outbound_claims', 'bridge_nonces', 'bridge_outbound_parts', 'bridge_audit', 'bridge_routes', 'bridge_config_circuit']
+        .map((table) => db.prepare(`SELECT * FROM ${table}`).all()));
+    }
+
+    it('passes when everything that can be checked is right, and says what it could not prove', async () => {
+      await answered('something waiting, which preflight must not touch');
+      await asOperator('POST', '/api/bridge/operator/disable');
+      const before = everything();
+      const calls = discord.calls();
+      const { code, lines } = await preflight();
+      assert.equal(code, EXIT.ok, lines.join('\n'));
+      assert.deepEqual(lines.map((l) => l.replace(/\s+/g, ' ')), [
+        'ok config', 'ok secret-bot', 'ok secret-helper', 'ok state-file', 'ok lock-free',
+        'ok bridge-token', 'ok bridge-allowlist', 'ok bridge-circuit', 'unproven bridge-enabled: not enabled yet; the operator enables it after preflight',
+        'ok discord-token', 'ok discord-channel', 'unproven discord-post: proven only by a post',
+        'No check failed. Checks marked unproven are proven by the first controlled message.'
+      ]);
+      assert.equal(everything(), before, 'it changed nothing at the bridge: no nonce, no lease, no audit row');
+      assert.deepEqual([discord.calls() - calls, discord.posts.length], [0, discord.posts.length], 'and posted nothing');
+      for (const secret of [BOT_TOKEN, helperToken, ...Object.values(IDS)]) assert.ok(!lines.join('\n').includes(secret), 'no secret and no id is printed');
+    });
+
+    it('fails, by a closed word, on each thing that is wrong', async () => {
+      const failing = async (over, expected) => {
+        // Preflight is asked sparingly by design; this test asks it many times in a row.
+        bridgeApi._resetRateLimits();
+        const { code, lines } = await preflight(over);
+        assert.equal(code, EXIT.failed, JSON.stringify(expected));
+        for (const line of expected) assert.ok(lines.map((l) => l.replace(/\s+/g, ' ')).includes(line), `${line} in ${lines.join(' | ')}`);
+        for (const secret of [BOT_TOKEN, helperToken, ...Object.values(IDS)]) assert.ok(!lines.join('\n').includes(secret));
+      };
+      await failing({ ids: { channelId: '300000000000000077' } }, ['FAIL bridge-allowlist: allowlist-differs']);
+      await failing({ token: `bht_${'z'.repeat(43)}` }, ['FAIL bridge-token: status-401']);
+      await failing({ isAlive: () => true, prepare: (p) => fs.writeFileSync(p.lock, '4242\n') }, ['FAIL lock-free: helper-already-running']);
+      await failing({ prepare: (p) => { fs.writeFileSync(p.state, JSON.stringify({ salt: 'abc123', items: {} }), { mode: 0o644 }); } }, ['FAIL state-file: file-not-owner-only']);
+      await failing({ prepare: (p) => fs.writeFileSync(p.state, '{half', { mode: 0o600 }) }, ['FAIL state-file: state-unreadable']);
+
+      discord.reads.self = [401, { code: 0 }];
+      await failing({}, ['FAIL discord-token: status-401']);
+      discord.reads.self = [200, { id: '100000000000000001', bot: false }];
+      await failing({}, ['FAIL discord-token: not-a-bot-token']);
+      discord.reads.self = [200, { id: BOT_ID, bot: true }];
+      discord.reads.channel = [404, { code: 10003 }];
+      await failing({}, ['FAIL discord-channel: status-404']);
+      discord.reads.channel = [200, { id: IDS.channelId, guild_id: '200000000000000099', type: 0 }];
+      await failing({}, ['FAIL discord-channel: channel-not-in-server']);
+      discord.reads.channel = null;
+
+      // An open configuration circuit is a failure to start on, too.
+      const text = 'notice';
+      const id = bridgeStore.outbound.enqueue({ idemKey: `notify:operator-needed:pf-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text), at: new Date(clock).toISOString() }).outboundId;
+      const item = (await bridge.claim(`preflight-claim-nonce-${seq}`)).items.find((i) => i.outboundId === id);
+      await bridge.fail(id, item.leaseId, 'chat-channel-missing', [], 1);
+      await failing({}, ['FAIL bridge-circuit: configuration-circuit-open']);
     });
   });
 

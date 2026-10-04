@@ -148,7 +148,8 @@ describe('bridge helper: its parts (#2031)', () => {
     it('reads a secret from security\'s output and answers each failure with a closed code', async () => {
       let answer;
       secrets._internal.execFile = (program, argv, options, done) => {
-        assert.deepEqual([program, ...argv], ['/usr/bin/security', 'find-generic-password', '-s', 'tangleclaw-bridge-helper', '-a', 'discord-bot-token', '-w']);
+        // The bot token is read from the Keychain item the install already keeps it in: it is not copied.
+        assert.deepEqual([program, ...argv], ['/usr/bin/security', 'find-generic-password', '-s', 'tangleclaw-discord-helper', '-a', 'discord-bot-token', '-w']);
         done(...answer);
       };
       answer = [null, `${BOT_TOKEN}\n`];
@@ -165,11 +166,13 @@ describe('bridge helper: its parts (#2031)', () => {
   });
 
   describe('the config', () => {
-    it('sends the helper token over plain http to this machine only', () => {
-      for (const ok of ['http://127.0.0.1:3102', 'http://localhost:3102/', 'http://[::1]:3102', 'https://tc.example.net:8443/path']) {
+    it('sends the helper token to this machine only, over http or https', () => {
+      for (const ok of ['http://127.0.0.1:3102', 'http://localhost:3102/', 'http://[::1]:3102', 'https://localhost:3102/path', 'https://127.0.0.1:3102']) {
         assert.equal(config.usableOrigin(ok), new URL(ok).origin, ok);
       }
-      for (const bad of ['http://tc.example.net:3102', 'http://10.0.0.5:3102', 'ftp://127.0.0.1', 'https://user:pw@tc.example.net', 'not a url', '', undefined]) {
+      // The bridge answers the helper only from this machine, so nowhere else is a place to send the token.
+      for (const bad of ['http://tc.example.net:3102', 'https://tc.example.net:8443/path', 'http://10.0.0.5:3102', 'https://10.0.0.5', 'ftp://127.0.0.1',
+        'https://user:pw@localhost', 'not a url', '', undefined]) {
         assert.equal(config.usableOrigin(bad), null, String(bad));
       }
     });
@@ -255,14 +258,14 @@ describe('bridge helper: its parts (#2031)', () => {
   });
 
   describe('the bridge client', () => {
-    it('can build the five helper routes and nothing else, and sends the token only in its header', async () => {
-      assert.deepEqual(Object.keys(PATHS), ['inbound', 'claim', 'part', 'ack', 'failure']);
+    it('can build the six helper routes and nothing else, and sends the token only in its header', async () => {
+      assert.deepEqual(Object.keys(PATHS), ['preflight', 'inbound', 'claim', 'part', 'ack', 'failure']);
       assert.ok(Object.isFrozen(PATHS));
       assert.equal(PATHS.ack('7/../../operator/enable'), '/api/bridge/helper/outbound/NaN/ack', 'an id that is not a number cannot steer the path');
 
       const tc = await serve((req, res) => json(res, 200, { items: [], replayed: false }));
       const client = createBridgeClient({ origin: tc.origin, token: HELPER_TOKEN });
-      assert.deepEqual(Object.keys(client), ['sendInbound', 'claim', 'part', 'ack', 'fail']);
+      assert.deepEqual(Object.keys(client), ['preflight', 'sendInbound', 'claim', 'part', 'ack', 'fail']);
       await client.claim('claim-nonce-0000001', 5);
       await client.ack(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', ['300000000000000012', '300000000000000014']);
       await client.sendInbound({ externalId: '300000000000000013', text: 'hello' });

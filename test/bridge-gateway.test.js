@@ -127,7 +127,8 @@ describe('bridge gateway (#2031)', () => {
           masterState.live = true;
           return { created: true };
         },
-        getMasterMedusaStatus: () => ({ workspaceId: masterState.listening ? MASTER_WS : null })
+        getMasterMedusaStatus: () => ({ workspaceId: masterState.listening ? MASTER_WS : null }),
+        masterListenerEnabled: () => true
       }),
       now: () => clock,
       id: (prefix) => `${prefix}_${++n}`

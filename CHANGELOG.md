@@ -20,6 +20,14 @@ All notable changes to TangleClaw are documented in this file.
   - **No redirects.** Neither client follows one, so neither token reaches a host that was not configured. Plain `http` is accepted for this machine only.
   - **launchd.** `install-launchd` writes a job that carries paths and a label only.
 
+- **The bridge's credentials stay on this machine, and the helper can be checked before it is started** (#2031, ADR 0023). Still off by default.
+  - **Loopback only.** The Master's credential and the helper's token are taken only from a request made directly from this machine: not over the network and not through a proxy (`403 LOOPBACK_REQUIRED`). `tc bridge` and the helper do not send them anywhere else in the first place.
+  - **A Master that is gone has no credential.** When tmux says there is no Master, its bridge credential is revoked on the request that finds out.
+  - **Not enabled without a way to tell the Master.** Enabling the bridge is refused while the Master is not a switchboard participant.
+  - **`tc-bridge-helper preflight`** checks the config, both Keychain items, the record's permissions, the lock, the helper token, the allowlist, the circuit, the bot token and the channel, without posting or claiming. What it cannot prove without posting it reports as unproven.
+  - **Rate limits** on the helper's routes and on a session's candidate submissions.
+  - The helper reads the Discord bot token from the Keychain item the install already has.
+
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
   - **Every posted message is recorded, as it is posted.** The helper reports each message the chat makes for an item straight away, and the acknowledgement seals the complete ordered set. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.
   - **A reply to any part resolves.** A reply to an answer goes where that answer's route went, from any part and not only the first. A reply to a milestone or a notification, which has no route, goes to the Project Master as a reply to that item, resolved by `outbound-correlation`: what it answers is fixed on the route and shown by `tc bridge read`. It is not handled as an unaddressed message and changes nothing about the candidate.

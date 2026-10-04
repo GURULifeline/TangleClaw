@@ -8,7 +8,8 @@ The helper is a small local process, `bin/tc-bridge-helper`, that sits between D
 - **TangleClaw to Discord:** it claims what the bridge has released for the operator, posts it
   in that channel, and acknowledges each item once Discord confirms the post.
 
-It talks to TangleClaw through the bridge's five helper routes and nothing else. No session
+It talks to TangleClaw through the bridge's six helper routes and nothing else, on this
+machine only: the bridge refuses the helper's token from anywhere else. No session
 has a path to Discord: an answer reaches the helper only after the Project Master releases it.
 
 ## Status
@@ -71,27 +72,54 @@ bin/tc-bridge-helper configure --base-url http://127.0.0.1:3102 \
 This writes `~/.tangleclaw/bridge-helper/config.json`, owner-only. It holds no secret, and it
 is outside the repository, so no Discord id is in a tracked file.
 
-- `--base-url` is where TangleClaw answers. Plain `http://` is accepted only for this machine
-  (`127.0.0.1`, `localhost`, `[::1]`); anywhere else must be `https://`. It may carry no user
-  name or password.
+- `--base-url` is where TangleClaw answers, and must name this machine (`127.0.0.1`,
+  `localhost` or `[::1]`), over `http://` or `https://`. The bridge answers the helper only for
+  a request made directly from this machine, so there is nowhere else to send the token. It
+  may carry no user name or password.
 - `--poll-seconds` (5 to 300, default 15) sets how often the helper asks what to post.
 - A value that does not pass is refused, the field is named, and nothing is written.
 
 ### 3. The two secrets, in the Keychain
 
 ```sh
-bin/tc-bridge-helper set-secret bot       # paste the Discord bot token
 bin/tc-bridge-helper set-secret helper    # paste the bridge's bht_ helper token
 ```
 
-Each command reads the token from standard input, with echo off at a terminal, stores it in
-your login Keychain (service `tangleclaw-bridge-helper`) and reads it back to confirm. The token
+The helper reads two Keychain items. The **Discord bot token** is the item this install
+already keeps it in (service `tangleclaw-discord-helper`, account `discord-bot-token`): the
+helper uses it where it is, so there is nothing to copy. Run `set-secret bot` only if the bot
+token itself has changed. The **helper token** is the helper's own (service
+`tangleclaw-bridge-helper`, account `bridge-helper-token`).
+
+`set-secret` reads the token from standard input, with echo off at a terminal, stores it in
+your login Keychain and reads it back to confirm. The token
 travels to `security` on its standard input, so it is never in a command line (visible to
 `ps`), an environment variable, a file or a log. A value that is not the shape of its token is
 refused before anything runs. Never put either token in a repository, the config, the launchd
 job or a shell command. `set-secret` takes no token as an argument.
 
-### 4. Run it under launchd
+### 4. Check it, without posting anything
+
+```sh
+bin/tc-bridge-helper preflight
+```
+
+Preflight proves everything it can without posting, claiming or changing anything. One line a
+check: `ok`, `FAIL` with a closed word, or `unproven`.
+
+| Check | Proves |
+|---|---|
+| `config`, `secret-bot`, `secret-helper` | The config passes; both Keychain items are present and shaped like their tokens. |
+| `state-file` | The record of posts, if there is one, is readable and owner-only, in an owner-only directory. |
+| `lock-free` | No helper is running. |
+| `bridge-token`, `bridge-allowlist`, `bridge-circuit` | The bridge takes the helper token; the three configured ids are the allowlisted ones; the configuration circuit is closed. |
+| `bridge-enabled` | `unproven` until the operator enables the bridge, which comes after preflight. |
+| `discord-token`, `discord-channel` | Discord takes the bot token as a bot's; the channel is visible to it and is in the configured server. |
+| `discord-post` | Always `unproven`: whether the bot may post there cannot be read without posting. The first controlled message proves it. |
+
+It exits non-zero if any check fails. It prints no secret and no id.
+
+### 5. Run it under launchd
 
 ```sh
 bin/tc-bridge-helper install-launchd
@@ -123,14 +151,14 @@ seconds. `--no-load` writes the job without loading it.
 
 ```sh
 bin/tc-bridge-helper uninstall-launchd
-security delete-generic-password -s tangleclaw-bridge-helper -a discord-bot-token
 security delete-generic-password -s tangleclaw-bridge-helper -a bridge-helper-token
 rm -r ~/.tangleclaw/bridge-helper
 ```
 
 `uninstall-launchd` unloads the job and removes its file, and keeps the rest. Remove
 `~/.tangleclaw/bridge-helper` only when `status` shows nothing held: it holds the record of
-posts in progress. Then have the operator revoke the helper token at the bridge.
+posts in progress. Then have the operator revoke the helper token at the bridge. The bot
+token's Keychain item is not the helper's to remove: other things on this install use it.
 
 ## How an item is delivered
 

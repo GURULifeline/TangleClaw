@@ -160,12 +160,13 @@ function asOperator(method, apiPath, request = {}) {
 /**
  * Run the real `bin/tc` as the Master pane would.
  * @param {string[]} args - Arguments.
+ * @param {object} [over] - Environment overrides.
  * @returns {Promise<{code: number, stdout: string, stderr: string}>}
  */
-function tc(args) {
+function tc(args, over = {}) {
   const env = {
     PATH: process.env.PATH, HOME: process.env.HOME, TANGLECLAW_API: origin, TANGLECLAW_ROLE: 'master',
-    [handoff.CREDENTIAL_ENV]: masterCredential
+    [handoff.CREDENTIAL_ENV]: masterCredential, ...over
   };
   return new Promise((resolve) => {
     execFile(TC_BIN, args, { env, encoding: 'utf8' }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
@@ -199,7 +200,8 @@ describe('bridge API: the round trip (#2031)', () => {
       master: () => ({
         masterLiveness: () => ({ live: true, answered: true }),
         ensureMasterSession: () => ({ created: false }),
-        getMasterMedusaStatus: () => ({ workspaceId: 'master-ws' })
+        getMasterMedusaStatus: () => ({ workspaceId: 'master-ws' }),
+        masterListenerEnabled: () => true
       })
     });
     gateway._reset();
@@ -702,6 +704,134 @@ describe('bridge API: the round trip (#2031)', () => {
       ]) {
         const r = await call(method, apiPath, { headers: asHelper() });
         assert.ok([401, 403].includes(r.status), `${method} ${apiPath} answered ${r.status}`);
+      }
+    });
+
+    it('a credential is taken only from a request made directly from this machine', async () => {
+      const routeId = (await operatorSays(`m${++seq}`, 'hello')).body.routeId;
+      // Through a proxy: the headers one leaves behind are enough to refuse, whatever credential comes with them.
+      for (const proxied of [{ 'x-forwarded-for': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }, { via: '1.1 caddy' }, { 'x-real-ip': '203.0.113.9' }, { 'x-forwarded-proto': 'https' }]) {
+        const asM = await call('GET', '/api/bridge/master/status', { headers: { ...asMaster(), ...proxied } });
+        const asH = await call('POST', '/api/bridge/helper/outbound/claim', { headers: { ...asHelper(), ...proxied }, body: {} });
+        assert.deepEqual([asM.status, asM.body.code, asH.status, asH.body.code], [403, 'LOOPBACK_REQUIRED', 403, 'LOOPBACK_REQUIRED'], Object.keys(proxied)[0]);
+      }
+      // From another machine: judged on the socket, before the credential is looked at.
+      const remote = (address) => ({ socket: { remoteAddress: address }, headers: {} });
+      for (const address of ['203.0.113.9', '10.0.0.5', '::ffff:10.0.0.5', undefined]) {
+        const m = await bridgeApi.handle(bridgeApi.routeFor('GET', '/api/bridge/master/routes/:routeId'), { req: remote(address), headers: asMaster(), params: { routeId } });
+        const h = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/helper/inbound'), { req: remote(address), headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, text: 'x' } });
+        assert.deepEqual([m.status, m.body.code, h.status, h.body.code], [403, 'LOOPBACK_REQUIRED', 403, 'LOOPBACK_REQUIRED'], String(address));
+      }
+      for (const address of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+        const m = await bridgeApi.handle(bridgeApi.routeFor('GET', '/api/bridge/master/status'), { req: remote(address), headers: asMaster() });
+        assert.equal(m.status, 200, address);
+      }
+      assert.ok(bridgeStore.masterCredentials.live(), 'a refused request spends nothing: the credential is still live');
+
+      // `tc` does not send the credential anywhere but this machine in the first place.
+      const away = await tc(['bridge', 'status'], { TANGLECLAW_API: 'http://tc.example.invalid:3102' });
+      assert.deepEqual([away.code, away.stdout], [2, '']);
+      assert.match(away.stderr, /works only against the TangleClaw server on this machine.*The credential was not sent/);
+      assert.ok(!away.stderr.includes(masterCredential));
+    });
+
+    it('a Master that tmux says is gone loses its credential on the spot; an unanswered probe changes nothing', async () => {
+      const master = gateway._deps.master();
+      const withLiveness = (liveness) => { gateway._deps.master = () => ({ ...master, masterLiveness: () => liveness }); };
+      try {
+        withLiveness({ live: false, answered: false, cause: 'tmux did not answer' });
+        assert.equal((await call('GET', '/api/bridge/master/status', { headers: asMaster() })).status, 200, 'tmux not answering is not the Master being gone');
+        assert.ok(bridgeStore.masterCredentials.live());
+
+        withLiveness({ live: false, answered: true, cause: null });
+        const refused = await call('GET', '/api/bridge/master/status', { headers: asMaster() });
+        assert.deepEqual([refused.status, refused.body.code], [401, 'BRIDGE_CREDENTIAL_REQUIRED']);
+        assert.equal(bridgeStore.masterCredentials.live(), null, 'and the credential is revoked');
+        const why = store.getDb().prepare("SELECT revoke_reason FROM bridge_master_credentials WHERE status = 'revoked' ORDER BY generation DESC LIMIT 1").get();
+        assert.equal(why.revoke_reason, 'master-not-live');
+
+        // Even if a Master appears again, that credential is spent: a new Master gets a new one.
+        withLiveness({ live: true, answered: true, cause: null });
+        assert.equal((await call('GET', '/api/bridge/master/status', { headers: asMaster() })).status, 401);
+      } finally {
+        gateway._deps.master = () => master;
+      }
+    });
+
+    it('the bridge is not enabled while the Master could not be told of a message', async () => {
+      const master = gateway._deps.master();
+      try {
+        await asOperator('POST', '/api/bridge/operator/disable');
+        gateway._deps.master = () => ({ ...master, masterListenerEnabled: () => false, getMasterMedusaStatus: () => ({ state: 'off', workspaceId: null }) });
+        const refused = await asOperator('POST', '/api/bridge/operator/enable');
+        assert.deepEqual([refused.status, refused.body.code], [409, 'MASTER_LISTENER_OFF']);
+        assert.equal(bridgeStore.settings.isEnabled(), false);
+        const status = await asOperator('GET', '/api/bridge/operator/status');
+        assert.deepEqual(status.body.masterListener, { enabled: false, state: 'off' });
+
+        gateway._deps.master = () => ({ ...master, getMasterMedusaStatus: () => ({ state: 'listening', workspaceId: 'master-ws' }) });
+        assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
+        const after = await asOperator('GET', '/api/bridge/operator/status');
+        assert.deepEqual(after.body.masterListener, { enabled: true, state: 'listening' });
+        assert.equal(Number.isInteger(after.body.routesMasterNotTold), true);
+      } finally {
+        gateway._deps.master = () => master;
+      }
+    });
+
+    it('preflight answers the helper in yes, no and a closed word, changes nothing, and is asked sparingly', async () => {
+      bridgeApi._resetRateLimits();
+      const ask = (body, headers = { [bridgeApi.HELPER_TOKEN_HEADER]: helperToken }) => call('POST', '/api/bridge/helper/preflight', { headers, body });
+      const nonces = () => store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_nonces').get().n;
+      const audits = () => store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_audit').get().n;
+      const before = [nonces(), audits()];
+
+      const right = await ask(ALLOWED);
+      assert.deepEqual([right.status, right.body], [200, { tokenLive: true, bridgeEnabled: true, allowlistSet: true, allowlistMatch: true, circuit: 'closed' }]);
+      // One answer for all three ids together: it does not say which differs.
+      for (const wrong of [{ ...ALLOWED, authorId: 'someone' }, { ...ALLOWED, channelId: 'elsewhere' }, { authorId: ALLOWED.authorId }, {}]) {
+        assert.equal((await ask(wrong)).body.allowlistMatch, false);
+      }
+      assert.deepEqual([nonces(), audits()], before, 'it takes no nonce and writes nothing');
+      assert.ok(!JSON.stringify(right.body).includes(ALLOWED.channelId), 'and gives back no id');
+
+      // It is the helper's alone, from this machine, and still answers while the bridge is off.
+      assert.equal((await ask(ALLOWED, {})).status, 401);
+      assert.equal((await ask(ALLOWED, asMaster())).status, 401);
+      assert.equal((await ask(ALLOWED, { [bridgeApi.HELPER_TOKEN_HEADER]: helperToken, 'x-forwarded-for': '203.0.113.9' })).body.code, 'LOOPBACK_REQUIRED');
+      await asOperator('POST', '/api/bridge/operator/disable');
+      bridgeApi._resetRateLimits();
+      assert.equal((await ask(ALLOWED)).body.bridgeEnabled, false);
+
+      // Six a minute from one token, then refused.
+      const rest = [];
+      for (let i = 0; i < 6; i++) rest.push((await ask(ALLOWED)).status);
+      assert.deepEqual(rest, [200, 200, 200, 200, 200, 429]);
+      assert.equal((await ask(ALLOWED)).body.code, 'RATE_LIMITED');
+      bridgeApi._resetRateLimits();
+    });
+
+    it('one caller gone wrong cannot flood the bridge: each class of route has a bound', async () => {
+      bridgeApi._resetRateLimits();
+      assert.deepEqual(Object.fromEntries(Object.entries(bridgeApi.RATE_LIMITS).map(([name, limit]) => [name, limit.perMinute])), { helper: 600, preflight: 6, candidate: 12 });
+      for (const entry of bridgeApi.ROUTES) {
+        const expected = entry.path.startsWith('/api/bridge/helper/') ? (entry.path.endsWith('/preflight') ? 'preflight' : 'helper')
+          : (entry.principal === 'session' ? 'candidate' : undefined);
+        assert.equal(entry.rate, expected, `${entry.method} ${entry.path}`);
+      }
+      // The bound is per caller and per minute of the gateway's clock.
+      const realNow = gateway._deps.now;
+      try {
+        let t = Date.now();
+        gateway._deps.now = () => new Date(t).toISOString();
+        const claimOnce = () => call('POST', '/api/bridge/helper/outbound/claim', { headers: asHelper(), body: {} });
+        for (let i = 0; i < 600; i++) await claimOnce();
+        assert.equal((await claimOnce()).status, 429);
+        t += 60001;
+        assert.equal((await claimOnce()).status, 200, 'a minute on, it is admitted again');
+      } finally {
+        gateway._deps.now = realNow;
+        bridgeApi._resetRateLimits();
       }
     });
 

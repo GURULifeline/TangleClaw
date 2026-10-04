@@ -16,7 +16,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The Project Master's bridge credential | Built |
 | Gateway: accept, resolve, dispatch, hold the reply, release | Built |
 | `tc bridge` for the Project Master, routing and answering included | Built |
-| The helper's five routes and its scoped token | Built |
+| The helper's six routes and its scoped token | Built |
 | The operator's policy routes: enable, allowlist, token, aliases, pins | Built |
 | The candidate lane: a session offers, the Master decides | Built |
 | The three typed server notifications | Built |
@@ -84,10 +84,11 @@ route to decide, a route that is the Master's to answer, a reply held for releas
 a route is handed back after a failure. A notice that could not be sent is not recorded as
 given, so the next pass sends it.
 
-**If the Master's Medusa listener is off, nothing nudges it.** The route still waits, the status
-notice still goes to the operator and the gap is logged, but the Master only finds the route by
-running `tc bridge routes`. The Architect ruled on 2026-10-04 that this must be closed, failing
-closed, before cutover; it is not solved here.
+**The Master is told through its Medusa listener, so the bridge is not enabled without one.**
+Enabling is refused `409 MASTER_LISTENER_OFF` while the Master is not a switchboard participant.
+If the listener goes away afterwards, a route still waits and its status notice still fires;
+the operator's status shows whether the Master can be told (`masterListener`) and how many
+routes are waiting on it untold (`routesMasterNotTold`).
 
 ### Sending exactly once
 
@@ -245,7 +246,8 @@ Every write:
 
 | Refusal | Meaning |
 |---|---|
-| `401 BRIDGE_CREDENTIAL_REQUIRED` | The request did not carry the live Master generation's credential. |
+| `403 LOOPBACK_REQUIRED` | The request did not come directly from this machine: it arrived over the network or through a proxy. Judged before the credential is looked at. `tc bridge` does not send the credential to any other host in the first place. |
+| `401 BRIDGE_CREDENTIAL_REQUIRED` | The request did not carry the live Master generation's credential, or tmux says there is no Master: the credential is then revoked on the spot (`master-not-live`). When tmux does not answer, a live Master keeps its credential. |
 | `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route but `status` and `close` answers this. `close` stays available so that turning the bridge off never leaves message text held. |
 | `404 ROUTE_NOT_FOUND` | No such route. |
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
@@ -352,18 +354,21 @@ name or a count the server resolved, never anything a session or the operator ty
 ## The helper's routes
 
 For the chat helper only, authorised by its scoped token in `x-tangleclaw-bridge-helper-token`.
-The token opens these five routes and nothing else; only its SHA-256 is stored. Every write
+The token opens these six routes and nothing else, and only for a request made directly from
+this machine (`403 LOOPBACK_REQUIRED` otherwise); only its SHA-256 is stored. Every write
 also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never used before.
 
 | Route | Does |
 |---|---|
+| `POST /api/bridge/helper/preflight` | `{authorId, spaceId, channelId}`. Reads only, takes no nonce, and answers while the bridge is disabled: `tokenLive`, `bridgeEnabled`, `allowlistSet`, `allowlistMatch` (one answer for all three ids together) and `circuit` (`open` or `closed`). No id, token or text comes back. Six a minute. |
 | `POST /api/bridge/helper/inbound` | Hands over one operator message: `externalId`, `authorId`, `spaceId`, `channelId`, optional `threadId` and `replyToExternalId`, and `text` (at most 8000 characters). `202` when stored, `200` for a replay. |
 | `POST /api/bridge/helper/outbound/claim` | Collects what to post next, oldest first: optional `{limit}`, 1 to 20, 10 by default. Each item comes with the chat context to post it in and a lease. |
 | `POST /api/bridge/helper/outbound/:id/parts` | `{leaseId, partIndex, partCount, externalId}`: one message the chat made for the item, reported as soon as it is made. |
 | `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, parts, partCount}`: the lease the item was claimed under, and the chat's id for every message the item was posted as, in order, with how many there are. It seals the item. Exact: repeating it changes nothing, and a different set is refused. |
 | `POST /api/bridge/helper/outbound/:id/failure` | `{leaseId, reason, parts?, partCount?}`: the helper could not post the item, why, and which parts did post. |
 
-Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
+Refusals: `403 LOOPBACK_REQUIRED`, `429 RATE_LIMITED` (600 requests a minute from one token;
+preflight six), `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
 `413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`, `400 BAD_CLAIM`,
 `400 LEASE_REQUIRED`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`, `400 BAD_PART`,
@@ -541,7 +546,7 @@ audit.
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
-| `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set and a helper token exists. Starts the gateway's listener. |
+| `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set, a helper token exists and the Master is a switchboard participant (`409 MASTER_LISTENER_OFF`). Audited with the signed-in user. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |

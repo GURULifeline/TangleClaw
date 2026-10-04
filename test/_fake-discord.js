@@ -9,7 +9,7 @@ const http = require('node:http');
 
 /**
  * Start a fake Discord REST API.
- * @returns {Promise<{api: string, posts: object[], reactions: string[], script: object[], calls: function(): number, close: function(): Promise<void>}>}
+ * @returns {Promise<{api: string, posts: object[], reactions: string[], script: object[], reads: object, calls: function(): number, close: function(): Promise<void>}>}
  *   `posts` is every message made, in order. `script` is consumed one entry
  *   per POST: `{status, body}` answers without posting, and `{status, lands:
  *   true}` posts and then answers with that status, which is what a timeout
@@ -21,6 +21,7 @@ async function startFakeDiscord() {
   const reactions = [];
   const script = [];
   const byNonce = new Map();
+  const reads = { self: [200, { id: '900000000000000009', bot: true }], channel: null, guildId: '200000000000000002' };
   let postCalls = 0;
   let nextId = 400000000000000000n;
 
@@ -68,12 +69,16 @@ async function startFakeDiscord() {
         return answer(204);
       }
       if (req.method === 'GET' && req.url === '/gateway/bot') return answer(200, { url: 'wss://gateway.fake.invalid' });
+      // The two read-only calls preflight makes. `reads` holds what each answers with.
+      if (req.method === 'GET' && req.url === '/users/@me') return answer(...reads.self);
+      const channel = /^\/channels\/(\d+)$/.exec(req.url);
+      if (req.method === 'GET' && channel) return answer(...(reads.channel || [200, { id: channel[1], guild_id: reads.guildId, type: 0 }]));
       return answer(404, { code: 0 });
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
-    api: `http://127.0.0.1:${server.address().port}`, posts, reactions, script,
+    api: `http://127.0.0.1:${server.address().port}`, posts, reactions, script, reads,
     /** @returns {number} How many times a post was asked for, whatever the answer. */
     calls: () => postCalls,
     close: () => new Promise((resolve) => server.close(resolve))

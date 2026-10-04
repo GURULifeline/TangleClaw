@@ -135,7 +135,8 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       master: () => ({
         masterLiveness: () => ({ live: true, answered: true, cause: null }),
         ensureMasterSession: () => ({ created: false }),
-        getMasterMedusaStatus: () => ({ workspaceId: MASTER_WS })
+        getMasterMedusaStatus: () => ({ workspaceId: MASTER_WS }),
+        masterListenerEnabled: () => true
       }),
       now: () => clock,
       id: (prefix) => `${prefix}_${++n}`
