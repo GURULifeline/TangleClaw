@@ -152,6 +152,36 @@ function atBridge(outboundId) {
 }
 
 /**
+ * Discord asks the helper to slow down, twice: a refusal that posted nothing and that a retry may fix.
+ * @returns {void}
+ */
+function discordBusy() {
+  discord.script.push({ status: 429, body: { retry_after: 0 } }, { status: 429, body: { retry_after: 0 } });
+}
+
+/**
+ * The Project Master decides about an item that was set aside, over its own route.
+ * @param {number} outboundId - The item.
+ * @param {('requeue'|'withdraw')} what - The decision.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+async function masterDecides(outboundId, what) {
+  const res = await fetch(`${origin}/api/bridge/master/outbound/${outboundId}/${what}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-tangleclaw-bridge-credential': masterCredential },
+    body: JSON.stringify({ requestId: `req-${what}-${++seq}-0000` })
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+/**
+ * What the helper posted, apart from the notice that something was set aside.
+ * @returns {object[]}
+ */
+function answersPosted() {
+  return discord.posts.filter((p) => !p.content.endsWith(gateway.BLOCKED_NOTICE));
+}
+
+/**
  * A bridge client whose named method fails once, after the real call has run.
  * @param {string} method - `claim` or `ack`.
  * @param {object} [options]
@@ -430,8 +460,8 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
     it('a helper that restarts part-way through a claim carries on with it', async () => {
       const one = await answered('first');
       const two = await answered('second');
-      // Discord refuses the channel for a moment, and the pass stops with both items in hand.
-      discord.script.push({ status: 403, body: { code: 50013 } });
+      // Discord is busy for a moment, and the pass stops with both items in hand.
+      discordBusy();
       const first = outbound();
       assert.equal((await first.pass()).ok, false);
       assert.deepEqual(discord.posts, []);
@@ -461,30 +491,38 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
     });
 
-    it('past the nonce window an unknown outcome is held for the operator and never retried', async () => {
-      const { outboundId } = await answered('the answer');
+    it('past the nonce window an unknown outcome is held, the bridge sets the item aside, and the operator is told', async () => {
+      const { routeId, outboundId } = await answered('the answer');
       discord.script.push({ status: 502, lands: true });
       const relay = outbound();
       assert.equal((await relay.pass()).ok, false);
 
       clock += NONCE_WINDOW_MS + 1;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 0, held: 1 });
+      assert.equal(relay.state.get(outboundId).status, 'uncertain');
+      assert.deepEqual([atBridge(outboundId)[0], bridgeStore.outbound.get(outboundId).blockCode], ['blocked', 'outcome-unverifiable']);
+      assert.equal(bridgeStore.routes.get(routeId).state, 'released', 'nothing is acknowledged, and the route stays open');
+
+      // The next passes post the notice that something was set aside, and nothing else.
       for (let i = 0; i < 3; i++) {
-        assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 0, held: 1 });
+        await relay.pass();
         clock += bridgeStore.LEASE_MS + 1000;
       }
-      assert.equal(discord.posts.length, 1, 'nothing was posted again, pass after pass');
-      assert.deepEqual(atBridge(outboundId), ['ready', null], 'and nothing was acknowledged');
-      assert.equal(relay.state.get(outboundId).status, 'uncertain');
-      assert.deepEqual(logged().filter((c) => c === 'outbound-uncertain').length, 1);
+      assert.equal(answersPosted().length, 1, 'the answer was not posted again, pass after pass');
+      assert.deepEqual(discord.posts.slice(1).map((p) => p.content), [`**TangleClaw**\n${gateway.BLOCKED_NOTICE}`], 'one notice, once');
+      assert.equal(logged().filter((c) => c === 'outbound-uncertain').length, 1);
 
-      // The operator looks in the channel, sees it, and says so.
+      // The operator looks in the channel, sees it, and says so; the Master puts the item back.
       assert.throws(() => settleHeld(relay.state, outboundId, {}), (err) => err instanceof SettleError && err.code === 'bad-settlement');
       assert.throws(() => settleHeld(relay.state, outboundId, { posted: 'abc' }), { code: 'bad-id' });
       assert.throws(() => settleHeld(relay.state, outboundId + 1000, { repost: true }), { code: 'not-held' });
-      assert.deepEqual(settleHeld(relay.state, outboundId, { posted: discord.posts[0].id }), { part: 2 });
+      assert.deepEqual(settleHeld(relay.state, outboundId, { posted: answersPosted()[0].id }), { part: 2 });
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 0, held: 0 }, 'settled, but still set aside at the bridge');
+      assert.equal((await masterDecides(outboundId, 'requeue')).status, 200);
       assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 1, held: 0 });
-      assert.equal(discord.posts.length, 1);
-      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+      assert.equal(answersPosted().length, 1);
+      assert.deepEqual(atBridge(outboundId), ['delivered', answersPosted()[0].id]);
+      assert.equal(bridgeStore.routes.get(routeId).state, 'closed');
       assert.throws(() => settleHeld(relay.state, outboundId, { repost: true }), { code: 'not-held' }, 'a second settlement changes nothing');
     });
 
@@ -495,47 +533,72 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.equal((await relay.pass()).ok, false);
       clock += NONCE_WINDOW_MS + 1;
       assert.equal((await relay.pass()).held, 1);
-      assert.equal(discord.posts.length, 0);
+      assert.equal(answersPosted().length, 0);
 
       settleHeld(relay.state, outboundId, { repost: true });
-      clock += bridgeStore.LEASE_MS + 1000;
-      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
-      assert.deepEqual(discord.posts.map((p) => p.nonce), [nonceFor(relay.state.salt, outboundId, 0, 1)]);
-      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+      assert.equal((await masterDecides(outboundId, 'requeue')).status, 200);
+      await relay.pass();
+      assert.deepEqual(answersPosted().map((p) => p.nonce), [nonceFor(relay.state.salt, outboundId, 0, 1)]);
+      assert.deepEqual(atBridge(outboundId), ['delivered', answersPosted()[0].id]);
     });
 
-    it('an item Discord rejects is held by itself, and the ones after it keep moving', async () => {
+    it('an item Discord rejects is set aside at the bridge, the ones after it keep moving, and the helper discards nothing', async () => {
       const bad = await answered('the one Discord refuses');
       const good = await answered('the one after it');
       discord.script.push({ status: 400, body: { code: 50035 } });
       const relay = outbound();
-      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 1 });
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
       assert.deepEqual(discord.posts.map((p) => p.content), ['**Project Master**\nthe one after it']);
-      assert.deepEqual([atBridge(bad.outboundId)[0], atBridge(good.outboundId)[0]], ['ready', 'delivered']);
-      assert.equal(relay.state.get(bad.outboundId).status, 'rejected');
-      assert.equal(relay.state.get(bad.outboundId).since, undefined, 'a refusal leaves nothing in doubt');
+      assert.deepEqual([atBridge(bad.outboundId)[0], atBridge(good.outboundId)[0]], ['blocked', 'delivered']);
+      assert.equal(bridgeStore.outbound.get(bad.outboundId).blockCode, 'rejected-by-chat');
+      assert.equal(bridgeStore.outbound.get(bad.outboundId).text, 'the one Discord refuses', 'its text is still held: nothing was discarded');
+      assert.equal(bridgeStore.routes.get(bad.routeId).state, 'released');
+      assert.equal(relay.state.get(bad.outboundId), undefined, 'the helper keeps nothing: the bridge holds the item');
 
-      assert.throws(() => settleHeld(relay.state, bad.outboundId, { posted: '400000000000000999' }), { code: 'wrong-state' },
-        'Discord said it did not post, so it cannot be recorded as posted');
-      settleHeld(relay.state, bad.outboundId, { repost: true });
+      // The operator is told, once; and the item is handed to nobody until someone decides.
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(discord.posts[1].content, `**TangleClaw**\n${gateway.BLOCKED_NOTICE}`);
       clock += bridgeStore.LEASE_MS + 1000;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 0, acked: 0, held: 0 });
+
+      // The Master puts it back, and this time Discord takes it.
+      assert.equal((await masterDecides(bad.outboundId, 'requeue')).status, 200);
       assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
       assert.equal(atBridge(bad.outboundId)[0], 'delivered');
+      assert.equal(discord.posts.length, 3);
     });
 
-    it('a refusal that concerns the whole channel stops the pass and holds nothing', async () => {
+    it('a channel the bot may not post in sets the item aside and stops the pass', async () => {
       const one = await answered('first');
-      await answered('second');
+      const two = await answered('second');
       discord.script.push({ status: 403, body: { code: 50013 } });
       const relay = outbound();
       assert.deepEqual(await relay.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
       assert.deepEqual(discord.posts, [], 'the second was not tried');
-      assert.equal(relay.state.get(one.outboundId).since, undefined, 'Discord did not act, so nothing is in doubt');
+      assert.deepEqual([atBridge(one.outboundId)[0], bridgeStore.outbound.get(one.outboundId).blockCode, atBridge(two.outboundId)[0]],
+        ['blocked', 'chat-configuration', 'ready']);
       assert.deepEqual(codes.filter(([c]) => c === 'outbound-post-failed').map(([, f]) => f.status), [403]);
 
-      assert.deepEqual(await relay.pass(), { ok: true, posted: 2, acked: 2, held: 0 }, 'the next pass carries on with the same claim');
-      assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_outbound_leases').get().n, 2, 'under the leases it already held');
-      assert.deepEqual(discord.posts.map((p) => p.content), ['**Project Master**\nfirst', '**Project Master**\nsecond']);
+      // The channel is put right: the second goes out under the lease it already held, and the notice with it.
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 2, acked: 2, held: 0 });
+      assert.deepEqual(discord.posts.map((p) => p.content), ['**Project Master**\nsecond', `**TangleClaw**\n${gateway.BLOCKED_NOTICE}`]);
+      assert.equal((await masterDecides(one.outboundId, 'requeue')).status, 200);
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(atBridge(one.outboundId)[0], 'delivered');
+    });
+
+    it('a refusal a retry may fix holds nothing and sets nothing aside', async () => {
+      const one = await answered('first');
+      discordBusy();
+      const relay = outbound();
+      assert.deepEqual(await relay.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(atBridge(one.outboundId)[0], 'ready');
+      assert.equal(relay.state.get(one.outboundId).since, undefined, 'Discord did not act, so nothing is in doubt');
+      const reported = store.getDb().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'helper-failure'").all()
+        .map((r) => ({ outcome: r.outcome, ...JSON.parse(r.detail_json) })).filter((r) => r.outboundId === one.outboundId);
+      assert.deepEqual(reported.map((r) => [r.outcome, r.reason]), [['retryable', 'transient']], 'the bridge has it on record all the same');
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 }, 'the next pass carries on with the same claim');
+      assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_outbound_leases').get().n, 1, 'under the lease it already held');
     });
 
     it('a claim whose answer was lost is asked again under its own nonce and gets the same leases', async () => {
@@ -627,27 +690,27 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
     });
 
-    it('stops asking about an item the bridge has settled, whatever became of its lease', async () => {
+    it('stops asking when its lease is no longer its own and the bridge already has every part', async () => {
       const { outboundId } = await answered('the answer');
       const relay = outbound({ bridge: losingOnce('ack') });
       assert.equal((await relay.pass()).ok, false);
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id], 'the bridge has it; the helper does not know');
 
-      // The lease is gone by retention, and the operator has replaced the token.
-      store.getDb().prepare('DELETE FROM bridge_outbound_leases WHERE outbound_id = ?').run(outboundId);
+      // The operator replaces the token. The new one is told only that the lease is not its own.
       helperToken = (await asOperator('POST', '/api/bridge/operator/helper-token')).body.token;
       bridge = createBridgeClient({ origin, token: helperToken });
       const later = outbound();
       codes.length = 0;
-      assert.deepEqual(await later.pass(), { ok: true, posted: 0, acked: 1, held: 0 });
-      assert.deepEqual(later.state.entries(), [], 'the helper lets go of its record');
-      assert.deepEqual(logged(), ['outbound-acked'], 'at once, with no failed attempt first');
+      assert.deepEqual(await later.pass(), { ok: true, posted: 0, acked: 0, held: 0 });
+      assert.deepEqual(codes.filter(([c]) => c.startsWith('outbound')), [['outbound-ack-failed', { outboundId, status: 403 }]]);
+      assert.deepEqual(later.state.entries(), [], 'the bridge holds every part, so the helper\'s record adds nothing and is let go');
       assert.equal(discord.posts.length, 1);
+      assert.deepEqual(await later.pass(), { ok: true, posted: 0, acked: 0, held: 0 }, 'and it does not ask again');
     });
 
     it('drops a claim in progress when the helper token was replaced, and collects under the new one', async () => {
       const { outboundId } = await answered('the answer');
-      discord.script.push({ status: 403, body: { code: 50013 } });
+      discordBusy();
       const before = outbound();
       assert.equal((await before.pass()).ok, false);
       const stale = before.state.claim();
@@ -661,6 +724,69 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
       assert.deepEqual(logged().filter((c) => c === 'claim-failed'), [], 'a nonce that is no longer its own is not a failure to reach the bridge');
       assert.equal(relay.state.claim(), null);
+    });
+
+    it('a helper that lost its own record carries on after the parts the bridge already has, without posting any twice', async () => {
+      const long = Array.from({ length: 150 }, (_, i) => `line ${i} ${'y'.repeat(40)}`).join('\n');
+      const { messageId, outboundId } = await answered(long);
+      // The first part posts and is reported; then Discord is busy and the pass stops.
+      const first = outbound();
+      let posts = 0;
+      const stopsAfterOne = { ...restClient(), createMessage: async (...args) => {
+        if (posts >= 1) { discordBusy(); }
+        posts += 1;
+        return restClient().createMessage(...args);
+      } };
+      const helper = createOutbound({ channelId: IDS.channelId, bridge, rest: stopsAfterOne, state: first.state, log, now: () => clock });
+      assert.deepEqual(await helper.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.posts.length, 1);
+      assert.deepEqual(bridgeStore.parts.forItem(outboundId), [discord.posts[0].id], 'the bridge has the first part already');
+      assert.equal(atBridge(outboundId)[0], 'ready', 'and the item is not delivered on one part');
+
+      // A reply to that one part is known for what it answers, before the item is complete.
+      const early = operatorMessage('wait, what?', { type: 19, message_reference: { message_id: discord.posts[0].id } });
+      assert.equal(await inbound()(early, { selfId: BOT_ID }), 'inbound-accepted');
+      assert.equal(bridgeStore.routes.getByExternalId(early.id).replyContext.outboundId, outboundId);
+
+      // The helper's own record is lost entirely; the lease lapses; a new helper claims the item.
+      fs.rmSync(path.dirname(stateFile), { recursive: true, force: true });
+      clock += bridgeStore.LEASE_MS + 1000;
+      discord.script.length = 0;
+      const fresh = outbound();
+      assert.deepEqual(fresh.state.entries(), []);
+      assert.deepEqual(await fresh.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(discord.posts.map((p) => p.content).join(''), `**Project Master**\n${long}`, 'every part once, in order');
+      assert.deepEqual(bridgeStore.parts.forItem(outboundId), discord.posts.map((p) => p.id));
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+      assert.equal(discord.posts[0].replyTo, messageId);
+      assert.equal(bridgeStore.outbound.get(outboundId).attempts, 2, 'handed over twice');
+    });
+
+    it('a part the helper posted and could not report is reported before anything more is posted', async () => {
+      const long = Array.from({ length: 150 }, (_, i) => `line ${i} ${'y'.repeat(40)}`).join('\n');
+      const { outboundId } = await answered(long);
+      const relay = outbound({ bridge: losingOnce('part', { before: true }) });
+      assert.deepEqual(await relay.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.posts.length, 1);
+      assert.deepEqual(bridgeStore.parts.forItem(outboundId), [], 'the bridge was never told');
+      assert.deepEqual(relay.state.get(outboundId).parts, [discord.posts[0].id], 'the helper\'s own record has it');
+
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(discord.posts.map((p) => p.content).join(''), `**Project Master**\n${long}`, 'the first part was not posted again');
+      assert.deepEqual(bridgeStore.parts.forItem(outboundId), discord.posts.map((p) => p.id));
+    });
+
+    it('when the bridge\'s record of an item disagrees with the helper\'s, the item is set aside and nothing more is posted', async () => {
+      const { outboundId } = await answered('the answer');
+      const relay = outbound({ bridge: losingOnce('part', { before: true }) });
+      assert.equal((await relay.pass()).ok, false);
+      // Something else is recorded as this item's first part meanwhile.
+      bridgeStore.parts.insert(outboundId, 0, 1, '400000000000000999', new Date(clock).toISOString());
+      await relay.pass();
+      assert.deepEqual([atBridge(outboundId)[0], bridgeStore.outbound.get(outboundId).blockCode], ['blocked', 'part-conflict']);
+      assert.equal(answersPosted().length, 1, 'the answer is not posted again, and not sealed on a record that is not the helper\'s');
+      assert.ok(logged().includes('outbound-part-conflict'));
+      assert.deepEqual(relay.state.entries(), [], 'the bridge holds the item now; the helper keeps nothing');
     });
 
     it('lets go of its record when the bridge has let the item go', async () => {

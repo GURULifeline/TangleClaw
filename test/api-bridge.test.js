@@ -187,7 +187,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.equal(audit.length, 1);
     assert.deepEqual([audit[0].actor, audit[0].proof, audit[0].masterGeneration, audit[0].outcome],
       ['master', 'master-launch', generation, 'applied']);
-    assert.deepEqual(audit[0].detail, { from: 'accepted', bodiesCleared: 1 });
+    assert.deepEqual(audit[0].detail, { from: 'accepted', withdrawn: 0, bodiesCleared: 1 });
     assert.equal(bridgeStore.routes.bodies(routeId)[0].text, null);
   });
 

@@ -317,13 +317,18 @@ nothing recorded the fetch. These rulings close it.
 - **One live lease per item.** A lapsed lease returns its item to the next claim.
 - **A claim is token-bound and idempotent on its nonce.** An exact repeat returns the same
   leases and issues nothing; the same nonce with a different request or token conflicts.
-- **An acknowledgement names its lease.** For an item still waiting it is taken only from the
-  token the lease was issued to, inside the lease's window.
-- **What has already become of an item is answered first,** whatever lease is named: a
-  delivered item answers a repeat as a repeat, and one let go is refused for good. (This
-  ordering was the builder's, made in review and put to the Architect for confirmation: such an
-  item is never handed over again and its lease is removed a day after it settles, so an
-  answer that depended on the lease would leave a helper asking for good.)
+- **Every write about an item is bound first.** The active token is authenticated, and the
+  exact token, lease and item binding is checked, before anything about the item is revealed.
+  A caller that does not hold the lease gets the same refusal whether the item is waiting,
+  delivered, set aside or let go: there is no oracle on an item's state. (A first
+  implementation answered the item's state before the lease, so that a helper would not ask
+  forever once its lease was pruned. The Architect rejected that ordering.)
+- **The lease that delivered an item is its receipt.** An exact repeat of an acknowledgement is
+  available only to the same still-authorised token and lease that made it. That lease is kept
+  for as long as the item is, so lease pruning never leaves a valid helper asking forever. A
+  replaced, revoked or other token gets the binding refusal.
+- **A hand-over is counted.** `attempts` rises by one for each lease issued for an item, and
+  never for a claim repeated under its nonce.
 - **A live lease is the one thing that holds an item past its retention limit,** and no lease
   is issued for an item already past it. So an acknowledgement can cross the limit by at most
   the lease window. Without a live lease, being let go stays final.
@@ -346,6 +351,11 @@ have the reply reach the Master as a reply to that milestone.
   id remains the item's reference. A partial or malformed set delivers nothing; an exact repeat
   changes nothing; a different set, or an id the bridge already knows as another message,
   conflicts.
+- **Each part is recorded the moment it is posted,** through a token- and lease-bound,
+  idempotent part receipt, and the acknowledgement seals only a complete ordered set. After a
+  crash, a lapsed lease or a new claim, the claim returns the parts already posted, so the
+  helper resumes with the remaining parts and posts none twice, and a reply to any part already
+  posted resolves durably.
 - **A reply to any mapped message resolves deterministically.** An item with a route keeps the
   existing behaviour: the reply goes where that route went. An item with no route (a milestone,
   another candidate, a notification) sends the reply to the verified Master as an explicitly
@@ -353,11 +363,41 @@ have the reply reach the Master as a reply to that milestone.
   and kind, the message replied to, the item's first message, and the part's index and count.
   It is not unaddressed input, and it neither changes nor re-releases the candidate. A
   reference the bridge does not know stays on the existing unaddressed path.
+- **The resolution is named for what supplied it.** A reply that follows a live route keeps
+  `reply-inheritance`. When the durable record of a posted part supplies the correlation
+  instead (an item with no route, or an answer whose route was legitimately removed), the
+  resolution is `outbound-correlation` and the destination is the verified Master: never the
+  default, never unaddressed, never a session directly.
+- **An explicit `@name` takes precedence only when it resolves to exactly one current
+  destination,** and the Master remains the broker. The reply context is kept either way. A
+  name that is ambiguous, unknown or stale is a typed refusal to resolve
+  (`address-ambiguous`, `address-unresolved`) that waits for the Master; it is never silently
+  diverted or defaulted.
 - **The mapping lasts as long as a reply may arrive,** which is without limit, so it is never
   removed. It holds ids and no text. This is the one record Decision 20's retention does not
   bound, and it is bounded in size by what was posted.
 - **Nothing here gives a session a path to the chat or the chat a path to a session.** The
   reply reaches the Master through the gateway's route, like any other operator message.
+
+### 23. An item the helper cannot post (Architect ruling, 2026-10-04)
+
+- **The helper has no destructive authority.** It cannot discard an item.
+- **It reports a failure,** bound to its token and lease, with a reason from a closed list and
+  the ids of any parts that did post. A transient or unknown failure leaves the item
+  retryable. A permanent or configuration failure **blocks** the item and raises
+  `operator-needed`, until the Master or the operator explicitly requeues or closes it.
+- **A Master close withdraws an undelivered item only when no lease on it is live.** With a
+  live lease the close is refused `OUTBOUND_IN_FLIGHT`, so a close that succeeded cannot race a
+  post already under way. Delivered items are historical and are not unsent.
+- **The helper's lock fails closed.** If the check that a lock's owner is a running helper
+  cannot be made, no second helper starts.
+- **Retention runs on the gateway's first pass, enabled or not,** and is audited: policy expiry
+  is independent of the switch, and a disabled bridge creates no backlog.
+
+The helper's Gateway module is carried over from the helper written for #1799, which never
+merged. It is this project's own prior work, not external code. Every carried line is treated
+as new and untrusted for review, and it inherits no authority from the contract #1799 was
+written against.
 
 ## Records that carry the decision (proposed, not ruled)
 

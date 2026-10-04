@@ -261,6 +261,26 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
       );
       CREATE UNIQUE INDEX idx_bridge_helper_tokens_active ON bridge_helper_tokens(status) WHERE status = 'active';
     `);
+    // The two v52 tables v54 reshapes, put back as v53 had them: no set-aside
+    // state on an item, and no resolution by a posted message's record.
+    const asV53 = {
+      bridge_outbound: (sql) => sql.replace("'ready','blocked','delivered','dropped'", "'ready','delivered','dropped'")
+        .split('\n').filter((line) => !/block_code|An item set aside/.test(line)).join('\n'),
+      bridge_routes: (sql) => sql.replace("'outbound-correlation',", '')
+    };
+    for (const [table, reshape] of Object.entries(asV53)) {
+      const now = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table).sql;
+      const was = reshape(now).replace('CREATE TABLE IF NOT EXISTS', 'CREATE TABLE');
+      assert.notEqual(was, now, `${table} differs between v53 and v54`);
+      assert.ok(!/'blocked'|block_code|outbound-correlation/.test(was), `${table} is back in its v53 shape`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(was);
+    }
+    for (const trigger of bridgeSchema.BRIDGE_SCHEMA_OBJECTS.filter((o) => o.type === 'trigger' && (o.since || 52) > 53)) {
+      db.exec(`DROP TRIGGER IF EXISTS ${trigger.name}`);
+    }
+    // Dropping a table takes its own indexes and triggers with it; put back those v53 had.
+    db.exec(bridgeSchema.bridgeIndexDdl().split(/;\s*\n/).filter((stmt) => !/bridge_outbound_(leases|claims|parts)|bridge_route_reply_context/.test(stmt)).join(';\n'));
     if (populate) populate(db);
     db.exec('DELETE FROM schema_version WHERE version >= 54');
     db.exec('INSERT INTO schema_version (version) VALUES (53)');

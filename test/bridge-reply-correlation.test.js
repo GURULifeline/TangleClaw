@@ -258,7 +258,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
 
       for (const [index, part] of [[0, 'd100'], [1, 'd101'], [2, 'd102']]) {
         const route = await carried(await operatorSays(`m${index}`, 'good, what is next?', { replyToExternalId: part }));
-        assert.deepEqual([route.resolvedBy, route.destination.kind, route.destination.projectId], ['reply-inheritance', 'master', null], part);
+        assert.deepEqual([route.resolvedBy, route.destination.kind, route.destination.projectId], ['outbound-correlation', 'master', null], part);
         assert.deepEqual(route.replyContext, {
           repliedExternalId: part, canonicalExternalId: 'd100', outboundId: id, partIndex: index, partCount: 3,
           kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone'
@@ -278,11 +278,26 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       const plain = await carried(await operatorSays('m1', 'hello'));
       assert.deepEqual([plain.resolvedBy, plain.destination.kind, plain.replyContext], ['pin', 'project', null]);
       const reply = await carried(await operatorSays('m2', 'hello', { replyToExternalId: 'd100' }));
-      assert.deepEqual([reply.resolvedBy, reply.destination.kind, reply.replyContext.candidateId], ['reply-inheritance', 'master', 'c1']);
+      assert.deepEqual([reply.resolvedBy, reply.destination.kind, reply.replyContext.candidateId], ['outbound-correlation', 'master', 'c1']);
 
       // An explicit address still wins, and what the message answers is still on record.
       const addressed = await carried(await operatorSays('m3', '@alpha look at this', { replyToExternalId: 'd100' }));
       assert.deepEqual([addressed.resolvedBy, addressed.destination.projectId, addressed.replyContext.candidateId], ['alias', alpha.project.id, 'c1']);
+    });
+
+    it('an explicit address that names nothing, or more than one thing, is not guessed at: the reply waits for the Master, still knowing what it answers', async () => {
+      hub.liveProject('Alpha', tmpDir);
+      const beta = store.projects.create({ name: 'Beta', path: path.join(tmpDir, 'beta') });
+      bridgeStore.aliases.set('beta', { kind: 'master' }, { at: clock });
+      posted(approvedCandidate('c1'), ['d100']);
+
+      for (const [id, text, code] of [['m1', '@nobody look at this', 'address-unresolved'], ['m2', '@beta look at this', 'address-ambiguous']]) {
+        const route = await carried(await operatorSays(id, text, { replyToExternalId: 'd100' }));
+        assert.deepEqual([route.state, route.failureCode, route.resolvedBy, route.destination], ['awaiting-master', code, null, null], text);
+        assert.equal(route.replyContext.candidateId, 'c1', 'what it answers is kept either way');
+      }
+      assert.deepEqual(hub.fromGateway(), [], 'nothing was sent anywhere on a guess');
+      assert.ok(beta.id);
     });
 
     it('tells the Master what the message answers', async () => {
@@ -379,10 +394,10 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
 
       const late = await carried(await operatorSays('m9', 'about that milestone', { replyToExternalId: 'd201' }));
       assert.deepEqual([late.resolvedBy, late.destination.kind, late.replyContext.candidateId, late.replyContext.candidateKind, late.replyContext.partIndex],
-        ['reply-inheritance', 'master', 'c1', 'milestone', 1]);
+        ['outbound-correlation', 'master', 'c1', 'milestone', 1]);
       // The answer's route is no longer held, so there is nowhere to inherit: the Master gets it, knowing what it answered.
       const stale = await carried(await operatorSays('m10', 'about that answer', { replyToExternalId: 'd101' }));
-      assert.deepEqual([stale.resolvedBy, stale.destination.kind, stale.replyContext.routeId, stale.replyContext.kind], ['reply-inheritance', 'master', routeId, 'reply']);
+      assert.deepEqual([stale.resolvedBy, stale.destination.kind, stale.replyContext.routeId, stale.replyContext.kind], ['outbound-correlation', 'master', routeId, 'reply']);
     });
 
     it('what a message answers leaves with the message\'s own route, and not before', async () => {

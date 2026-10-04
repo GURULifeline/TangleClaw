@@ -16,7 +16,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The Project Master's bridge credential | Built |
 | Gateway: accept, resolve, dispatch, hold the reply, release | Built |
 | `tc bridge` for the Project Master, routing and answering included | Built |
-| The helper's three routes and its scoped token | Built |
+| The helper's five routes and its scoped token | Built |
 | The operator's policy routes: enable, allowlist, token, aliases, pins | Built |
 | The candidate lane: a session offers, the Master decides | Built |
 | The three typed server notifications | Built |
@@ -204,7 +204,10 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge answer <route-id> --version <n> --text "<text>"` | Answers the operator in the Master's own words. `--text-file <file>` reads the answer from a file. |
 | `tc bridge release <route-id> --version <n>` | Sends on, unchanged, the reply the gateway is holding. |
 | `tc bridge pin <route-id> --version <n> --to <dest>` | Pins the route's conversation to a destination. Conversation-scoped only. |
-| `tc bridge close <route-id> --version <n>` | Closes a route and clears its text. |
+| `tc bridge close <route-id> --version <n>` | Closes a route, clears its text and withdraws anything released for it and not yet posted. |
+| `tc bridge blocked` | Lists the items the helper could not post and the bridge set aside, without their text. |
+| `tc bridge requeue <item-id>` | Puts a set-aside item back for the helper. |
+| `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. |
 
 `<dest>` is `master`, a project's exact name or a project's id.
 
@@ -252,6 +255,8 @@ Every write:
 | `400 UNKNOWN_DESTINATION` | The destination is not `master`, a project id or an exact project name. |
 | `400 ANSWER_REQUIRED`, `413 ANSWER_TOO_LONG`, `400 ANSWER_NOT_DISPLAY_SAFE` | The answer is empty, over 8000 characters, or contains control or text-direction characters. |
 | `409 ALREADY_CLOSED` | The route is already closed. |
+| `409 OUTBOUND_IN_FLIGHT` | `close` or `withdraw` while the helper holds the item under a live lease. It may be posting it at this moment, so a close that succeeded could be followed by the post it was meant to prevent. Ask again once the lease has settled: at most two minutes. |
+| `409 NOT_BLOCKED`, `409 NOT_WAITING`, `404 OUTBOUND_NOT_FOUND` | `requeue` on an item that is not set aside; `withdraw` on one already delivered, let go or withdrawn; no such item. |
 
 ## Candidates: what a session may offer
 
@@ -345,21 +350,25 @@ name or a count the server resolved, never anything a session or the operator ty
 ## The helper's routes
 
 For the chat helper only, authorised by its scoped token in `x-tangleclaw-bridge-helper-token`.
-The token opens these three routes and nothing else; only its SHA-256 is stored. Every write
+The token opens these five routes and nothing else; only its SHA-256 is stored. Every write
 also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never used before.
 
 | Route | Does |
 |---|---|
 | `POST /api/bridge/helper/inbound` | Hands over one operator message: `externalId`, `authorId`, `spaceId`, `channelId`, optional `threadId` and `replyToExternalId`, and `text` (at most 8000 characters). `202` when stored, `200` for a replay. |
 | `POST /api/bridge/helper/outbound/claim` | Collects what to post next, oldest first: optional `{limit}`, 1 to 20, 10 by default. Each item comes with the chat context to post it in and a lease. |
-| `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, parts, partCount}`: the lease the item was claimed under, and the chat's id for every message the item was posted as, in order, with how many there are. `{leaseId, deliveredRef}` names a single message. Exact: repeating it changes nothing, and a different set for the same item is refused. |
+| `POST /api/bridge/helper/outbound/:id/parts` | `{leaseId, partIndex, partCount, externalId}`: one message the chat made for the item, reported as soon as it is made. |
+| `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, parts, partCount}`: the lease the item was claimed under, and the chat's id for every message the item was posted as, in order, with how many there are. It seals the item. Exact: repeating it changes nothing, and a different set is refused. |
+| `POST /api/bridge/helper/outbound/:id/failure` | `{leaseId, reason, parts?, partCount?}`: the helper could not post the item, why, and which parts did post. |
 
 Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
-`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`,
-`409 PART_ID_COLLISION`, `400 BAD_CLAIM`, `400 BAD_ACK`,
-`400 LEASE_REQUIRED`, `404 OUTBOUND_NOT_FOUND`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`,
-`409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`.
+`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `409 EXTERNAL_ID_COLLISION`, `400 BAD_CLAIM`,
+`400 LEASE_REQUIRED`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`, `400 BAD_PART`,
+`400 BAD_ACK`, `400 BAD_FAILURE`, `409 PART_MISMATCH`, `409 PART_OUT_OF_ORDER`,
+`409 PART_ID_COLLISION`, `409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `409 OUTBOUND_DELIVERED`,
+`409 OUTBOUND_BLOCKED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
+(an id that could not be an item's).
 
 Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
 in one transaction.
@@ -376,6 +385,8 @@ and when it lapses. The window is two minutes.
 | `digest` | SHA-256 of the text that was handed over. |
 | `leaseId`, `issuedAt`, `expiresAt` | The lease. |
 | `leaseState` | `live`, `used` or `lapsed`. Post an item only while its lease is `live`. |
+| `postedParts`, `partCount` | The chat's id for each part already recorded for the item, in order, and how many parts it has (`null` until one is recorded). Carry on after them. |
+| `attempts` | How many times the item has been handed over: one for each lease ever issued for it. A claim repeated under its nonce hands nothing over and is not counted. |
 
 - **One live lease per item.** An item somebody holds is not handed over again.
 - **A lapsed lease returns its item.** If no acknowledgement arrives inside the window, the
@@ -383,11 +394,14 @@ and when it lapses. The window is two minutes.
   acknowledges nothing: `409 LEASE_LAPSED`.
 - **Bound to the token.** A lease is good only from the helper token it was issued to:
   `403 LEASE_NOT_YOURS`. Replacing or revoking the token lapses everything it held at once.
-- **What became of the item is answered first.** An acknowledgement for an item already
-  delivered is a repeat (or `409 ACK_MISMATCH` for another message id), and for one let go is
-  `410 OUTBOUND_EXPIRED`, whatever lease it names. Neither item will be handed over again, and
-  a lease is removed a day after it settles, so the lease is consulted only for an item still
-  waiting.
+- **The binding is judged before anything is said about the item.** Every write about an item
+  (a part, an acknowledgement, a failure) names a lease. If no such lease exists for that item
+  the answer is `404 LEASE_NOT_FOUND`; if it was issued to another token, `403 LEASE_NOT_YOURS`.
+  Both are the same whether the item is waiting, delivered, set aside, let go, or never
+  existed, so a caller that does not hold the lease learns nothing about the item.
+- **The lease that delivered an item is its receipt.** It is kept as long as the item is, so
+  the helper that made an acknowledgement can always repeat it and learn that it landed. No
+  other lease on that item answers a repeat. A lapsed lease is removed after a day.
 - **A claim is named by its nonce.** Repeating a claim with the same nonce, token and request
   returns the leases it issued the first time, each in its present state, and issues nothing.
   A lease that is no longer live comes back without its text. The same nonce with a different
@@ -397,13 +411,19 @@ and when it lapses. The window is two minutes.
 
 ### What a reply answers
 
-An acknowledgement records **every** message the chat made for an item, by the chat's own id,
-against that item: its position, how many there were, and what the item was (its kind, and its
-route, candidate and type where it has them). That description is taken from the item, never
-from the helper. The first message's id stays the item's reference.
+The bridge records **every** message the chat made for an item, by the chat's own id, against
+that item: its position, how many there are, and what the item was (its kind, and its route,
+candidate and type where it has them). That description is taken from the item, never from the
+helper. The first message's id stays the item's reference.
 
-- The set must be whole: `partCount` ids, each a chat id, none twice, at most 32. Anything else
-  is `400 BAD_ACK` and delivers nothing.
+- **Each part is recorded as soon as it is posted,** through `.../parts`. From that moment a
+  reply to it is known for what it answers, and a later claim of the item says the part is
+  already posted. Parts are recorded in order. Repeating one exactly changes nothing; a
+  different message for a part already recorded, or a different count, is `409 PART_MISMATCH`;
+  a part ahead of the next one is `409 PART_OUT_OF_ORDER`.
+- **The acknowledgement seals the whole set.** `partCount` ids, each a chat id, none twice, at
+  most 32, agreeing with every part already recorded. A malformed set is `400 BAD_ACK`; one
+  that disagrees with the record is `409 PART_MISMATCH`. Neither delivers anything.
 - An id the bridge already knows, as a part of another item or as a message the operator sent,
   is `409 PART_ID_COLLISION`. An operator message carrying a posted message's id is
   `409 EXTERNAL_ID_COLLISION`.
@@ -418,14 +438,45 @@ such record and is handled as before.
 |---|---|---|
 | The operator's own earlier message | That message's destination | Reply inheritance, as before. |
 | Any part of an answer whose route is still held | That route's destination | Reply inheritance. Any part, not only the first. |
-| Any part of a milestone, another candidate or a notification | The Project Master | The item has no route. The Master reads the route and sees what it answers. A conversation pin does not divert it. |
-| Any part of an answer whose route has since been removed | The Project Master | There is nowhere left to inherit; what it answered is still on record. |
+| Any part of a milestone, another candidate or a notification | The Project Master, resolved by `outbound-correlation` | The item has no route: the durable record of the posted message supplies the correlation. The Master reads the route and sees what it answers. A conversation pin does not divert it. |
+| Any part of an answer whose route has since been removed | The Project Master, resolved by `outbound-correlation` | There is nowhere left to inherit; what it answered is still on record. |
 | A message the bridge does not know | Resolved as an unaddressed message | Nothing is invented about what it answers. |
 
-A leading `@name` still wins over all of these, and what the message answers is recorded all
-the same. A reply changes nothing about the candidate it answers and releases nothing again.
+A leading `@name` still wins over all of these when it names exactly one current destination,
+and what the message answers is recorded all the same. An `@name` that names nothing, or more
+than one thing, is never guessed at: the route waits for the Master with `address-unresolved`
+or `address-ambiguous`, still knowing what it answers. A reply changes nothing about the candidate it answers and releases nothing again.
 `tc bridge read <route-id>` shows what a route answers, and the Master's notice says so in
 fixed words.
+
+### When the helper cannot post an item
+
+The helper discards nothing. What it cannot post it reports through `.../failure`, with a
+reason from a closed list and the parts that did post. Any other reason is `400 BAD_FAILURE`.
+
+| Reason | Kind | What the bridge does |
+|---|---|---|
+| `transient` | A retry may fix it | Records it. The item stays waiting under its lease. |
+| `outcome-unknown` | A retry may fix it | The same. The helper retries under the same chat nonce. |
+| `rejected-by-chat` | A retry will not | Sets the item aside. |
+| `chat-configuration` | A retry will not | Sets the item aside. The bot may not post in the channel. |
+| `outcome-unverifiable` | A retry will not | Sets the item aside. A post may have landed and can no longer be checked. |
+| `part-conflict` | A retry will not | Sets the item aside. The bridge's record of its parts and the helper's disagree. |
+
+An item **set aside** (`blocked`) keeps its text and is handed to nobody. The lease it was held
+under is settled. The bridge raises one `operator-needed` notice, a fixed sentence, for each
+time an item is set aside. That notice is never itself set aside: a helper that cannot post it
+keeps trying.
+
+Only the Project Master or the signed-in operator decides what happens next:
+
+- **Requeue** puts the item back. The next claim hands it over with the parts already posted.
+- **Withdraw** lets it go for good and drops its text. An item is withdrawn only when no helper
+  holds it: with a live lease the answer is `409 OUTBOUND_IN_FLIGHT`.
+
+Closing a route withdraws everything released for it and not yet posted, under the same rule.
+What was delivered is history and is not unsent. An item set aside still has its retention
+limit and is let go when it passes.
 
 `OUTBOUND_NOT_READY` is retired. An item is waiting, delivered or let go, and each of the last
 two has its own answer, so no request could ever have reached that refusal.
@@ -446,6 +497,7 @@ audit.
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
 | `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set and a helper token exists. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
+| `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
 | `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. |
 | `POST /api/bridge/operator/pins`, `DELETE .../pins/:pinId` | Sets a pin for one conversation, or for every conversation when no `conversationKey` is given; revokes any active pin, the Master's included. |
 
@@ -463,9 +515,10 @@ The v53 shape is a superset of v52's: a server from before v53 that meets a v53 
 accepts it.
 
 Schema v54 added `bridge_outbound_claims`, `bridge_outbound_leases`, `bridge_outbound_parts`
-and `bridge_route_reply_context`, and a CHECK on
-`bridge_helper_tokens` tying a revoked token to the time it was revoked. That one table is
-rebuilt with its rows carried over, after the store is proven a sound v53 store. A v53 store
+and `bridge_route_reply_context`, the `blocked` state and its reason on `bridge_outbound`, the
+`outbound-correlation` resolution on `bridge_routes`, and a CHECK on
+`bridge_helper_tokens` tying a revoked token to the time it was revoked. Those three tables are
+rebuilt with their rows and row ids carried over, after the store is proven a sound v53 store. A v53 store
 holding a token marked revoked with no time recorded is refused, and left at v53 untouched. The
 v54 shape is a superset of v53's.
 
@@ -476,7 +529,7 @@ v54 shape is a superset of v53's.
 | `bridge_helper_tokens` | The chat helper's scoped token, hash only. |
 | `bridge_nonces` | Request nonces already seen from the helper. |
 | `bridge_outbound_claims` | Each claim the helper made: its nonce, the token and a digest of what was asked. Never updated. |
-| `bridge_outbound_parts` | Every message the chat confirmed, by the chat's own id: the item it is a part of, its position, and what the item was. Never updated, and never removed. |
+| `bridge_outbound_parts` | Every message the chat confirmed, recorded as it is reported, by the chat's own id: the item it is a part of, its position, and what the item was. Never updated, and never removed. |
 | `bridge_route_reply_context` | For an inbound message that replies to a recorded message, which one. Fixed at acceptance; leaves with its route. |
 | `bridge_outbound_leases` | The lease each item was handed over under. What it was issued for never changes; its state settles once, to `used` or `lapsed`. At most one live lease per item. |
 | `bridge_routes` | One row per inbound operator message, unique on the chat's own message id. A replay of the same message returns the same route; the same id with a different body or chat context is refused. |
@@ -505,7 +558,8 @@ starts, before any helper request is heard. Revoked pins and helper tokens leave
 |---|---|
 | Message text | Until confirmed delivery or close. Not by age. |
 | Helper nonces | 24 hours |
-| A used or lapsed lease, and a claim with no lease left | 24 hours after settling |
+| A lapsed lease, and a claim with no lease left | 24 hours after settling |
+| The lease an item was delivered under | With the item: it is the receipt of the delivery |
 | The record of which posted message belonged to which item | Never removed. It holds ids and no text. |
 | What an inbound message answers | With that message's own route |
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |

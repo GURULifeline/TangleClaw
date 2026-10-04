@@ -174,7 +174,7 @@ describe('bridge helper: its commands (#2031)', () => {
     assert.equal(await main(['status'], env()), EXIT.ok);
     assert.ok(out.includes('helper: not running'));
     const state = openState(paths(home).state);
-    state.set(12, { status: 'rejected', parts: [], round: 0 });
+    state.set(12, { status: 'uncertain', parts: [], round: 0, since: 1 });
     assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242 })), EXIT.ok, 'the stale lock is taken over');
   });
 
@@ -218,7 +218,7 @@ describe('bridge helper: its commands (#2031)', () => {
     keychain.set('bot', BOT_TOKEN).set('helper', HELPER_TOKEN);
     const state = openState(paths(home).state);
     state.set(12, { status: 'uncertain', parts: ['400000000000000001'], round: 0, since: 1 });
-    state.set(15, { status: 'rejected', parts: [], round: 0 });
+    state.set(15, { status: 'posting', parts: [], round: 0 });
     state.set(16, { status: 'posted', parts: ['400000000000000002'], round: 0 });
     const running = { isAlive: () => true };
     fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
@@ -231,9 +231,8 @@ describe('bridge helper: its commands (#2031)', () => {
       `helper: running (pid ${process.pid})`,
       'gateway: fatal (close code 4014)',
       'last pass: 2026-10-04T00:00:00.000Z, failed; backing off',
-      'in progress: 1 item posting or awaiting acknowledgement',
-      'item 12: uncertain, part 2 (settle it: see docs/operator-bridge-helper.md)',
-      'item 15: rejected, part 1 (settle it: see docs/operator-bridge-helper.md)'
+      'in progress: 2 items posting or awaiting acknowledgement',
+      'item 12: uncertain, part 2 (settle it: see docs/operator-bridge-helper.md)'
     ]);
     for (const secret of [BOT_TOKEN, HELPER_TOKEN, ...Object.values(IDS), '400000000000000001']) assert.ok(!printed().includes(secret));
   });
@@ -241,26 +240,29 @@ describe('bridge helper: its commands (#2031)', () => {
   it('settle records what the operator saw, only with the helper stopped, and refuses what is not true of the item', async () => {
     const state = openState(paths(home).state);
     state.set(12, { status: 'uncertain', parts: [], round: 0, since: 1 });
-    state.set(15, { status: 'rejected', parts: [], round: 0 });
+    state.set(15, { status: 'uncertain', parts: ['400000000000000009'], round: 2, since: 1 });
+    state.set(16, { status: 'posting', parts: [], round: 0 });
 
     fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
     assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242, isAlive: () => true })), EXIT.failed);
     assert.equal(err.at(-1), 'Nothing settled: stop the helper first.');
     fs.rmSync(paths(home).lock);
 
-    assert.equal(await main(['settle', '15', '--posted', '400000000000000003'], env()), EXIT.failed);
-    assert.match(err.at(-1), /^Nothing settled: Discord rejected that item/);
+    assert.equal(await main(['settle', '16', '--repost'], env()), EXIT.failed, 'an item that is merely in progress is not the operator\'s to settle');
+    assert.equal(err.at(-1), 'Nothing settled: that item is not held.');
+    assert.equal(await main(['settle', '15', '--posted', '400000000000000009'], env()), EXIT.failed);
+    assert.equal(err.at(-1), 'Nothing settled: that message id is already recorded for an earlier part.');
     assert.equal(await main(['settle', '12', '--posted', '400000000000000003', '--repost'], env()), EXIT.usage);
     assert.equal(await main(['settle', '99', '--repost'], env()), EXIT.failed);
     assert.equal(err.at(-1), 'Nothing settled: that item is not held.');
     for (const args of [['settle'], ['settle', 'twelve', '--repost'], ['settle', '12', '--discard']]) assert.equal(await main(args, env()), EXIT.usage);
 
     assert.equal(await main(['settle', '12', '--posted', '400000000000000003'], env()), EXIT.ok);
-    assert.deepEqual(out, ['Settled. Item 12 carries on from part 2 when the helper next runs.']);
+    assert.deepEqual(out, ['Settled. Item 12 carries on from part 2 once the Project Master has put it back (tc bridge requeue 12).']);
     assert.equal(await main(['settle', '15', '--repost'], env()), EXIT.ok);
     const after = openState(paths(home).state);
     assert.deepEqual(after.get(12), { status: 'posting', parts: ['400000000000000003'], round: 0 });
-    assert.deepEqual(after.get(15), { status: 'posting', parts: [], round: 1 });
+    assert.deepEqual(after.get(15), { status: 'posting', parts: ['400000000000000009'], round: 3 });
     assert.equal(fs.existsSync(paths(home).lock), false, 'the lock is given back');
   });
 

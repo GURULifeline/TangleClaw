@@ -221,7 +221,7 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
       [ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-1'), 404, 'LEASE_NOT_FOUND'],
       [ack({ outboundId: a, leaseId: second.leaseId }, 'posted-1'), 404, 'LEASE_NOT_FOUND'],
       [ack(first, 'posted-1', { tokenId: 'bht_another' }), 403, 'LEASE_NOT_YOURS'],
-      [ack({ outboundId: 9999, leaseId: first.leaseId }, 'posted-1'), 404, 'OUTBOUND_NOT_FOUND']
+      [ack({ outboundId: 9999, leaseId: first.leaseId }, 'posted-1'), 404, 'LEASE_NOT_FOUND']
     ];
     for (const [result, status, code] of refusals) assert.deepEqual([result.status, result.body.code], [status, code]);
     assert.deepEqual([bridgeStore.outbound.get(a).state, bridgeStore.outbound.get(b).state], ['ready', 'ready'], 'none of them delivered anything');
@@ -229,12 +229,19 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
 
     assert.deepEqual([ack(first, 'posted-1').body.replayed, ack(first, 'posted-1').body.replayed], [false, true]);
     assert.equal(ack(first, 'posted-2').body.code, 'ACK_MISMATCH');
-    // What became of the item is answered before the lease is looked at: it
-    // will never be handed over again, and its lease is removed a day later.
-    assert.equal(ack(first, 'posted-1', { tokenId: 'bht_another' }).body.replayed, true);
-    assert.equal(ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-1').body.replayed, true);
-    assert.equal(ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-2').body.code, 'ACK_MISMATCH');
-    assert.equal(ack(second, 'posted-b', { tokenId: 'bht_another' }).body.code, 'LEASE_NOT_YOURS', 'an item still waiting is the lease holder\'s alone');
+    // The binding is judged before anything about the item is said. Whoever
+    // does not hold the lease that delivered it gets the same refusal for a
+    // delivered item as for a waiting one, and learns nothing from it.
+    const forDelivered = [
+      ack(first, 'posted-1', { tokenId: 'bht_another' }), ack(first, 'posted-2', { tokenId: 'bht_another' }),
+      ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-1'), ack({ outboundId: a, leaseId: second.leaseId }, 'posted-1')
+    ];
+    const forWaiting = [
+      ack(second, 'posted-b', { tokenId: 'bht_another' }), ack(second, 'posted-x', { tokenId: 'bht_another' }),
+      ack({ outboundId: b, leaseId: 'bol_nosuchlease00000000000' }, 'posted-b'), ack({ outboundId: b, leaseId: first.leaseId }, 'posted-b')
+    ];
+    assert.deepEqual(forDelivered.map((r) => [r.status, r.body]), forWaiting.map((r) => [r.status, r.body]), 'the refusal is the same either way');
+    assert.deepEqual(forDelivered.map((r) => r.body.code), ['LEASE_NOT_YOURS', 'LEASE_NOT_YOURS', 'LEASE_NOT_FOUND', 'LEASE_NOT_FOUND']);
   });
 
   it('a live lease carries an item across its limit; without one the limit is final', () => {
@@ -312,23 +319,36 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
     assert.equal(delivered.detail.leaseId, again.leaseId, 'the record names the lease it was delivered under');
   });
 
-  it('retention removes a settled lease and its claim after a day, and never a live one', () => {
+  it('retention removes a lapsed lease after a day; the lease an item was delivered under stays as long as the item', () => {
     const [a, b] = [waiting('a', 'operator-needed'), waiting('b', 'operator-needed')];
-    const [first] = claim({ limit: 1 }).body.items;
+    const [first, other] = claim().body.items;
     assert.equal(ack(first, 'posted-a').status, 200);
-    const count = (table) => store.getDb().prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    const states = (id) => leasesOf(id).map((l) => l[0]);
 
-    assert.deepEqual([bridgeStore.prune({ now: at(DAY) }).leases, count('bridge_outbound_leases')], [0, 1], 'at exactly a day it stays');
-    // A second claim, a day and a bit later, whose lease is live when retention runs.
-    clockAt(DAY + 1);
+    clockAt(LEASE + 1);
+    assert.equal(bridgeStore.leases.lapse({ at: at(LEASE + 1) }), 1);
+    assert.deepEqual([states(a), states(b)], [['used'], ['lapsed']]);
+    assert.equal(bridgeStore.prune({ now: at(DAY) }).leases, 0, 'inside a day both stay');
+    assert.equal(bridgeStore.prune({ now: at(2 * DAY) }).leases, 1);
+    assert.deepEqual([states(a), states(b)], [['used'], []], 'the lapsed one leaves; the receipt of a delivery does not');
+
+    // Days later the helper that made the acknowledgement can still learn that it landed.
+    clockAt(10 * DAY);
+    assert.equal(ack(first, 'posted-a').body.replayed, true);
+    assert.equal(ack(first, 'posted-z').body.code, 'ACK_MISMATCH');
+    assert.equal(ack(other, 'posted-b').body.code, 'LEASE_NOT_FOUND', 'a lapsed lease is forgotten after a day, and nothing is said about its item');
+
+    // A lease that is live when retention runs is never removed, whatever its age.
+    const c = waiting('c', 'operator-needed');
+    store.getDb().prepare('UPDATE bridge_outbound SET created_at = ? WHERE outbound_id = ?').run(at(10 * DAY), c);
     const [live] = claim().body.items;
-    assert.equal(live.outboundId, b);
-    const removed = bridgeStore.prune({ now: at(DAY + 2) });
-    assert.deepEqual([removed.leases, removed.claims], [1, 1]);
-    assert.deepEqual(leasesOf(a), []);
-    assert.deepEqual(leasesOf(b), [['live', helper.tokenId]]);
-    assert.equal(count('bridge_outbound_claims'), 1, 'the claim a remaining lease was issued under stays with it');
-    assert.equal(bridgeStore.prune({ now: at(400 * DAY) }).leases, 0, 'a live lease is never removed, whatever its age');
+    assert.equal(live.outboundId, c);
+    assert.equal(bridgeStore.prune({ now: at(400 * DAY) }).leases, 0);
+    assert.deepEqual(states(c), ['live']);
+
+    // The receipt leaves with its item, and the claim once no lease of it is left.
+    assert.deepEqual(states(a), [], 'thirty days after delivery the item is removed, and its lease with it');
+    assert.equal(bridgeStore.outbound.get(a), null);
   });
 
   it('retention runs before any helper is heard from, and with the bridge off', async () => {

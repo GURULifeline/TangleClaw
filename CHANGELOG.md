@@ -15,27 +15,30 @@ All notable changes to TangleClaw are documented in this file.
 - **The operator bridge has its Discord helper** (#2031, ADR 0023). `bin/tc-bridge-helper` is built and tested against the real bridge routes and a stand-in for Discord. It has not been run against Discord, nothing installs it, and the bridge is still off by default: Rule #145's interim procedure remains the only Discord path. `docs/operator-bridge-helper.md` has setup, operation and removal.
   - **In.** It listens to one channel over the Gateway and hands over only the allowlisted author's messages, judged on ids before the text is read. The bridge checks the same three ids again.
   - **Out.** It claims what the Master released, posts it to its one configured channel, and acknowledges under the item's lease only after Discord confirms the post.
-  - **Never twice.** An owner-only local record and a per-post nonce make a lost acknowledgement, a lapsed lease, a restart and a lost claim safe. A post whose outcome cannot be known is held for the operator, not retried.
+  - **Never twice.** The bridge's record of the parts already posted, an owner-only local record and a per-post nonce make a lost acknowledgement, a lapsed lease, a restart and a lost claim safe. A post whose outcome cannot be known is held for the operator, not retried.
   - **Secrets.** The bot token and the helper token live only in the Keychain and are stored from standard input. Neither is in a command line, an environment variable, a file or a log.
   - **No redirects.** Neither client follows one, so neither token reaches a host that was not configured. Plain `http` is accepted for this machine only.
   - **launchd.** `install-launchd` writes a job that carries paths and a label only.
-  - **Known gap.** The helper cannot discard an item Discord rejects, and closing a route does not withdraw a released answer. Such an item stays held and is never posted.
 
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
-  - **Every posted message is recorded.** An acknowledgement now reports the chat's id for every message an item was posted as, in order, with the count. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.
-  - **A reply to any part resolves.** A reply to an answer goes where that answer's route went, from any part and not only the first. A reply to a milestone or a notification, which has no route, goes to the Project Master as a reply to that item: what it answers is fixed on the route and shown by `tc bridge read`. It is not handled as an unaddressed message and changes nothing about the candidate.
+  - **Every posted message is recorded, as it is posted.** The helper reports each message the chat makes for an item straight away, and the acknowledgement seals the complete ordered set. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.
+  - **A reply to any part resolves.** A reply to an answer goes where that answer's route went, from any part and not only the first. A reply to a milestone or a notification, which has no route, goes to the Project Master as a reply to that item, resolved by `outbound-correlation`: what it answers is fixed on the route and shown by `tc bridge read`. It is not handled as an unaddressed message and changes nothing about the candidate.
+  - **Resume without duplicates.** A claim says which parts of an item are already posted, so a helper that restarted, lost its record or picked the item up after a lapsed lease carries on after them.
   - **The record is not removed.** It holds ids and no text, and a reply can arrive at any time.
-  - Schema v54 also carries `bridge_outbound_parts` and `bridge_route_reply_context`.
 
-- **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023). Still off by default. `docs/operator-bridge.md` has the detail.
+- **What the helper cannot post is set aside, not discarded** (#2031, ADR 0023 Decision 23). Still off by default.
+  - **A typed failure report.** The helper reports why an item could not be posted, from a closed list, with the parts that did post. A failure a retry may fix leaves the item waiting. One it will not sets the item aside and raises one `operator-needed` notice.
+  - **The Master or the operator decides.** `tc bridge blocked` lists what was set aside; `tc bridge requeue <item-id>` puts one back and `tc bridge withdraw <item-id>` gives it up. The operator has the same two decisions from a signed-in session. The helper has neither.
+  - **Closing a route withdraws its unposted answer,** unless the helper holds it at that moment: then the close is refused `OUTBOUND_IN_FLIGHT` and can be asked again once the lease settles. What was delivered is not unsent.
+
+- **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023 Decision 21). Still off by default. `docs/operator-bridge.md` has the detail.
   - **Claim, not read.** `GET /api/bridge/helper/outbound` is replaced by `POST /api/bridge/helper/outbound/claim`. Each item is handed over under a two-minute lease bound to the helper token that claimed it. An item holds one live lease at a time, and one whose lease lapses is handed over again.
   - **A claim is named by its nonce.** Repeating it exactly returns the same leases and issues nothing. The same nonce with a different request or token is refused.
-  - **An acknowledgement names its lease.** It is taken only from the token the lease was issued to and inside its window. Replacing or revoking the helper token lapses what it held at once.
+  - **Bound before anything is said.** Every write about an item is checked against its lease and token first. A caller that does not hold the lease gets the same refusal whatever became of the item.
+  - **The lease that delivered an item is its receipt,** kept as long as the item, so the helper that acknowledged can always learn it landed. Replacing or revoking the helper token lapses what it held at once.
   - **Across the retention limit.** An item with a live lease is not let go, so an acknowledgement can cross the limit by at most the lease window. Without one, being let go stays final: `410 OUTBOUND_EXPIRED`.
-  - **Schema v54.** Adds `bridge_outbound_claims` and `bridge_outbound_leases`, and a CHECK tying a revoked helper token to the time it was revoked. The migration first proves the store is a sound v53 store.
+  - **Schema v54.** Adds the claim, lease, posted-part and reply-context tables, the set-aside state on an item, the `outbound-correlation` resolution, and a CHECK tying a revoked helper token to the time it was revoked. The migration first proves the store is a sound v53 store.
   - `OUTBOUND_NOT_READY` is retired: no request could reach it.
-  - **What became of an item is answered before its lease is looked at.** An acknowledgement for an item already delivered is a repeat, and for one let go is refused for good, whatever lease it names.
-  - ADR 0023 records the claim and lease rulings as Decision 21.
 
 - **Sessions can offer the Master news for the operator, and the bridge has its three server notifications** (#2031, ADR 0023). Still off by default, with no Discord helper built. `docs/operator-bridge.md` has the detail.
   - **Candidates.** `tc candidate submit` lets any verified session offer the Project Master a milestone or an operator action, resting on its own workload receipts. A session cannot post: the Master approves, rejects or merges through `tc bridge`, and only an approval creates something for the operator. Each receipt is verified when the candidate is offered and again when it is approved, by a digest of the stored row.

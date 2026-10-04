@@ -983,7 +983,7 @@ describe('bridge gateway (#2031)', () => {
       const [item] = helperClaims().body.items;
       assert.deepEqual([helperAcks(item, 'posted-1').body.replayed, helperAcks(item, 'posted-1').body.replayed], [false, true]);
       assert.equal(helperAcks(item, 'posted-2').body.code, 'ACK_MISMATCH');
-      assert.equal(helperAcks({ ...item, outboundId: 9999 }, 'posted-1').body.code, 'OUTBOUND_NOT_FOUND');
+      assert.equal(helperAcks({ ...item, outboundId: 9999 }, 'posted-1').body.code, 'LEASE_NOT_FOUND', 'a lease that is not that item\'s says nothing about the item');
       assert.equal(helperAcks(item, 'bad ref!').body.code, 'BAD_ACK');
       assert.deepEqual(waitingForHelper(), []);
       assert.equal(bridgeStore.outbound.get(item.outboundId).text, null, 'the text is dropped once the chat has it');

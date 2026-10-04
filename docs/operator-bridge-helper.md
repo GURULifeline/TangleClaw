@@ -8,7 +8,7 @@ The helper is a small local process, `bin/tc-bridge-helper`, that sits between D
 - **TangleClaw to Discord:** it claims what the bridge has released for the operator, posts it
   in that channel, and acknowledges each item once Discord confirms the post.
 
-It talks to TangleClaw through the bridge's three helper routes and nothing else. No session
+It talks to TangleClaw through the bridge's five helper routes and nothing else. No session
 has a path to Discord: an answer reaches the helper only after the Project Master releases it.
 
 ## Status
@@ -135,71 +135,86 @@ posts in progress. Then have the operator revoke the helper token at the bridge.
 ## How an item is delivered
 
 The helper **claims** what waits at the bridge. Each item comes under a two-minute lease
-([operator-bridge.md](operator-bridge.md), "Claims and leases"). The helper posts the item and
-acknowledges it under that lease, with Discord's id for the post. Nothing is acknowledged
-before Discord has confirmed it.
+([operator-bridge.md](operator-bridge.md), "Claims and leases"), and with the parts of it that
+are already posted, if an earlier attempt got part-way.
 
 Before posting, the helper checks the item's text against the digest it was handed over with,
 and the channel it names against the configured one.
 
 An item is posted as **who it is from**, in bold, then the text as written. An answer is posted
 as a reply to the operator's message. Text longer than one Discord message is posted as several,
-in order, and acknowledged with every part's id, so the bridge knows what a reply to any of
-them answers.
+in order.
 
-A lease does not make a post safe to repeat. Two things do: the helper's own record,
-`~/.tangleclaw/bridge-helper/state.json`, and the nonce each post carries, which Discord uses
+The helper tells the bridge about **each message as soon as Discord has made it**, and then
+acknowledges the whole set, which seals the item. Nothing is acknowledged before Discord has
+confirmed it. Because each part is reported at once, a reply to any part is known for what it
+answers straight away, and whoever picks the item up next carries on after the parts already
+posted.
+
+A lease does not make a post safe to repeat. Three things do, together: the bridge's record of
+the parts already posted; the helper's own record, `~/.tangleclaw/bridge-helper/state.json`,
+for an attempt whose outcome is in doubt; and the nonce each post carries, which Discord uses
 to refuse a repeat for a few minutes.
 
 | What goes wrong | What happens |
 |---|---|
-| Discord or the network is down | Nothing is acknowledged. The item waits at the bridge and is posted when Discord answers. The helper backs off, to at most once every 5 minutes. |
-| The helper posts, then cannot acknowledge | The post is on record. The helper acknowledges it on a later pass and never posts it again. |
-| The lease lapses between the post and the acknowledgement | The bridge hands the item over again under a new lease. The helper acknowledges it under that one, without posting. |
-| The helper restarts part-way through | Its record names the claim it was working on. It asks the bridge for that same claim again, gets the same leases, and carries on. |
-| A claim's answer is lost | The same: the claim is asked again under its own nonce. |
-| A post's outcome is unknown (a timeout, a server error) | The helper retries with the same nonce for up to 2 minutes, and Discord returns the message it already made. |
-| Past those 2 minutes | A retry could duplicate the post, so the item is held as `uncertain`. It is never reposted or acknowledged by itself. |
-| Discord rejects the item's content (HTTP 400) | That item is held as `rejected`, and the ones after it keep moving. |
-| Discord refuses for another reason (permissions, a rate limit) | The pass stops and the helper backs off. Nothing is held. |
-| The bridge let the item go before the acknowledgement arrived | The helper drops its record and stops trying. The post stays in the channel. |
-| The bridge already has the item as delivered | The acknowledgement is a repeat. The helper drops its record. |
+| Discord is busy, or the network is down | Nothing is acknowledged. The helper reports it as `transient`, backs off (to at most once every 5 minutes) and tries again. The item waits. |
+| The helper posts, then cannot report or acknowledge | The post is on the helper's record. It reports and acknowledges on a later pass and never posts it again. |
+| The lease lapses part-way through | The bridge hands the item over again with the parts already posted. The helper carries on after them. |
+| The helper restarts, or loses its own record | The same: the bridge says which parts are posted. A restart also asks for the claim it was working on again, under its own nonce, and gets the same leases. |
+| A claim's answer is lost | The claim is asked again under its own nonce. |
+| A post's outcome is unknown (a timeout, a server error) | The helper reports `outcome-unknown` and retries with the same nonce for up to 2 minutes; Discord returns the message it already made. |
+| Past those 2 minutes | A retry could duplicate the post, so the helper holds the item as `uncertain` and reports `outcome-unverifiable`. The bridge sets the item aside and tells you. |
+| Discord rejects the item's content (HTTP 400) | The helper reports `rejected-by-chat`. The bridge sets the item aside and tells you. The items after it keep moving. |
+| The bot may not post in the channel (401, 403, 404) | The helper reports `chat-configuration`, the bridge sets that item aside and tells you, and the pass stops. Until the channel is put right, each pass sets one more item aside. |
+| The bridge's record of an item's parts disagrees with the helper's | The helper reports `part-conflict` and posts nothing more of it. The bridge sets it aside. |
+| The helper token was replaced | The old token's leases are no longer the helper's, and the bridge says nothing about their items. Items still waiting are handed to the new token with their parts. |
+| The bridge let the item go, or the Master withdrew it | The helper drops its record and stops trying. Anything already posted stays in the channel. |
 | The record cannot be written | The helper posts nothing it could not record first, logs `state-write-failed` and tries again later. A part that did post before a write failed is remembered while the helper runs; if the helper also stops before it can write, the restarted helper finds the attempt on record as in doubt and falls back on the nonce, or holds the item as `uncertain`. |
 
-One case is not covered. If a long item was posted in part and the bridge then let it go, the
-bridge never hands it over again, and the helper's record of the parts stays where it is.
-`status` counts it under "in progress". It does no harm; remove it by removing the record once
-nothing else is in progress.
+One case leaves something behind. If the helper posted a part, could not report it, and the
+bridge then let the item go, the bridge never hands that item over again and the helper's
+record of the part stays where it is. `status` counts it under "in progress". It does no harm;
+remove it by removing the record once nothing else is in progress.
 
-## Settling a held item
+## Items set aside
 
-A held item stays held until you settle it. `status` lists each one:
+**The helper cannot discard anything.** What it cannot post, the bridge sets aside: the item
+keeps its text, is handed to nobody, and one notice is posted in the channel saying that
+something was set aside. The Project Master lists these with `tc bridge blocked` and decides:
+
+- `tc bridge requeue <item-id>` puts the item back. The helper picks it up on its next pass and
+  carries on after any parts already posted.
+- `tc bridge withdraw <item-id>` gives it up for good.
+
+The operator can make the same two decisions from a signed-in session
+([operator-bridge.md](operator-bridge.md), "The operator's routes").
+
+For `rejected-by-chat` and `chat-configuration` that is all there is to do: put right what
+Discord refused, or the bot's permissions, then requeue.
+
+### Settling an `uncertain` item
+
+`outcome-unverifiable` needs one more thing, because only you can see whether the part in
+doubt reached the channel. `status` lists it:
 
 ```
 item 12: uncertain, part 2 (settle it: see docs/operator-bridge-helper.md)
-item 15: rejected, part 1 (settle it: see docs/operator-bridge-helper.md)
 ```
 
-Stop the helper first, look in the channel, then run the one command that matches what you
-see. `settle` refuses to run while the helper does, and refuses a settlement that is not true
-of the item, changing nothing.
+Stop the helper, look in the channel, then run the one command that matches what you see.
+`settle` refuses to run while the helper does.
 
-| Held as | What you see | Command | What happens |
-|---|---|---|---|
-| `uncertain` | The part did post. | `settle <id> --posted <discord message id>` | The id is recorded for that part. The helper posts any parts after it, then acknowledges the item. |
-| `uncertain` | The part did not post. | `settle <id> --repost` | The helper posts that part again, then the parts after it. |
-| `rejected` | Nothing: Discord refused it. | `settle <id> --repost` | The helper tries again. Use it once what Discord refused is put right. |
+| What you see | Command | What happens |
+|---|---|---|
+| The part did post. | `settle <id> --posted <discord message id>` | The id is recorded for that part. |
+| The part did not post. | `settle <id> --repost` | The part will be posted again, under a new nonce. |
+
+Then start the helper and have the Master run `tc bridge requeue <id>`. The helper reports the
+part you recorded, posts any parts after it, and acknowledges the item.
 
 "The part" is the one `status` names: with `part 2`, part 1 posted and is recorded, and part 2
 is the one in question. `--posted` takes the id of that one part.
-
-**A rejected item cannot be discarded.** The bridge has no route for the helper to discard an
-item, and closing a route does not withdraw an answer already released. An answer Discord will
-never accept therefore stays held at the helper and waiting at the bridge, handed over again
-every two minutes and skipped each time, until its route is closed and 30 days later removed
-by retention. Nothing is posted and nothing is lost, but it does not resolve by itself. This is
-a known gap for the bridge's design to close, not something to work around by editing the
-helper's record.
 
 ## Messages the operator sees when one is not taken
 
@@ -225,11 +240,13 @@ TangleClaw's answer is echoed.
 | `secret-missing`, `secret-read-failed` | Run `set-secret` for the secret `status` names. `secret-read-failed` can also mean the login Keychain is locked. |
 | `state-unreadable` | `state.json` is damaged. The helper will not start without it, because forgetting a post in flight could make it twice. Move it aside only after checking the channel for what it names. |
 | `state-write-failed` | `state.json` could not be written: a full disk, or permissions. The helper keeps trying and posts nothing it could not record. |
-| `helper-already-running` | Another helper is running. With `pid: -1` the lock file `helper.pid` is unreadable; check that no helper runs (`pgrep -fl tc-bridge-helper`), then delete it. |
+| `helper-already-running` | Another helper is running, or the helper could not check whether one is (`ps` failed): it does not start on a guess. With `pid: -1` the lock file `helper.pid` is unreadable. Either way, check that no helper runs (`pgrep -fl tc-bridge-helper`), then delete the lock file. |
 | `gateway-fatal` | Discord refused the connection for a reason a retry cannot fix. 4004 is a bad bot token (run `set-secret bot`); 4014 means Message Content Intent is off. The helper keeps posting, but reads nothing until it is restarted. |
 | `claim-failed` | The bridge could not be asked what to post. The status is in the line: `0` is no answer, `401` a replaced token, `409` a disabled bridge. |
 | `redirect-refused` | A server answered with a redirect, which the helper never follows. Check `--base-url`. |
-| `outbound-uncertain`, `outbound-rejected` | An item is held; see "Settling a held item". |
+| `outbound-uncertain` | An item is held here and set aside at the bridge; see "Settling an `uncertain` item". |
+| `outbound-rejected`, `outbound-part-conflict` | The bridge was asked to set an item aside; see "Items set aside". |
+| `outbound-report-failed` | The bridge could not be told that an item could not be posted. It is told again on the next pass. |
 | `outbound-ack-failed` | A posted item could not be acknowledged yet. It is acknowledged on a later pass. |
 | `outbound-ack-expired` | The bridge had let the item go. Nothing to do. |
 | `outbound-digest-mismatch`, `outbound-foreign-channel` | An item did not pass the helper's checks and was not posted. Either is a defect to report. |
@@ -252,7 +269,10 @@ Discord account, and belong to the live verification before cutover:
 - `lib/bridge-helper/cli.js`: the commands.
 - `lib/bridge-helper/config.js`, `secrets.js`, `state.js`, `log.js`: the config, the Keychain,
   the record of posts and the closed-code log.
-- `lib/bridge-helper/bridge-client.js`: the three bridge routes, and nothing else.
+- `lib/bridge-helper/bridge-client.js`: the five bridge routes, and nothing else.
 - `lib/bridge-helper/discord-rest.js`, `discord-gateway.js`: Discord's REST API and Gateway.
+  `discord-gateway.js` is carried over from the helper written for #1799, which never merged.
+  That is this project's own earlier work, kept because it speaks only Discord's protocol. It
+  inherits nothing from the contract #1799 was written against, and is reviewed as new code.
 - `lib/bridge-helper/inbound.js`, `outbound.js`: the two directions.
 - `deploy/com.tangleclaw.bridge-helper.plist`: the launchd job's template.

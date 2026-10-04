@@ -255,19 +255,29 @@ describe('bridge helper: its parts (#2031)', () => {
   });
 
   describe('the bridge client', () => {
-    it('can build the three helper routes and nothing else, and sends the token only in its header', async () => {
-      assert.deepEqual(Object.keys(PATHS), ['inbound', 'claim', 'ack']);
+    it('can build the five helper routes and nothing else, and sends the token only in its header', async () => {
+      assert.deepEqual(Object.keys(PATHS), ['inbound', 'claim', 'part', 'ack', 'failure']);
       assert.ok(Object.isFrozen(PATHS));
       assert.equal(PATHS.ack('7/../../operator/enable'), '/api/bridge/helper/outbound/NaN/ack', 'an id that is not a number cannot steer the path');
 
       const tc = await serve((req, res) => json(res, 200, { items: [], replayed: false }));
       const client = createBridgeClient({ origin: tc.origin, token: HELPER_TOKEN });
-      assert.deepEqual(Object.keys(client), ['sendInbound', 'claim', 'ack']);
+      assert.deepEqual(Object.keys(client), ['sendInbound', 'claim', 'part', 'ack', 'fail']);
       await client.claim('claim-nonce-0000001', 5);
       await client.ack(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', ['300000000000000012', '300000000000000014']);
       await client.sendInbound({ externalId: '300000000000000013', text: 'hello' });
-      assert.deepEqual(tc.hits.map((h) => `${h.method} ${h.url}`),
-        ['POST /api/bridge/helper/outbound/claim', 'POST /api/bridge/helper/outbound/7/ack', 'POST /api/bridge/helper/inbound']);
+      await client.part(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', { index: 1, count: 2, externalId: '300000000000000014' });
+      await client.fail(7, 'bol_aaaaaaaaaaaaaaaaaaaaaa', 'rejected-by-chat', ['300000000000000012'], 2);
+      await client.fail(8, 'bol_aaaaaaaaaaaaaaaaaaaaaa', 'transient', [], 1);
+      assert.deepEqual(tc.hits.map((h) => `${h.method} ${h.url}`), [
+        'POST /api/bridge/helper/outbound/claim', 'POST /api/bridge/helper/outbound/7/ack', 'POST /api/bridge/helper/inbound',
+        'POST /api/bridge/helper/outbound/7/parts', 'POST /api/bridge/helper/outbound/7/failure', 'POST /api/bridge/helper/outbound/8/failure'
+      ]);
+      assert.deepEqual(tc.hits.slice(3).map((h) => JSON.parse(h.body)), [
+        { leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', partIndex: 1, partCount: 2, externalId: '300000000000000014' },
+        { leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', reason: 'rejected-by-chat', parts: ['300000000000000012'], partCount: 2 },
+        { leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', reason: 'transient' }
+      ]);
       for (const hit of tc.hits) {
         assert.equal(hit.headers[TOKEN_HEADER], HELPER_TOKEN);
         assert.match(hit.headers[NONCE_HEADER], /^[A-Za-z0-9_-]{16,128}$/);
@@ -275,7 +285,7 @@ describe('bridge helper: its parts (#2031)', () => {
       }
       assert.equal(tc.hits[0].headers[NONCE_HEADER], 'claim-nonce-0000001', 'a claim carries the nonce it was given');
       assert.deepEqual(JSON.parse(tc.hits[1].body), {
-        leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', parts: ['300000000000000012', '300000000000000014'], partCount: 2, deliveredRef: '300000000000000012'
+        leaseId: 'bol_aaaaaaaaaaaaaaaaaaaaaa', parts: ['300000000000000012', '300000000000000014'], partCount: 2
       }, 'an acknowledgement names every part, in order, and how many there are');
       assert.notEqual(tc.hits[1].headers[NONCE_HEADER], tc.hits[2].headers[NONCE_HEADER], 'every other write has a nonce of its own');
     });

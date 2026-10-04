@@ -89,7 +89,7 @@ function claim(headers = asHelper()) {
  * @returns {Promise<{status: number, body: object}>}
  */
 function ackItem(item, deliveredRef) {
-  return call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { leaseId: item.leaseId, deliveredRef } });
+  return call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { leaseId: item.leaseId, parts: [deliveredRef], partCount: 1 } });
 }
 
 /**
@@ -414,15 +414,17 @@ describe('bridge API: the round trip (#2031)', () => {
     const item = (await claim()).body.items.find((i) => i.kind === 'reply' && i.inReplyTo.externalId === externalId);
     const post = (body) => call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body });
 
-    const bare = await post({ deliveredRef: 'posted-20' });
+    const bare = await post({ parts: ['posted-20'], partCount: 1 });
     assert.deepEqual([bare.status, bare.body.code], [400, 'LEASE_REQUIRED']);
-    const wrong = await post({ deliveredRef: 'posted-20', leaseId: 'bol_nosuchlease00000000000' });
+    const oneId = await post({ deliveredRef: 'posted-20', leaseId: item.leaseId });
+    assert.deepEqual([oneId.status, oneId.body.code], [400, 'BAD_ACK'], 'an acknowledgement always gives every part and the count');
+    const wrong = await post({ parts: ['posted-20'], partCount: 1, leaseId: 'bol_nosuchlease00000000000' });
     assert.deepEqual([wrong.status, wrong.body.code], [404, 'LEASE_NOT_FOUND']);
     assert.equal(bridgeStore.routes.get(routeId).state, 'released', 'neither closed the route');
 
     // The operator replaces the token: what the old one held is not the new one's to acknowledge.
     helperToken = (await asOperator('POST', '/api/bridge/operator/helper-token')).body.token;
-    const stolen = await post({ deliveredRef: 'posted-20', leaseId: item.leaseId });
+    const stolen = await post({ parts: ['posted-20'], partCount: 1, leaseId: item.leaseId });
     assert.deepEqual([stolen.status, stolen.body.code], [403, 'LEASE_NOT_YOURS']);
     const mine = (await claim()).body.items.find((i) => i.outboundId === item.outboundId);
     assert.equal((await ackItem(mine, 'posted-20')).status, 200);
@@ -456,7 +458,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const reply = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: replyId, ...ALLOWED, replyToExternalId: parts[1], text: 'who needs me?' } });
     assert.equal(reply.status, 202);
     const read = await call('GET', `/api/bridge/master/routes/${reply.body.routeId}`, { headers: asMaster() });
-    assert.deepEqual([read.body.route.resolvedBy, read.body.route.destination.kind], ['reply-inheritance', 'master']);
+    assert.deepEqual([read.body.route.resolvedBy, read.body.route.destination.kind], ['outbound-correlation', 'master']);
     assert.deepEqual(read.body.route.replyContext, {
       repliedExternalId: parts[1], canonicalExternalId: parts[0], outboundId: id, partIndex: 1, partCount: 3,
       kind: 'notification', notifyType: 'operator-needed', routeId: null, candidateId: null, candidateKind: null
@@ -473,6 +475,112 @@ describe('bridge API: the round trip (#2031)', () => {
       headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, authorId: 'stranger', replyToExternalId: parts[1], text: 'me too' }
     });
     assert.deepEqual([stranger.status, stranger.body.code], [403, 'NOT_ALLOWLISTED']);
+  });
+
+  it('closing a route withdraws its unposted answer, but not while the helper holds it', async () => {
+    const realNow = gateway._deps.now;
+    try {
+      const accepted = await operatorSays(`m${++seq}`, 'hello');
+      const routeId = accepted.body.routeId;
+      await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'an answer the Master thinks better of' });
+      const externalId = bridgeStore.routes.get(routeId).externalId;
+      const item = (await claim()).body.items.find((i) => i.kind === 'reply' && i.inReplyTo.externalId === externalId);
+      const version = () => bridgeStore.routes.get(routeId).version;
+
+      const early = await masterWrites(routeId, 'close', { expectedVersion: version() });
+      assert.deepEqual([early.status, early.body.code, early.body.route.state], [409, 'OUTBOUND_IN_FLIGHT', 'released']);
+      assert.equal(bridgeStore.outbound.get(item.outboundId).state, 'ready', 'the helper may be posting it at this moment');
+
+      // The lease lapses with nothing posted. Now the close goes through, and takes the answer with it.
+      const after = Date.now() + bridgeStore.LEASE_MS + 1000;
+      gateway._deps.now = () => new Date(after).toISOString();
+      const unposted = store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE route_id = ? AND state = 'ready'").get(routeId).n;
+      const closed = await masterWrites(routeId, 'close', { expectedVersion: version() });
+      assert.deepEqual([closed.status, closed.body.route.state], [200, 'closed']);
+      const withdrawn = bridgeStore.outbound.get(item.outboundId);
+      assert.deepEqual([withdrawn.state, withdrawn.dropCode, withdrawn.text], ['dropped', 'withdrawn', null]);
+      assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'close' && a.outcome === 'applied').detail.withdrawn, unposted,
+        'everything of the route that was not yet posted, the answer and any notice with it');
+      assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE route_id = ? AND state = 'ready'").get(routeId).n, 0);
+
+      // A helper that posts it after all cannot say so, and it is never handed over again.
+      const late = await ackItem(item, 'posted-late');
+      assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
+      assert.equal((await claim()).body.items.some((i) => i.outboundId === item.outboundId), false);
+    } finally {
+      gateway._deps.now = realNow;
+    }
+  });
+
+  it('closing a route does not unsend what was delivered', async () => {
+    const accepted = await operatorSays(`m${++seq}`, '@nobody-by-that-name hello');
+    const routeId = accepted.body.routeId;
+    assert.equal(bridgeStore.routes.get(routeId).state, 'awaiting-master');
+    // Its status or failure notices, if any were posted, are history.
+    const text = 'Your message is waiting.';
+    const id = bridgeStore.outbound.enqueue({ idemKey: `route:${routeId}:test-failure`, kind: 'failure', routeId, sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text) }).outboundId;
+    const item = (await claim()).body.items.find((i) => i.outboundId === id);
+    assert.equal((await ackItem(item, `posted-${++seq}`)).status, 200);
+    const closed = await masterWrites(routeId, 'close', { expectedVersion: bridgeStore.routes.get(routeId).version });
+    assert.equal(closed.status, 200);
+    assert.equal(bridgeStore.outbound.get(id).state, 'delivered');
+  });
+
+  it('the Master sees what was set aside and decides, over its own routes and with `tc bridge`', async () => {
+    const make = (name) => {
+      const text = `notice ${name}`;
+      return bridgeStore.outbound.enqueue({
+        idemKey: `notify:operator-needed:${name}-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text, digest: bridgeStore.digest(text)
+      }).outboundId;
+    };
+    const [a, b] = [make('a'), make('b')];
+    const items = (await claim()).body.items;
+    const report = (id, body) => call('POST', `/api/bridge/helper/outbound/${id}/failure`, { headers: asHelper(), body });
+    const lease = (id) => items.find((i) => i.outboundId === id).leaseId;
+
+    const unknown = await report(a, { leaseId: lease(a), reason: 'discard' });
+    assert.deepEqual([unknown.status, unknown.body.code], [400, 'BAD_FAILURE'], 'the helper has no way to discard');
+    assert.equal((await report(a, { leaseId: lease(a), reason: 'rejected-by-chat' }, asMaster())).status, 200);
+    const part = await call('POST', `/api/bridge/helper/outbound/${b}/parts`, { headers: asHelper(), body: { leaseId: lease(b), partIndex: 0, partCount: 2, externalId: `p${++seq}x` } });
+    assert.deepEqual([part.status, part.body.replayed], [200, false]);
+    assert.equal((await report(b, { leaseId: lease(b), reason: 'chat-configuration' })).body.state, 'blocked');
+    for (const [method, apiPath] of [['POST', `/api/bridge/helper/outbound/${a}/failure`], ['POST', `/api/bridge/helper/outbound/${a}/parts`]]) {
+      assert.equal((await call(method, apiPath, { headers: asMaster(), body: { leaseId: lease(a) } })).status, 401, 'the helper\'s routes are the helper\'s');
+    }
+
+    const blocked = await call('GET', '/api/bridge/master/outbound/blocked', { headers: asMaster() });
+    const mine = blocked.body.items.filter((i) => [a, b].includes(i.outboundId));
+    assert.deepEqual(mine.map((i) => [i.outboundId, i.notifyType, i.blockCode, i.attempts, i.partsPosted]),
+      [[a, 'operator-needed', 'rejected-by-chat', 1, 0], [b, 'operator-needed', 'chat-configuration', 1, 1]]);
+    assert.ok(!JSON.stringify(blocked.body).includes('notice a'), 'what is set aside is listed without its text');
+
+    const listed = await tc(['bridge', 'blocked']);
+    assert.match(listed.stdout, new RegExp(`item ${a}  operator-needed  rejected-by-chat  handed over 1 time\\(s\\), 0 part\\(s\\) posted`));
+    const back = await tc(['bridge', 'requeue', String(a)]);
+    assert.deepEqual([back.code, back.stdout], [0, `Item ${a} is back in the mailbox for the helper.\n`]);
+    assert.equal(bridgeStore.outbound.get(a).state, 'ready');
+    const gone = await tc(['bridge', 'withdraw', String(b), '--request-id', 'req-withdraw-tc-0001']);
+    assert.deepEqual([gone.code, gone.stdout], [0, `Item ${b} is withdrawn and will not be posted.\n`]);
+    const again = await tc(['bridge', 'withdraw', String(b), '--request-id', 'req-withdraw-tc-0001']);
+    assert.match(again.stdout, /already applied by an earlier use of this request id/);
+    const refused = await tc(['bridge', 'requeue', String(b)]);
+    assert.deepEqual([refused.code, /NOT_BLOCKED/.test(refused.stderr)], [2, true]);
+
+    // The helper cannot make either decision, and neither can a session's or nobody's request.
+    for (const headers of [asHelper(), {}]) {
+      for (const what of ['requeue', 'withdraw']) {
+        const r = await call('POST', `/api/bridge/master/outbound/${a}/${what}`, { headers, body: { requestId: `req-x-${++seq}-0000` } });
+        assert.equal(r.status, 401, what);
+      }
+    }
+    // The operator can, signed in.
+    const again2 = (await claim()).body.items.find((i) => i.outboundId === a);
+    await report(a, { leaseId: again2.leaseId, reason: 'rejected-by-chat' });
+    const byOperator = await asOperator('POST', '/api/bridge/operator/outbound/:outboundId/withdraw', { params: { outboundId: String(a) }, body: { requestId: `req-op-${++seq}-0000` } });
+    assert.deepEqual([byOperator.status, byOperator.body.item.state], [200, 'dropped']);
+    const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/outbound/:outboundId/requeue'),
+      { req: AMBIENT, headers: AMBIENT.headers, params: { outboundId: String(a) }, body: { requestId: `req-op-${++seq}-0000` } });
+    assert.equal(ambient.status, 403, 'a dashboard-shaped request on an open gate decides nothing');
   });
 
   it('answers 410 over the route, for good, to an acknowledgement of an item that was let go', async () => {
