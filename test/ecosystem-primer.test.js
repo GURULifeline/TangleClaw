@@ -140,6 +140,35 @@ describe('lib/ecosystem-primer (#1122)', () => {
     }
   });
 
+  it('a verb the operator switches on is primed while the switch is on, and the section stays within its budget (#2031)', () => {
+    const { verbsFor } = require('../lib/tc-verbs');
+    const switched = verbsFor('unprimed').filter((v) => v.primedBy);
+    assert.deepEqual(switched.map((v) => [v.id, v.primedBy]), [['candidate', 'bridge-candidates']]);
+    assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'), 'off by default: nothing says how to find out, so nothing is switched on');
+    try {
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      assert.ok(verbsFor('pane', { switches: ['bridge-candidates'] }).some((v) => v.id === 'candidate'));
+      assert.deepEqual(verbsFor('unprimed', { switches: ['bridge-candidates'] }).map((v) => v.id), []);
+      assert.ok(primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+      assert.ok(/\bcandidate\b/.test(primer.tcBootstrapLines('comment').join('\n')));
+      // With the switch on the list names one more verb, which costs the section 13
+      // characters and takes it 9 past the 2800 cap that holds with the switch off.
+      // The cap for the switched-on section is 2820: room for this verb and no
+      // prose. The alternative was to cut ten characters from a sentence every
+      // carrier in every repository holds, which would rewrite all of them to
+      // make room for a verb most installs never switch on. The switched-off
+      // section, which is what every install has until the operator decides
+      // otherwise, is still held to 2800 by the test above.
+      const text = primer.buildEcosystemPrimerSection(CTX).join('\n');
+      assert.ok(text.length < 2820, `with the switch on the section is ${text.length} chars; the cap for that is 2820`);
+      // A switch nobody declared primes nothing.
+      primer.setSwitchReader(() => ['something-else']);
+      assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+    } finally {
+      primer.setSwitchReader(() => []);
+    }
+  });
+
   it('the bootstrap line derives its verb list from VERB_ROSTER — a new verb reaches every carrier by existing', () => {
     const { VERB_ROSTER } = require('../lib/tc-verbs');
     const md = primer.tcBootstrapLines('md').join('\n');

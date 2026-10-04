@@ -4810,6 +4810,9 @@ const BRIDGE_TICK_MS = 15 * 1000;
 // does, so the two cannot disagree about whether a lane is clear. Wired where
 // the routes are, not at boot, so anything that loads the server has it.
 bridgeNotify.setLaneReader(() => bridgeNotify.readLanes(_composedLane));
+// Which pane verbs the operator has switched on. Read from the bridge's own
+// settings each time a pane's instructions are written.
+require('./lib/ecosystem-primer').setSwitchReader(() => (bridgeApi.candidatesPrimed() ? ['bridge-candidates'] : []));
 
 for (const entry of bridgeApi.ROUTES) {
   route(entry.method, entry.path, async (req, res, params, body) => {

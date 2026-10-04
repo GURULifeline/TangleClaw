@@ -304,8 +304,11 @@ Refusals: `403 VERIFIED_LAUNCH_REQUIRED`, `409 BRIDGE_DISABLED`, `404 RECEIPT_NO
 `409 RECEIPTS_DO_NOT_HOLD`, `409 NOT_DISPLAY_SAFE`, `400 REQUEST_ID_REQUIRED`,
 `400 EXPECTED_VERSION_REQUIRED`, `400 MERGE_TARGET_REQUIRED`, `409 MERGE_TARGET_NOT_OPEN`.
 
-`tc candidate` works in any pane, but it is not yet in the verb list panes are primed with: the
-bridge it feeds is disabled until cutover, and that list has a size budget.
+`tc candidate` works in any pane, but a pane is told of it only once the operator has switched
+that on (`POST /api/bridge/operator/candidate-primer`, below). The switch is off by default and
+can be turned on only while the bridge is enabled; switching the bridge off takes the verb out
+of the list again. A pane's instructions are written when it launches, so the switch reaches
+each session at its next launch.
 
 ## Server notifications
 
@@ -548,6 +551,7 @@ audit.
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
 | `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set, a helper token exists and the Master is a switchboard participant (`409 MASTER_LISTENER_OFF`). Audited with the signed-in user. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
+| `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Refused `409 BRIDGE_DISABLED` while the bridge is off. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
 | `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. |

@@ -27,6 +27,7 @@ All notable changes to TangleClaw are documented in this file.
   - **`tc-bridge-helper preflight`** checks the config, both Keychain items, the record's permissions, the lock, the helper token, the allowlist, the circuit, the bot token and the channel, without posting or claiming. What it cannot prove without posting it reports as unproven.
   - **Rate limits** on the helper's routes and on a session's candidate submissions.
   - The helper reads the Discord bot token from the Keychain item the install already has.
+  - **Telling sessions of `tc candidate` is an operator switch,** off by default and available only while the bridge is enabled. It reaches each session at its next launch.
 
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.
   - **Every posted message is recorded, as it is posted.** The helper reports each message the chat makes for an item straight away, and the acknowledgement seals the complete ordered set. A partial set delivers nothing, an exact repeat changes nothing, and an id the bridge already knows as another message is refused.

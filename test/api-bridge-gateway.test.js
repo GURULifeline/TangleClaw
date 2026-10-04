@@ -835,6 +835,35 @@ describe('bridge API: the round trip (#2031)', () => {
       }
     });
 
+    it('telling every pane of `tc candidate` is the operator\'s switch, and only while the bridge is on', async () => {
+      const primer = require('../lib/ecosystem-primer');
+      const named = () => primer.tcBootstrapLines('md').join('\n').includes('`candidate`');
+      const set = (primed, req) => bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/candidate-primer'),
+        { req: req || SIGNED_IN, headers: (req || SIGNED_IN).headers, body: { primed } });
+      assert.deepEqual([bridgeApi.candidatesPrimed(), named()], [false, false], 'off until somebody switches it on');
+
+      assert.equal((await set(true, AMBIENT)).status, 403, 'a dashboard-shaped request on an open gate switches nothing');
+      assert.equal((await set('yes')).body.code, 'BAD_PRIMER');
+      await asOperator('POST', '/api/bridge/operator/disable');
+      assert.deepEqual([(await set(true)).status, (await set(true)).body.code], [409, 'BRIDGE_DISABLED']);
+      assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
+
+      const on = await set(true);
+      assert.deepEqual([on.status, on.body.candidatesPrimed, bridgeApi.candidatesPrimed(), named()], [200, true, true, true],
+        'the server reads the switch each time a pane\'s instructions are written');
+      assert.equal((await asOperator('GET', '/api/bridge/operator/status')).body.candidatesPrimed, true);
+
+      // Switching the bridge off takes the verb out of the list with it, and switching it back on brings it back.
+      await asOperator('POST', '/api/bridge/operator/disable');
+      assert.deepEqual([bridgeApi.candidatesPrimed(), named()], [false, false]);
+      await asOperator('POST', '/api/bridge/operator/enable');
+      assert.equal(named(), true);
+      assert.deepEqual([(await set(false)).body.candidatesPrimed, named()], [false, false]);
+      const audited = store.getDb().prepare("SELECT op, proof, detail_json FROM bridge_audit WHERE op LIKE 'candidate-primer-%' ORDER BY audit_seq").all();
+      assert.deepEqual(audited.map((r) => [r.op, r.proof, JSON.parse(r.detail_json).user]),
+        [['candidate-primer-on', 'verified-session', 'rosie'], ['candidate-primer-off', 'verified-session', 'rosie']]);
+    });
+
     it('the Master credential opens neither the helper routes nor the operator routes', async () => {
       assert.equal((await claim(asMaster())).status, 401);
       assert.equal((await call('POST', '/api/bridge/operator/enable', { headers: asMaster() })).status, 403);
