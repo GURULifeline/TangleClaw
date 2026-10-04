@@ -99,6 +99,11 @@ is outside the repository, so no Discord id is in a tracked file.
 bin/tc-bridge-helper set-secret helper    # paste the bridge's bht_ helper token
 ```
 
+The helper token comes from the dashboard: global settings, **Operator bridge (Discord)**,
+**Create the helper token**. It is shown once. Run the command above, press **Copy** in the
+panel, paste at the prompt, then press **I have stored it**. It is never written to a file or
+given on a command line.
+
 The helper reads two Keychain items. The **Discord bot token** is the item this install
 already keeps it in (service `tangleclaw-discord-helper`, account `discord-bot-token`): the
 helper uses it where it is, so there is nothing to copy. Run `set-secret bot` only if the bot

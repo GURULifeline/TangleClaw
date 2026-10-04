@@ -4,6 +4,14 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Global settings has an Operator bridge (Discord) section** (#2031, ADR 0023). The signed-in operator can see the bridge's state and switch it from the dashboard: enable and disable it, set the exact allowlist, create or revoke the helper's token, say whether sessions are told of `tc candidate`, reset the configuration circuit, and put back or withdraw each item that was set aside. The bridge is still off until the operator enables it here.
+  - A browser with no account session is shown only that it has to sign in.
+  - The helper token is shown once. It is copied only when Copy is pressed, the page stores it nowhere, and it goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`.
+  - Disabling acts at once without asking. Everything that widens what the bridge does, or cannot be undone, asks first.
+  - The token can be revoked only after the bridge is disabled.
+
 ### Fixed
 
 - **A release can no longer leave a tag with no Release because its notes are too long** (#2080). v5.30.0's notes were about 191,000 characters, GitHub refused them at its 125,000-character limit, and the tag was already pushed. Before any tag, push or release, `release.yml` now measures the exact UTF-8 bytes of the notes and stops, with a message saying what to do, when they are empty or over 120,000 bytes. The notes are never truncated: shorten the version's `CHANGELOG.md` section and release again, as `docs/release-process.md` describes. A new test also fails a pull request that takes `[Unreleased]` past 110,000 bytes, so the problem shows up at merge time and not at the release.

@@ -1,8 +1,9 @@
 # Roll the operator bridge back
 
 Tier 3: it stops the only automated path to the operator's Discord. Run by the builder who owns
-#2031 or the Architect; the steps marked **Operator** need the Operator signed in. Step 2 does
-not, and by itself stops everything reaching Discord.
+#2031 or the Architect; the steps marked **Operator** need the Operator signed in, and are done
+in the dashboard's global settings, section **Operator bridge (Discord)**. Step 2 needs no
+Operator, and by itself stops everything reaching Discord.
 
 ## When to use this
 
@@ -14,14 +15,14 @@ accepting messages from anyone but the Operator.
 
 Do them in order. Each one alone makes things safer, so do not wait on one to start the next.
 
-1. **Operator:** disable the bridge (`POST /api/bridge/operator/disable`).
-   → Expected: `200`, `"enabled": false`. From now the bridge refuses the helper, every session's
+1. **Operator:** press **Disable the bridge**. It asks nothing and acts at once.
+   → Expected: the Bridge line says **disabled**. From now the bridge refuses the helper, every session's
    candidate and every Master write that could lead to a post with `409 BRIDGE_DISABLED`. The
    Master can still close a route, withdraw what is queued, and acknowledge or reset the circuit.
 
-1a. **Operator:** switch the candidate primer off
-   (`POST /api/bridge/operator/candidate-primer` with `{"primed": false}`).
-   → Expected: `200`, `"candidatesPrimed": false`.
+1a. **Operator:** under "Telling sessions of tc candidate", press **Switch it off**.
+   → Expected: that line says `off`. (Before this, with the bridge disabled, it says the switch is
+   set on and not in effect.)
    Why: disabling the bridge leaves this switch as it was. Left on, enabling the bridge again
    would tell every newly launched session of `tc candidate` before the controlled checks.
    → If the Operator cannot be reached: go to step 2 now. It stops everything reaching Discord.
@@ -32,8 +33,10 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    then `bin/tc-bridge-helper status`
    → Expected: `helper: not running`. In Discord the bot shows as offline within about a minute.
 
-3. **Operator:** revoke the helper token (`DELETE /api/bridge/operator/helper-token`).
-   → Expected: `200`. A helper started by mistake now gets `401 HELPER_TOKEN_REQUIRED`.
+3. **Operator:** press **Revoke it** under Helper token, and confirm. The button is off until
+   step 1 is done: the panel revokes only a disabled bridge's token.
+   → Expected: the Helper token line says **none**. A helper started by mistake now gets
+   `401 HELPER_TOKEN_REQUIRED`.
 
 4. If Rule #145 had been replaced: the **Operator** restores its text. Tell the Architect, who
    posts directly again under it.

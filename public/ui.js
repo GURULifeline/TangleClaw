@@ -3763,6 +3763,11 @@ function openGlobalSettings() {
       <div class="form-hint">Checking your recovery codes…</div>
     </div>
 
+    <div class="gs-section-label">Operator bridge (Discord)</div>
+    <div class="form-group" id="gsOperatorBridgeSection">
+      <div class="form-hint">Checking the operator bridge…</div>
+    </div>
+
     <div class="gs-section-label">Diagnostics</div>
     <div class="form-group">
       <button type="button" class="btn" id="gsRestartBtn"
@@ -3824,6 +3829,11 @@ function openGlobalSettings() {
   _loadCredentialSection();
   _loadAccountSection();
   _loadRecoveryCodesSection();
+  // #2031: the operator bridge's controls. The panel is its own script
+  // (operator-bridge-panel.js); a page that has not loaded it shows no section.
+  if (typeof window.tcMountOperatorBridge === 'function') {
+    window.tcMountOperatorBridge(document.getElementById('gsOperatorBridgeSection'), { api, apiMutate });
+  }
 
   const revealTokenBtn = document.getElementById('gsRevealTokenBtn');
   if (revealTokenBtn) {
@@ -3858,6 +3868,11 @@ function openGlobalSettings() {
  */
 function closeGlobalSettings() {
   document.getElementById('globalSettingsModal').classList.remove('open');
+  // The modal is hidden, not removed. A helper token still on screen must not
+  // stay in the page behind it (#2031).
+  if (typeof window.tcForgetOperatorBridge === 'function') {
+    window.tcForgetOperatorBridge(document.getElementById('gsOperatorBridgeSection'));
+  }
 }
 
 /**

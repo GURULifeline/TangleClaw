@@ -584,3 +584,13 @@ an answer to a reserved action. This ADR adds nothing for #2037 and neither bloc
   reimplemented; its routing is not.
 - The interim procedure remains the only Discord path until both cutover conditions hold, and it
   depends on the Architect session being available.
+
+### Deferred, on purpose (Architect ruling, 2026-10-04)
+
+Accepted for this release and not refactored in Phase 5. None changes behaviour.
+
+- `lib/bridge-api.js` reaches the gateway's `_deps` seam for its clock and for the Master. The
+  seam was made for tests; the API using it is a dependency that should be named.
+- `verifyHelperToken` spells the `bht_` prefix beside `HELPER_TOKEN_PREFIX` instead of using it.
+- The expression that makes a pin id appears twice in `lib/bridge-api.js`.
+- `acknowledgeOutbound` still takes a positional `deliveredRef` that only tests pass.

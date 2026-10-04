@@ -865,6 +865,36 @@ describe('bridge API: the round trip (#2031)', () => {
       }
     });
 
+    it('the dashboard\'s bridge panel is served, and its status route tells a caller with no account session nothing', async () => {
+      const script = await fetch(`${origin}/operator-bridge-panel.js`);
+      assert.equal(script.status, 200);
+      assert.match(script.headers.get('content-type'), /javascript/);
+      assert.match(await script.text(), /tcMountOperatorBridge/);
+
+      // Over HTTP, as a browser on this install would ask: same-origin, and no account session.
+      for (const headers of [{}, operatorHeaders(server)]) {
+        const res = await call('GET', '/api/bridge/operator/status', { headers });
+        assert.deepEqual([res.status, res.body.code], [403, 'OPERATOR_SESSION_REQUIRED']);
+        assert.deepEqual(Object.keys(res.body).sort(), ['code', 'error'], 'a refusal, and nothing of the bridge');
+        for (const write of [['POST', 'enable'], ['POST', 'disable'], ['POST', 'helper-token'], ['DELETE', 'helper-token'], ['POST', 'candidate-primer'], ['POST', 'circuit/reset'], ['POST', 'outbound/1/withdraw']]) {
+          const refused = await call(write[0], `/api/bridge/operator/${write[1]}`, { headers, body: { primed: true, requestId: 'req-unsigned-0001', decision: 'withdraw' } });
+          assert.equal(refused.status, 403, write.join(' '));
+          assert.ok(!JSON.stringify(refused.body).includes('bht_'), 'no token is minted for it');
+        }
+      }
+      assert.equal(bridgeStore.settings.isEnabled(), true, 'and none of it changed anything');
+
+      // What the panel draws from: the items set aside by id and reason, and the primer as it was set.
+      const signedIn = (await asOperator('GET', '/api/bridge/operator/status')).body;
+      assert.deepEqual([Array.isArray(signedIn.setAsideItems), signedIn.setAsideItems.length, signedIn.candidatePrimerSetting], [true, signedIn.setAside, false]);
+      bridgeStore.settings.set('candidates.primed', 'true');
+      await asOperator('POST', '/api/bridge/operator/disable');
+      const off = (await asOperator('GET', '/api/bridge/operator/status')).body;
+      assert.deepEqual([off.candidatesPrimed, off.candidatePrimerSetting], [false, true], 'not in effect while disabled, and still set');
+      bridgeStore.settings.set('candidates.primed', 'false');
+      assert.equal((await asOperator('GET', '/api/bridge/operator/status')).body.candidatePrimerSetting, false);
+    });
+
     it('preflight answers the helper in yes, no and a closed word, changes nothing, and is asked sparingly', async () => {
       bridgeApi._resetRateLimits();
       const ask = (body, headers = { [bridgeApi.HELPER_TOKEN_HEADER]: helperToken }) => call('POST', '/api/bridge/helper/preflight', { headers, body });

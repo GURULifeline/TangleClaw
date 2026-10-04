@@ -16,7 +16,9 @@ replaced in the step that says so, and after any roll back, Rule #145 and [the i
 
 ## Prerequisites
 
-- The Operator, signed in to the dashboard with an account session.
+- The Operator, signed in to the dashboard with an account session. Every step marked
+  **Operator** is done in the dashboard's global settings, section **Operator bridge (Discord)**.
+  Not with curl, and not from the browser's developer tools.
 - The Project Master running, as a switchboard participant.
 - The Discord bot token in the Keychain: service `tangleclaw-discord-helper`, account
   `discord-bot-token`. Never type it into a command line.
@@ -41,14 +43,17 @@ the Architect.
    → If the server does not come up: `~/.tangleclaw/logs/server.err.log` names each bridge object
    that failed its shape check. Roll back.
 
-3. **Operator:** set the allowlist and create the helper token
-   (`POST /api/bridge/operator/allowlist`, then `POST /api/bridge/operator/helper-token`).
-   → Expected: `200` for the allowlist and `201` for the token, which is shown once.
-   > 🚧 **UNVERIFIED** — there is no dashboard page for these routes. How the signed-in Operator
-   > calls them (and the other steps marked **Operator**) has not been exercised · settle it with the Architect before
-   > this runbook is used.
+3. **Operator:** in the panel, enter the three Discord ids and press **Set the allowlist**; then
+   press **Create the helper token**. Leave the token on screen for step 4.
+   → Expected: the Allowlist line shows the three ids, and the token appears once under
+   "The helper token, shown once."
+   → The panel says "Sign in to see and change it": the browser has no account session. Sign in.
+   > 🚧 **UNVERIFIED** — the panel is proven by tests against the real operator routes. No person
+   > has yet used it in a browser on this install · the first activation is that check; if a
+   > control does not do what this step says, stop and roll back.
 
-4. Store the helper token, then configure the helper:
+4. Store the helper token, then configure the helper. Run the first command, press **Copy** in
+   the panel, paste at the command's prompt, then press **I have stored it**:
    `bin/tc-bridge-helper set-secret helper`
    `bin/tc-bridge-helper configure --base-url <TANGLECLAW_API> --author <id> --guild <id> --channel <id>`
    → Expected: `Stored the helper token in the Keychain.` and `Config written.`
@@ -58,9 +63,15 @@ the Architect.
    `unproven`.
    → If any line says `FAIL`: fix what it names and run it again. Do not go on.
 
-6. **Operator:** enable the bridge (`POST /api/bridge/operator/enable`).
-   → Expected: `200`, `"enabled": true`.
-   → `409 MASTER_LISTENER_OFF`: turn on the Master's Medusa setting, then repeat.
+5a. The Master runs `tc bridge status` in its own pane.
+   → Expected: `Operator bridge: DISABLED`, then `You are Master generation <n>`.
+   → Any refusal: there is no live verified Master. Do not enable. Relaunch the Master, then repeat.
+   Why: the enable switch checks the Master's setting, not that a Master is running.
+
+6. **Operator:** press **Enable the bridge** and confirm.
+   → Expected: the Bridge line says **enabled**, and Project Master shows `listener listening`.
+   → "Not done: The Project Master is not a switchboard participant": turn on the Master's Medusa
+   setting, then repeat.
 
 7. Start the helper: `bin/tc-bridge-helper install-launchd`, then `bin/tc-bridge-helper status`
    → Expected: `helper: running`, `gateway: ready`, `held: nothing`. `status` shows what the
@@ -87,17 +98,16 @@ the Architect.
    → `tc bridge status` shows `CONFIGURATION CIRCUIT OPEN`: the bot cannot post there. Fix its
    permissions, then `tc bridge reset --requeue`.
 
-10. **Operator:** replace Rule #145 with the replacement text the Architect has approved, and
-    switch on the candidate primer (`POST /api/bridge/operator/candidate-primer` with
-    `{"primed": true}`).
-    → Expected: `"candidatesPrimed": true`.
+10. **Operator:** replace Rule #145 with the replacement text the Architect has approved. Then,
+    under "Telling sessions of tc candidate", press **Switch it on** and confirm.
+    → Expected: that line says `on`.
 
-10a. Launch one project session, then **Operator:** read `GET /api/bridge/operator/status`.
-    → Expected: `"candidatePrimerOmitted": null`, and `tc candidate` is in the verb list of that
+10a. Launch one project session, then **Operator:** press **Refresh** in the panel.
+    → Expected: the line still says only `on`, and `tc candidate` is in the verb list of that
     session's opening context.
-    → If it names a project instead: that session's section ran over its cap and it was not
-    told of `tc candidate`. The switch is on and nothing is posted wrongly. Tell the Architect
-    the `length` and `cap` it shows, and go on: sessions can still be told by hand.
+    → If it adds "a session of project <id> was not told": that session's section ran over its
+    cap and it was not told of `tc candidate`. The switch is on and nothing is posted wrongly.
+    Tell the Architect the two numbers it shows, and go on: sessions can still be told by hand.
 
 11. Final acceptance. The Architect sends the final milestone through the Master. The Operator
     replies to that exact Discord message. The Master runs `tc bridge read <route-id>` on the new

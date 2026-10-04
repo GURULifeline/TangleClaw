@@ -2897,6 +2897,28 @@ html[data-tc-keyboard] body {
 }
 .gs-section-label:first-child { margin-top: 0; }
 
+/* The Operator Bridge panel (#2031): status lines, then one group of controls
+   per thing the operator can change. */
+.gs-section-sublabel {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.ob-line { font-size: 12px; line-height: 1.7; }
+.ob-label { display: inline-block; min-width: 7em; opacity: 0.7; }
+.ob-controls, .ob-form { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.ob-form .form-input { flex: 1 1 11em; min-width: 0; }
+.ob-item { font-size: 12px; line-height: 2; }
+.ob-notice.ob-failed { font-weight: 700; }
+.ob-token { margin: 8px 0; padding: 8px; border: 1px solid currentColor; border-radius: 6px; }
+.ob-token-value {
+  display: block;
+  margin: 6px 0;
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .hidden { display: none !important; }
 
 /* ── Setup Wizard ── */

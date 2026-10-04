@@ -526,8 +526,8 @@ queued stays queued, exactly as it was.
 The episode's notice cannot be posted, since nothing is handed over. It is on the record and
 shows in `tc bridge status`, in `GET /api/bridge/operator/status` (`configurationCircuit`), in
 the audit, and as a warning in the server log, so the operator learns of it without the chat.
-There is no dashboard page for the bridge yet. Until cutover the interim Discord
-procedure is also still in force.
+The dashboard's Operator Bridge panel shows it too, with the two ways to reset it. Until cutover
+the interim Discord procedure is also still in force.
 
 The gateway tells the Project Master of an open episode through the Master's Medusa listener,
 at once and then every five minutes, until the Master acknowledges it with
@@ -564,9 +564,31 @@ an install with no accounts, bridge policy cannot be changed at all. Every chang
 with the signed-in user. The helper token and the allowlisted ids are never written to the
 audit.
 
+### The dashboard panel
+
+The signed-in operator works these routes from the dashboard: global settings, section
+**Operator bridge (Discord)** (`public/operator-bridge-panel.js`). It calls these routes and no
+others, and adds no authority of its own: a browser with no account session is shown only that
+it has to sign in, and nothing of the bridge.
+
+| Control | What it does |
+|---|---|
+| Enable / Disable the bridge | Enabling asks first. Disabling asks nothing and acts at once: it is the kill switch. |
+| Set the allowlist | The exact author, server and channel, as Discord's numbers. It names all three back before it sends. |
+| Create or replace the helper token | Shows the value once. Copying is a button the operator presses; nothing is copied without it. The page keeps the value in no storage, no URL and no log, and it is gone when dismissed or when settings closes. It goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`, which reads it from standard input. |
+| Revoke the helper token | Only once the bridge is disabled: rolling back is disable first. |
+| Telling sessions of `tc candidate` | On asks first and needs the bridge enabled. Off is always available, including while the bridge is disabled, when the panel says the switch is set and not in effect. |
+| Reset the circuit | Two buttons, one for each decision: put back what was set aside, or withdraw it. There is no reset without one. |
+| Put back / Withdraw, on each item set aside | By item, with what it is and why it is held. Never its text. |
+
+A write that must not happen twice (a reset, a put-back, a withdrawal) carries a request id. If
+its answer is lost, pressing the control again sends the same id, and the server answers the
+repeat without doing it twice. Once the server has answered, yes or no, the next press is a new
+request.
+
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), whether sessions are being told of `tc candidate` and the last launch that was not (`candidatesPrimed`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), each item set aside by id, kind and reason and never its text (`setAsideItems`), whether sessions are being told of `tc candidate`, what the switch was last set to whether or not the bridge is on for it to take effect, and the last launch that was not told (`candidatesPrimed`, `candidatePrimerSetting`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
@@ -709,6 +731,8 @@ check is refused, and the message names each object that is missing or misshapen
 - `lib/bridge-principal.js`: when a credential exists and whether a presented one is live.
 - `lib/bridge-gateway.js`: accept, resolve, dispatch, reply capture, the periodic pass.
 - `lib/bridge-notify.js`: the three typed server notifications.
+- `public/operator-bridge-panel.js`: the signed-in operator's panel in the dashboard's global
+  settings. Operator routes only.
 - `lib/bridge-api.js`: every bridge route, declared with the principal it belongs to. One
   function proves the principal before any handler runs.
 - `bin/tc-bridge-receive`: the pane-side reader.
