@@ -65,6 +65,8 @@ the Architect.
 7. Start the helper: `bin/tc-bridge-helper install-launchd`, then `bin/tc-bridge-helper status`
    → Expected: `helper: running`, `gateway: ready`, `held: nothing`. In Discord the bot shows as
    an online member of the server: with the Operator online, the online count goes from 1 to 2.
+   Online proves the helper's Gateway connection only. The bridge is operational when it is
+   enabled (step 6), the Master is verified (`tc bridge status` answers) and the Gateway is `ready`.
    → `gateway: fatal (close code 4014)`: turn on Message Content Intent for the bot, then
    `launchctl kickstart -k gui/$(id -u)/com.tangleclaw.bridge-helper`.
 

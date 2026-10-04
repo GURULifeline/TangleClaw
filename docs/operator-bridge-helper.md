@@ -43,9 +43,12 @@ because this page exists.
 - **The bot shows as online while the helper is connected.** The helper identifies to Discord as
   online, so the bot appears as an online member of the server while the helper holds its
   Gateway connection, and as offline within a minute or so of the helper stopping. It is the
-  one Discord identity the bridge has: the bot, not a user account. Online means the helper is
-  connected. It does not by itself mean the bridge is enabled; `status` and
-  `tc bridge status` say that.
+  one Discord identity the bridge has: the bot, not a user account. **Online proves one thing:
+  the helper's Gateway connection.** That the bridge is operational takes three things
+  together: the bridge enabled (`GET /api/bridge/operator/status`), a verified Master
+  (`tc bridge status` answers with its generation), and the Gateway `ready`
+  (`bin/tc-bridge-helper status`). The runbooks enable the bridge before starting the helper
+  and stop the helper when rolling back, so that the bot is online only while all three hold.
 - **Messages sent while the helper is down are not caught up.** The Gateway does not replay
   them. Send them again once `status` shows the Gateway `ready`. Answers and notifications are
   different: they wait at the bridge, so none is lost while the helper or Discord is down.
