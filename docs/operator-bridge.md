@@ -466,7 +466,7 @@ reason from a closed list and the parts that did post. Any other reason is `400 
 | `transient` | A retry may fix it | Records it. The item stays waiting under its lease. |
 | `outcome-unknown` | A retry may fix it | The same. The helper retries under the same chat nonce. |
 | `rejected-by-chat` | This item will not post | Sets the item aside. |
-| `outcome-unverifiable` | This item will not post | Sets the item aside. A post may have landed and can no longer be checked. |
+| `outcome-unverifiable` | This item will not post | Sets the item aside. Either a post may have landed and can no longer be checked (the helper holds it as `uncertain`), or Discord refused it in a way the helper could not place (nothing landed, and the helper holds nothing). |
 | `part-conflict` | This item will not post | Sets the item aside. The bridge's record of its parts and the helper's disagree. |
 | `chat-channel-missing`, `chat-guild-missing`, `chat-permission-denied`, `chat-auth-refused` | The chat is closed to the bot | Sets the item aside and opens the configuration circuit (below). |
 
@@ -503,6 +503,11 @@ shows in `tc bridge status`, in `GET /api/bridge/operator/status` (`configuratio
 the audit, and as a warning in the server log, so the operator learns of it without the chat.
 There is no dashboard page for the bridge yet. Until cutover the interim Discord
 procedure is also still in force.
+
+Nothing tells the Project Master that an episode is open; it finds out from `tc bridge status`.
+Until it looks, it can go on releasing answers and approving candidates, and they queue behind
+the circuit. **A release is not a delivery receipt.** Having the Master actively take up the
+episode's record is a gate on cutover, not something built yet.
 
 An episode does not close by itself, however long it lasts. Once the chat's configuration is
 put right, the Project Master (`tc bridge reset --requeue` or `--withdraw`) or the signed-in

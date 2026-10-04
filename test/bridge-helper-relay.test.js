@@ -28,7 +28,7 @@ const { startFakeDiscord, fakeWebSocket } = require('./_fake-discord');
 const { createBridgeClient, BridgeError } = require('../lib/bridge-helper/bridge-client');
 const { createDiscordRest } = require('../lib/bridge-helper/discord-rest');
 const { createInbound, REFUSAL_TEXT } = require('../lib/bridge-helper/inbound');
-const { createOutbound, settleHeld, configurationReason, replyTargetMayBeMissing, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
+const { createOutbound, settleHeld, classifyAttempt, SettleError, NONCE_WINDOW_MS, LEASE_MARGIN_MS, PART_MAX } = require('../lib/bridge-helper/outbound');
 const { openState, nonceFor } = require('../lib/bridge-helper/state');
 const { main, EXIT } = require('../lib/bridge-helper/cli');
 const { paths, writeConfig } = require('../lib/bridge-helper/config');
@@ -661,6 +661,7 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       discord.script.push({ status: 418, body: {} });
       assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 });
       assert.deepEqual([atBridge(odd.outboundId)[0], bridgeStore.outbound.get(odd.outboundId).blockCode], ['blocked', 'outcome-unverifiable'], 'set aside, not retried on a guess');
+      assert.deepEqual([logged().includes('outbound-unplaceable'), outbound().state.get(odd.outboundId)], [true, undefined], 'logged as its own case, and the helper holds nothing');
       assert.deepEqual([atBridge(next.outboundId)[0], bridgeStore.circuit.open()], ['delivered', null], 'the next item moves, and the channel is not blamed');
 
       // Discord answers 200 with nothing that is a message id.
@@ -672,21 +673,114 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(blank.outboundId), ['ready', null], 'it is not delivered');
       assert.deepEqual(bridgeStore.parts.forItem(blank.outboundId), [], 'and no part is recorded for it');
       assert.ok(relay.state.get(blank.outboundId).since, 'the attempt stays on record as in doubt');
+      clock += 30000;
+      discord.posts.length = 0;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 }, 'the next pass settles it under the same nonce');
+      assert.deepEqual([discord.posts.length, atBridge(blank.outboundId)[0]], [1, 'delivered']);
     });
 
-    it('classifies each refusal by what it can only mean for a post to one fixed channel', () => {
-      const reason = (status, discordCode, unthreaded) => configurationReason({ status, discordCode }, unthreaded);
-      assert.deepEqual([
-        reason(401, 0, true), reason(404, 10003, false), reason(404, 10004, false), reason(403, 50001, false), reason(403, 50013, true),
-        reason(403, null, false), reason(403, 0, true), reason(404, null, true), reason(404, 10008, true)
-      ], ['chat-auth-refused', 'chat-channel-missing', 'chat-guild-missing', 'chat-permission-denied', 'chat-permission-denied',
-        'chat-permission-denied', 'chat-permission-denied', 'chat-channel-missing', 'chat-channel-missing']);
-      assert.deepEqual([reason(404, null, false), reason(404, 10008, false), reason(429, null, true), reason(400, 50035, true), reason(500, null, true), reason(0, null, true)],
-        [null, null, null, null, null, null], 'a threaded 404 is not judged before its one retry; nothing else is the channel');
-      const retry = (status, discordCode, sent = 'no') => replyTargetMayBeMissing({ status, discordCode, sent });
-      assert.deepEqual([retry(404, 10008), retry(400, 160002), retry(404, null), retry(404, 0)], [true, true, true, true]);
-      assert.deepEqual([retry(404, 10003), retry(404, 10004), retry(403, null), retry(400, 50035), retry(404, null, 'unknown'), retry(502, null, 'unknown')],
-        [false, false, false, false, false, false], 'a missing channel or server, a refusal of the content, or a post that may have landed is not retried this way');
+    it('judges every attempt in one place, by what Discord\'s answer can only mean for a post to one fixed channel', () => {
+      const is = (sent, status, discordCode, fresh, threaded) => {
+        const v = classifyAttempt({ sent, status, discordCode, fresh, threaded });
+        return v.reason ? `${v.kind}:${v.reason}` : v.kind;
+      };
+      // [sent, status, code, first attempt for the part, named a message to reply to] -> verdict
+      const table = [
+        // Discord may have acted: in doubt, whatever else is true.
+        ['unknown', 502, null, true, true, 'unknown'], ['unknown', 0, null, true, false, 'unknown'], ['unknown', 502, null, false, true, 'unknown'],
+        ['unknown', 404, null, true, true, 'unknown'], ['unknown', 403, 50013, true, false, 'unknown'],
+        // Not reached, redirected or rate-limited: try again later. Never the circuit.
+        ['no', 0, null, true, true, 'transient'], ['no', 302, null, true, false, 'transient'], ['no', 429, null, true, true, 'transient'],
+        ['no', 429, null, false, false, 'transient'], ['no', 0, null, false, true, 'transient'],
+        // Discord's own configuration codes, and a refused token.
+        ['no', 404, 10003, true, true, 'circuit:chat-channel-missing'], ['no', 404, 10004, true, false, 'circuit:chat-guild-missing'],
+        ['no', 403, 50001, true, true, 'circuit:chat-permission-denied'], ['no', 403, 50013, true, false, 'circuit:chat-permission-denied'],
+        ['no', 401, null, true, true, 'circuit:chat-auth-refused'], ['no', 401, 0, true, false, 'circuit:chat-auth-refused'],
+        // A reply target that is gone: one more try by itself, only where there was one.
+        ['no', 404, 10008, true, true, 'retry-unthreaded'], ['no', 400, 160002, true, true, 'retry-unthreaded'],
+        ['no', 404, 10008, false, true, 'retry-unthreaded'], ['no', 404, 10008, true, false, 'unplaceable'], ['no', 400, 160002, true, false, 'unplaceable'],
+        // A 403 or 404 with no code.
+        ['no', 403, null, true, true, 'circuit:chat-permission-denied'], ['no', 403, 0, true, false, 'circuit:chat-permission-denied'],
+        ['no', 404, null, true, true, 'retry-unthreaded'], ['no', 404, 0, true, true, 'retry-unthreaded'], ['no', 404, null, false, true, 'retry-unthreaded'],
+        ['no', 404, null, true, false, 'circuit:chat-channel-missing'], ['no', 404, 0, true, false, 'circuit:chat-channel-missing'],
+        // A 403 or 404 with a code this table does not know: the item's, never the channel's.
+        ['no', 403, 40001, true, true, 'unplaceable'], ['no', 403, 40001, true, false, 'unplaceable'],
+        ['no', 404, 10007, true, true, 'unplaceable'], ['no', 404, 10007, true, false, 'unplaceable'],
+        // The item's own content, and anything else.
+        ['no', 400, 50035, true, true, 'rejected'], ['no', 400, null, true, false, 'rejected'],
+        ['no', 418, null, true, true, 'unplaceable'], ['no', 409, 0, true, false, 'unplaceable'], ['no', 422, 12345, true, false, 'unplaceable'],
+        // The same definite refusals while an earlier attempt is in doubt: they settle nothing.
+        ['no', 400, 50035, false, false, 'uncertain'], ['no', 401, null, false, true, 'uncertain'], ['no', 403, null, false, false, 'uncertain'],
+        ['no', 403, 50013, false, true, 'uncertain'], ['no', 404, null, false, false, 'uncertain'], ['no', 404, 10003, false, true, 'uncertain'],
+        ['no', 404, 10007, false, false, 'uncertain'], ['no', 418, null, false, true, 'uncertain'], ['no', 404, 10008, false, false, 'uncertain']
+      ];
+      for (const [sent, status, code, fresh, threaded, verdict] of table) {
+        assert.equal(is(sent, status, code, fresh, threaded), verdict, JSON.stringify([sent, status, code, fresh, threaded]));
+      }
+      // The set is closed, and nothing in it is "posted".
+      const kinds = new Set();
+      for (const sent of ['no', 'unknown', undefined]) {
+        for (const status of [0, 200, 302, 400, 401, 403, 404, 409, 429, 500, 502]) {
+          for (const code of [null, undefined, 0, 10003, 10008, 50013, 99999]) {
+            for (const fresh of [true, false]) for (const threaded of [true, false]) kinds.add(classifyAttempt({ sent, status, discordCode: code, fresh, threaded }).kind);
+          }
+        }
+      }
+      assert.deepEqual([...kinds].sort(), ['circuit', 'rejected', 'retry-unthreaded', 'transient', 'uncertain', 'unknown', 'unplaceable']);
+    });
+
+    it('a retry by itself that ends in doubt is settled by the next pass under the same nonce: one post', async () => {
+      const { outboundId } = await answered('the answer');
+      // The reply target is gone (a bare 404); the unthreaded retry lands, but its answer is lost.
+      discord.script.push({ status: 404, body: {} }, { status: 502, lands: true });
+      const relay = outbound();
+      const calls = discord.calls();
+      assert.deepEqual(await relay.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.calls() - calls, 2);
+      assert.equal(discord.posts.length, 1, 'it did post, though the helper cannot know');
+      const entry = relay.state.get(outboundId);
+      assert.deepEqual([Boolean(entry.since), entry.unthreaded, entry.parts], [true, 0, []], 'the attempt is in doubt, and the part stays unthreaded');
+      assert.deepEqual([atBridge(outboundId)[0], bridgeStore.circuit.open()], ['ready', null]);
+
+      clock += 30000;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(discord.calls() - calls, 3, 'one more call: by itself, not as a reply again');
+      assert.deepEqual(discord.posts.map((p) => [p.content, p.replyTo, p.nonce]), [['**Project Master**\nthe answer', null, nonceFor(relay.state.salt, outboundId, 0)]]);
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+    });
+
+    it('a 403 or 404 with a code it does not know is this item\'s problem, never the channel\'s', async () => {
+      for (const refusal of [{ status: 403, body: { code: 40001 } }, { status: 404, body: { code: 10007 } }]) {
+        const odd = await answered('first');
+        const next = await answered('second');
+        discord.script.push(refusal);
+        codes.length = 0;
+        assert.deepEqual(await outbound().pass(), { ok: true, posted: 1, acked: 1, held: 0 }, JSON.stringify(refusal));
+        assert.deepEqual([atBridge(odd.outboundId)[0], bridgeStore.outbound.get(odd.outboundId).blockCode, atBridge(next.outboundId)[0], bridgeStore.circuit.open()],
+          ['blocked', 'outcome-unverifiable', 'delivered', null]);
+        assert.deepEqual(codes.filter(([c]) => c === 'outbound-unplaceable').map(([, f]) => f.status), [refusal.status]);
+        store.getDb().exec("DELETE FROM bridge_outbound WHERE state = 'ready'");
+      }
+    });
+
+    it('a definite refusal while an earlier attempt is in doubt settles nothing: the item is held as uncertain', async () => {
+      for (const refusal of [{ status: 403, body: {} }, { status: 404, body: { code: 10003 } }, { status: 401, body: {} }, { status: 400, body: { code: 50035 } }]) {
+        discord.posts.length = 0;
+        const { outboundId } = await answered('the answer');
+        discord.script.push({ status: 502, lands: true }, refusal);
+        const relay = outbound();
+        assert.equal((await relay.pass()).ok, false);
+        clock += 30000;
+        const pass = await relay.pass();
+        assert.deepEqual([pass.ok, pass.held], [true, 1], JSON.stringify(refusal));
+        assert.equal(relay.state.get(outboundId).status, 'uncertain');
+        assert.deepEqual([atBridge(outboundId)[0], bridgeStore.outbound.get(outboundId).blockCode, bridgeStore.circuit.open()], ['blocked', 'outcome-unverifiable', null],
+          'not the circuit, not a retry, and not delivered');
+        assert.equal(answersPosted().length, 1, 'the answer is in the channel once; only the notice that it was set aside follows it');
+        clock += bridgeStore.LEASE_MS + 1000;
+        fs.rmSync(path.dirname(stateFile), { recursive: true, force: true });
+        store.getDb().exec("DELETE FROM bridge_outbound WHERE state IN ('ready','blocked')");
+      }
     });
 
     it('a refusal a retry may fix holds nothing and sets nothing aside', async () => {

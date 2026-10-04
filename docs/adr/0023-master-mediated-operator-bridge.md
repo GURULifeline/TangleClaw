@@ -407,11 +407,23 @@ have the reply reach the Master as a reply to that milestone.
   item. A transient, network, rate-limit or server failure is retried with bounded backoff and
   never opens the circuit.
 - **A bare 403 or 404 is neither success nor passed over.** For the fixed-channel
-  create-message call, a 403 without a code is configuration or permission and opens the
-  circuit. For a threaded post, Discord's codes for a missing reply target, or a bare 404, allow
-  exactly one unthreaded retry. If that retry is 404, or the original post was unthreaded and
-  is 404, it is the channel, and the circuit opens. An outcome that cannot be placed safely is
-  `outcome-unverifiable` and fails closed: it is never marked delivered.
+  create-message call: Discord's known configuration codes open the circuit; a 403 with no code
+  opens it; a threaded 404 with no code, or Discord's codes for a missing reply target, allow
+  exactly one unthreaded retry; a 404 with no code on that retry, or on a post that was
+  unthreaded to begin with, opens it. A 403 or 404 carrying a code that is not recognised is
+  item-level `outcome-unverifiable`, never the global circuit. An outcome that cannot be placed
+  safely fails closed: it is never marked delivered.
+- **One closed classifier judges a post attempt,** from whether Discord may have acted, the
+  status, Discord's code, whether an earlier attempt is already in doubt, and whether the
+  attempt named a message to reply to. The relay acts on its answer and decides nothing itself.
+  A definite refusal while an earlier attempt is in doubt becomes `uncertain`: never transient,
+  never delivered.
+- **`outcome-unverifiable` stays one block reason with two recovery paths.** Held as
+  `uncertain` at the helper: settle, then requeue. Absent from the helper's status: nothing
+  landed or is held; inspect the refusal, then requeue or withdraw.
+- **No new push to the Master in this phase.** The durable one-per-episode record and the
+  status surfaces stand. Before cutover the Master must actively consume and surface that
+  record; until then a release may queue behind an open circuit and is not a delivery receipt.
 - **The episode's record does not recurse.** It is not delivered through the chat that is
   closed; it is visible through the operator's local status and, until cutover, the interim
   route.
