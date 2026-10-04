@@ -59,6 +59,17 @@ The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cl
 
 Against current main's `ui.js` and `landing.js`, 14 of the file's tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
 
+## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
+
+<!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
+
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane C). It re-lands the fix from PR #1969 on a fresh branch off current main, because that branch had fallen dozens of merges behind; the test file had since changed under #1955 and #1978, so the fix was re-applied by hand rather than cherry-picked.
+
+**Problem.** `test/startup-control-codex.test.js`, *accepted on the echoed clientId + bytes notification…*: the fake app-server sent `turn/started` and `item/completed` on a 20 ms timer, and the completion on an 80 ms one. On a slow runner both fired before the adapter's post-subscribe read-back, the fire settled, and the read-back was skipped, so `one read-back` saw 0.
+
+**The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
+
+**Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
 ## 2026-10-04 — Inline handlers in every page script take their values through jsArg (#1902)
 
 <!-- prawduct: type=bugfix | scope=inline-handler-jsarg-1902 -->
