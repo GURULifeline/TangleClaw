@@ -320,14 +320,25 @@ name or a count the server resolved, never anything a session or the operator ty
   fleet roster uses: a fresh `complete`, `safe-to-clear` receipt of the live launch with the
   engine at rest. A lane that is working, waiting, blocked, stale or unknown means the fleet is
   not idle.
-- **One notice per idle episode.** An episode is one unbroken spell of an idle fleet with the
-  same members. It is notified when it is seen to begin. A lane that stays finished and
-  reports again is the same episode; a fleet that works and goes idle again, or gains or loses
-  a lane, is a new one. A fleet that was already idle when the bridge was enabled, or when the
-  server started, is not announced: nothing saw it begin.
+- **One notice per idle episode.** An episode is one spell of an idle fleet with the same
+  members, notified when it is seen to begin. Three readings are kept apart:
+  - *idle*: every lane finished and clear, as above. Only this begins an episode.
+  - *busy*: a lane is working, waiting, blocked, held or stopped, or there are no lanes. Only
+    this, or a change of members, ends an episode.
+  - *unknown*: a lane's engine has not been observed at rest yet, an observation lapsed, or a
+    receipt went stale. It neither begins nor ends one: not knowing is not idle, and it is not
+    evidence that anything changed.
+
+  So a lane that stays finished and reports again, or whose reading lapses and returns, is the
+  same episode. After the bridge is enabled, or the server restarts, the first reading that
+  says anything is taken as it is and not announced; for the first seconds after a restart
+  every reading is unknown, because no engine has been observed at rest yet.
 - **Not kept for a late helper.** A notification or status notice nobody collected within 24
   hours is dropped, and an approved candidate within 7 days, so a helper that attaches late
-  does not post stale news ahead of current answers. A reply is never dropped.
+  does not post stale news ahead of current answers. A reply is never dropped. What is let go
+  is recorded in the audit. A helper that had already fetched an item and posts it after it
+  expired is still believed when it acknowledges. A route's status notice that expired is not
+  raised a second time.
 
 `release-action-needed` and `certification-state-changed` remain reserved, with no producer.
 

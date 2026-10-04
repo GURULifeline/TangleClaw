@@ -251,14 +251,12 @@ describe('bridge notifications (#2031)', () => {
       assert.equal(new Set(notifications().map((x) => x.key)).size, 3);
     });
 
-    it('does not announce a fleet that was already idle when the bridge was enabled or the server started', () => {
+    const unseen = (sessionId, launchId, receiptSeq) => ({ sessionId, launchId, receiptSeq, availability: 'COMPLETE_NOT_CLEAR' });
+
+    it('does not announce a fleet that was already idle when the bridge was enabled', () => {
       lanes = [idle(1, 'launch-a', 4)];
       enable();
       assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'idle before it was enabled is not news');
-      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
-
-      // The server restarts with the fleet still idle.
-      bridgeNotify._reset();
       assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
 
       // Disabled and enabled again, still idle throughout.
@@ -275,21 +273,87 @@ describe('bridge notifications (#2031)', () => {
       assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
     });
 
-    it('an idle notice that could not be enqueued is made on the next pass', () => {
+    it('does not announce an idle fleet again after a server restart, while the engines are not yet observed at rest', () => {
+      enable();
+      lanes = [busy(1, 'launch-a')];
+      bridgeNotify.reconcile();
+      lanes = [idle(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
+
+      // The server restarts. For its first passes the activity observer has
+      // not yet seen any pane at rest, so a finished lane reads not-clear.
+      bridgeNotify._reset();
+      lanes = [unseen(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+      // Then it is observed at rest: the same spell, not a new one.
+      lanes = [idle(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'found idle on the first reading that says anything: not announced');
+      assert.equal(notifications().length, 1);
+    });
+
+    it('a reading that lapses and comes back is the same episode, not a new one', () => {
+      enable();
+      lanes = [busy(1, 'launch-a'), busy(2, 'launch-b')];
+      bridgeNotify.reconcile();
+      lanes = [idle(1, 'launch-a', 2), idle(2, 'launch-b', 3)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
+      for (const lapse of [
+        [unseen(1, 'launch-a', 2), idle(2, 'launch-b', 3)],
+        [{ sessionId: 1, launchId: 'launch-a', receiptSeq: null, availability: 'UNKNOWN' }, idle(2, 'launch-b', 3)],
+        null
+      ]) {
+        lanes = lapse;
+        assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+        lanes = [idle(1, 'launch-a', 2), idle(2, 'launch-b', 3)];
+        assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'not knowing is not evidence that anything changed');
+      }
+      assert.equal(notifications().length, 1);
+    });
+
+    it('not knowing never begins an episode, and evidence of work always ends one', () => {
+      enable();
+      lanes = [busy(1, 'launch-a')];
+      bridgeNotify.reconcile();
+      lanes = [unseen(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 0, 'finished but not seen at rest is not idle');
+      lanes = [idle(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
+      for (const state of ['WORKING', 'WAITING', 'BLOCKED', 'HELD', 'STOPPED']) {
+        later(60000);
+        lanes = [{ sessionId: 1, launchId: 'launch-a', receiptSeq: 2, availability: state }];
+        bridgeNotify.reconcile();
+        lanes = [idle(1, 'launch-a', 2)];
+        assert.equal(bridgeNotify.reconcile().fleetIdle, 1, `${state} ended the episode`);
+      }
+      // An empty fleet ends it too.
+      later(60000);
+      lanes = [];
+      bridgeNotify.reconcile();
+      lanes = [idle(1, 'launch-a', 2)];
+      assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
+    });
+
+    it('an idle notice that could not be enqueued is made on the next pass, under the same key', () => {
       enable();
       lanes = [busy(1, 'launch-a')];
       bridgeNotify.reconcile();
       lanes = [idle(1, 'launch-a', 2)];
       const realEnqueue = bridgeStore.outbound.enqueue;
-      bridgeStore.outbound.enqueue = () => { throw new Error('database is locked'); };
+      const tried = [];
+      bridgeStore.outbound.enqueue = (item) => { tried.push(item.idemKey); throw new Error('database is locked'); };
       try {
+        assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
+        later(15000);
         assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
       } finally {
         bridgeStore.outbound.enqueue = realEnqueue;
       }
+      later(15000);
       assert.equal(bridgeNotify.reconcile().fleetIdle, 1);
       assert.equal(bridgeNotify.reconcile().fleetIdle, 0);
       assert.equal(notifications().length, 1);
+      assert.deepEqual([...new Set(tried)], [notifications()[0].key], 'every attempt used the one key');
     });
 
     it('fails closed: an empty fleet, or any lane that is not known to be finished and clear, is not idle', () => {
