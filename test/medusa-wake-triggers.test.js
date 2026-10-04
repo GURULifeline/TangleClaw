@@ -382,6 +382,61 @@ describe('scan requests — stopping (#2086)', () => {
   });
 });
 
+describe('scan requests — the follow-up is only ever about the pane that was observed (#2086)', () => {
+  it('a session id that names another pane before the follow-up loses the streak and the booking', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    await withFleet([session], {}, async (world) => {
+      wake.requestScan(1, 'mail-arrived');
+      await pass(world, 1000);
+      assert.equal(world.timers.length, 1);
+      // The same id, relaunched into another pane, also at rest with mail.
+      session.record = { ...session.record, tmuxSession: 'syn-1-relaunched', startedAt: '2026-10-04 10:10:10' };
+      wake._internal.tick({ async: true });
+      assert.equal(world.timers.length, 0, 'the booking for the old pane is cancelled');
+      await pass(world, 1000);
+      assert.equal(world.injected.length, 0, 'the new pane\'s first observation does not complete the old pane\'s streak');
+      await pass(world, GAP);
+      assert.equal(world.injected.length, 0, 'and the cancelled follow-up never ran');
+      await matrix.runTicksAsync(world, 1);
+      await pass(world, 1000);
+      assert.equal(world.injected.length, 1, 'two observations of the new pane, a tick apart, nudge it');
+    });
+  });
+
+  it('a session replaced under a new id before the follow-up is not typed into from the old one\'s observation', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    await withFleet([session], {}, async (world) => {
+      wake.requestScan(1, 'mail-arrived');
+      await pass(world, 1000);
+      session.gone = true;
+      const replacement = matrix.makeSession(2, 'idle-mail');
+      world.fleet.push(replacement);
+      await pass(world, GAP);
+      assert.equal(world.injected.length, 0, 'the old session\'s follow-up found it gone, and the new one has not been observed twice');
+      assert.equal(reads(world, 2), 0);
+    });
+  });
+
+  it('a follow-up that never fires does not hold the session back: the timer takes it up again once it is overdue', async () => {
+    const session = matrix.makeSession(1, 'idle-mail');
+    await withFleet([session], {}, async (world) => {
+      wake.requestScan(1, 'mail-arrived');
+      await pass(world, 1000);
+      // The booked timer is lost.
+      world.timers = [];
+      wake._internal.tick({ async: true });
+      await pass(world, 500);
+      assert.equal(reads(world, 1), 1, 'while the follow-up is still due, the tick leaves the session to it');
+      await pass(world, 2 * GAP);
+      assert.equal(reads(world, 1), 1);
+      // Now it is overdue.
+      await matrix.runTicksAsync(world, 2);
+      await pass(world, 1000);
+      assert.equal(world.injected.length, 1, 'the timer woke the recipient by itself');
+    });
+  });
+});
+
 describe('scan requests — who asks (#2086)', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -412,6 +467,70 @@ describe('scan requests — who asks (#2086)', () => {
       assert.equal(registry.finish('trigger-proj', begun.runId, { ok: true }), false);
     });
     assert.deepEqual(seen, [[42, 'wrap-finished']]);
+  });
+
+  it('the wrap has finished by the time the request is made', async () => {
+    const registry = require('../lib/wrap-run-registry');
+    let runningWhenAsked = null;
+    const real = wake.requestScan;
+    wake.requestScan = () => { runningWhenAsked = registry.get('trigger-proj-2').running; return true; };
+    try {
+      const begun = registry.begin('trigger-proj-2', 43);
+      registry.finish('trigger-proj-2', begun.runId, null);
+    } finally {
+      wake.requestScan = real;
+    }
+    assert.equal(runningWhenAsked, false);
+  });
+
+  it('a wrap with no session asks for nothing', async () => {
+    const registry = require('../lib/wrap-run-registry');
+    const seen = await requestsDuring(() => {
+      const begun = registry.begin('trigger-proj-3', null);
+      assert.equal(registry.finish('trigger-proj-3', begun.runId, null), true);
+    });
+    assert.deepEqual(seen, []);
+  });
+
+  it('a request that throws cannot fail the wrap that finished', () => {
+    const registry = require('../lib/wrap-run-registry');
+    const real = wake.requestScan;
+    wake.requestScan = () => { throw new Error('monitor exploded'); };
+    try {
+      const begun = registry.begin('trigger-proj-4', 44);
+      assert.equal(registry.finish('trigger-proj-4', begun.runId, { ok: true }), true);
+      assert.equal(registry.get('trigger-proj-4').running, false);
+    } finally {
+      wake.requestScan = real;
+    }
+  });
+
+  it('a request that throws cannot stop a listener reaching listening', async () => {
+    const os = require('node:os');
+    const medusa = require('../lib/medusa');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-trigger-'));
+    /** A WebSocket the test opens and feeds by hand. */
+    class FakeSocket {
+      constructor() { this.readyState = 0; this.sent = []; this._h = Object.create(null); }
+      addEventListener(t, h) { (this._h[t] || (this._h[t] = [])).push(h); }
+      send(d) { this.sent.push(d); }
+      close() { this.readyState = 3; }
+      fire(t, e) { for (const h of this._h[t] || []) h(e); }
+    }
+    const real = wake.requestScan;
+    wake.requestScan = () => { throw new Error('monitor exploded'); };
+    try {
+      let socket;
+      const status = medusa.startSession({ projectPath: dir, sessionId: 4343, name: 'Trigger Two', wsFactory: () => (socket = new FakeSocket()) });
+      socket.readyState = 1;
+      socket.fire('open', {});
+      socket.fire('message', { data: JSON.stringify({ type: 'registered', workspaceId: status.workspaceId, connectionId: 'c1' }) });
+      assert.equal(medusa.getStatus(4343).state, 'listening');
+    } finally {
+      wake.requestScan = real;
+      medusa.stopSession(4343);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('a listener that reaches listening asks for a look at its session, and not for any other state', async () => {
@@ -453,6 +572,9 @@ describe('scan requests — who asks (#2086)', () => {
     const asked = observer.indexOf("medusaWake.requestScan(sessionKey, 'mail-arrived')");
     assert.ok(recorded >= 0 && asked > recorded, 'the scan is requested after the arrival is recorded');
     assert.ok(!/return;/.test(observer.slice(0, asked)), 'no early return can skip the request');
+    const tail = observer.slice(observer.indexOf('} finally {'));
+    assert.ok(tail.includes("medusaWake.requestScan(sessionKey, 'mail-arrived')"), 'the request is made even if recording the arrival throws');
+    assert.match(tail, /try \{\s*medusaWake\.requestScan\(sessionKey, 'mail-arrived'\);\s*\} catch/, 'and a request that throws is contained');
   });
 
   it('a rotation that closes asks for a look at its session', () => {

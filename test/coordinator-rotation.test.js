@@ -913,6 +913,55 @@ describe('coordinator context rotation (#2032)', () => {
       assert.equal(stale.body.code, 'ROTATION_STALE_GENERATION');
     });
 
+    it('a rotation that resumes asks the wake monitor to look at its session, once, and a replay does not ask again (#2086)', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      const asked = [];
+      const withWake = () => ({ ...deps(), wake: (sessionId, reason) => { asked.push([sessionId, reason]); } });
+      const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+      const refused = await rotation.resume({ access: access(), threadId: NEXT, body: { ...body, resumeNonce: 'not-the-nonce' } }, withWake());
+      assert.notEqual(refused.status, 200);
+      assert.deepEqual(asked, [], 'a refused resume closed nothing, so nothing is asked');
+      const r = await rotation.resume({ access: access(), threadId: NEXT, body }, withWake());
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(asked.length, 1);
+      assert.equal(asked[0][1], 'rotation-closed');
+      assert.equal(asked[0][0], r.body.rotation.sessionId ?? store.coordinatorRotations.get(rot.rotationId).sessionId);
+      const replay = await rotation.resume({ access: access(), threadId: NEXT, body }, withWake());
+      assert.equal(replay.body.replayed, true);
+      assert.equal(asked.length, 1);
+    });
+
+    it('a wake request that throws cannot fail the resume that made it (#2086)', async () => {
+      const rot = await toReconciling();
+      workloadReceipt();
+      const wake = require('../lib/medusa-wake');
+      const real = wake.requestScan;
+      wake.requestScan = () => { throw new Error('monitor exploded'); };
+      try {
+        const body = { rotationId: rot.rotationId, attemptKey: rot.attemptKey, generation: rot.generation, resumeNonce: nonce(), receipt: receipt(rot) };
+        const r = await rotation.resume({ access: access(), threadId: NEXT, body }, deps());
+        assert.equal(r.status, 200, JSON.stringify(r.body));
+        assert.equal(rotation.openRotation(project.id), null);
+      } finally {
+        wake.requestScan = real;
+      }
+    });
+
+    it('abandoning an open rotation asks the wake monitor to look, and a refused abandon does not (#2086)', async () => {
+      await serve();
+      channel();
+      const rot = (await prepare()).body.rotation;
+      const asked = [];
+      const withWake = { wake: (sessionId, reason) => { asked.push([sessionId, reason]); } };
+      assert.equal(rotation.abandon({ caller: { kind: 'project' }, body: { rotationId: rot.rotationId, reason: 'x' } }, withWake).status, 403);
+      assert.deepEqual(asked, []);
+      const r = rotation.abandon({ caller: { kind: 'operator' }, body: { rotationId: rot.rotationId, reason: 'by hand' } }, withWake);
+      assert.equal(r.status, 200);
+      assert.equal(asked.length, 1);
+      assert.equal(asked[0][1], 'rotation-closed');
+    });
+
     it('only the operator can abandon a rotation, and abandoning lifts the fence without touching the channel', async () => {
       await serve();
       channel();
