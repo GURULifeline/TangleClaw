@@ -250,7 +250,7 @@ Every write:
 |---|---|
 | `403 LOOPBACK_REQUIRED` | The request did not come directly from this machine: it arrived over the network or through a proxy. Judged before the credential is looked at. `tc bridge` does not send the credential to any other host in the first place. |
 | `401 BRIDGE_CREDENTIAL_REQUIRED` | The request did not carry the live Master generation's credential, or tmux says there is no Master: the credential is then revoked on the spot (`master-not-live`). When tmux does not answer, a live Master keeps its credential. |
-| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route but `status` and `close` answers this. `close` stays available so that turning the bridge off never leaves message text held. |
+| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route that could lead to a post answers this. The Master's `status`, `close`, `blocked`, `withdraw`, and the circuit's `ack` and `reset` stay available, so that turning the bridge off never leaves message text held or an episode unanswerable; so does the helper's `preflight`. |
 | `404 ROUTE_NOT_FOUND` | No such route. |
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
 | `409 REQUEST_ID_REUSED` | The request id was already used for a different route. |
@@ -568,7 +568,7 @@ audit.
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
 | `POST /api/bridge/operator/enable` | Enables the bridge. Refused until the allowlist is set, a helper token exists and the Master is a switchboard participant (`409 MASTER_LISTENER_OFF`). Audited with the signed-in user. Starts the gateway's listener. |
 | `POST /api/bridge/operator/disable` | Disables it and stops the listener. |
-| `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Refused `409 BRIDGE_DISABLED` while the bridge is off. Audited. |
+| `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Switching it on is refused `409 BRIDGE_DISABLED` while the bridge is off; switching it off is always taken. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
 | `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. |

@@ -47,8 +47,9 @@ because this page exists.
   the helper's Gateway connection.** That the bridge is operational takes three things
   together: the bridge enabled (`GET /api/bridge/operator/status`), a verified Master
   (`tc bridge status` answers with its generation), and the Gateway `ready`
-  (`bin/tc-bridge-helper status`). The runbooks enable the bridge before starting the helper
-  and stop the helper when rolling back, so that the bot is online only while all three hold.
+  (`bin/tc-bridge-helper status`). The helper connects whenever it runs, and launchd starts it
+  at every login, so the bot can be online while the bridge is disabled. `tc bridge status`
+  answers in the Project Master's pane only.
 - **Messages sent while the helper is down are not caught up.** The Gateway does not replay
   them. Send them again once `status` shows the Gateway `ready`. Answers and notifications are
   different: they wait at the bridge, so none is lost while the helper or Discord is down.
@@ -299,7 +300,8 @@ TangleClaw's answer is echoed.
 | the message has no text | An attachment or sticker with no text. |
 | TangleClaw refused the helper's token | The token was replaced. Run `set-secret helper` with the new one. |
 | TangleClaw could not accept this message | The bridge found the message malformed. |
-| TangleClaw could not be reached | Three attempts failed, or the server answered with a redirect. Send it again later. |
+| the helper is not reaching TangleClaw directly on its own machine | The bridge answers the helper only for a request made straight from this machine (`403 LOOPBACK_REQUIRED`). The helper's base URL points through a proxy or elsewhere; run `configure` again. |
+| TangleClaw could not be reached | Three attempts failed or were over the bridge's rate limit, or the server answered with a redirect. Send it again later. |
 
 ## Troubleshooting by log code
 

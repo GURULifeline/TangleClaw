@@ -43,7 +43,7 @@ the Architect.
 
 3. **Operator:** set the allowlist and create the helper token
    (`POST /api/bridge/operator/allowlist`, then `POST /api/bridge/operator/helper-token`).
-   → Expected: `200` for each; the second shows the token once.
+   → Expected: `200` for the allowlist and `201` for the token, which is shown once.
    > 🚧 **UNVERIFIED** — there is no dashboard page for these routes. How the signed-in Operator
    > calls them (and the other steps marked **Operator**) has not been exercised · settle it with the Architect before
    > this runbook is used.
@@ -63,10 +63,14 @@ the Architect.
    → `409 MASTER_LISTENER_OFF`: turn on the Master's Medusa setting, then repeat.
 
 7. Start the helper: `bin/tc-bridge-helper install-launchd`, then `bin/tc-bridge-helper status`
-   → Expected: `helper: running`, `gateway: ready`, `held: nothing`. In Discord the bot shows as
-   an online member of the server: with the Operator online, the online count goes from 1 to 2.
+   → Expected: `helper: running`, `gateway: ready`, `held: nothing`. `status` shows what the
+   helper last wrote down, once a pass: if it says `connecting`, run it again after 30 seconds,
+   for up to five minutes, before treating it as failed. In Discord the bot shows as an online
+   member of the server: the online count is one more than before the helper started (from 1
+   to 2 when only the Operator is online).
    Online proves the helper's Gateway connection only. The bridge is operational when it is
-   enabled (step 6), the Master is verified (`tc bridge status` answers) and the Gateway is `ready`.
+   enabled (step 6), the Master is verified (`tc bridge status`, run by the Master in its own
+   pane, answers) and the Gateway is `ready`.
    → `gateway: fatal (close code 4014)`: turn on Message Content Intent for the bot, then
    `launchctl kickstart -k gui/$(id -u)/com.tangleclaw.bridge-helper`.
 
@@ -77,7 +81,8 @@ the Architect.
 
 9. Controlled outbound. A project session offers a milestone with `tc candidate submit`; the Master
    approves it with `tc bridge approve <candidate-id> --version <n>`.
-   → Expected: one post in the channel from `Project Master`; `tc bridge blocked` lists nothing.
+   → Expected: one post in the channel headed `Project Master, from <project name>`;
+   `tc bridge blocked` lists nothing.
    → `tc bridge status` shows `CONFIGURATION CIRCUIT OPEN`: the bot cannot post there. Fix its
    permissions, then `tc bridge reset --requeue`.
 
