@@ -205,6 +205,13 @@ send prose to Discord.
   own newly assigned number, the operator disables the legacy Rules #145 and #128 and keeps both
   for audit. A rollback leaves the new rule active and uses its own fallback for a disabled
   bridge; it re-enables neither legacy rule.
+- **Rolling the bridge back keeps v5.31.0 and its store (Architect ruling, 2026-10-04).** Putting
+  back the previous build and the pre-update snapshot is a separate emergency procedure, for
+  when v5.31.0 itself cannot start or stay healthy. It is a rollback in time: everything written
+  after the snapshot is absent from the active store, and the v5.31 store is quarantined, never
+  deleted and never merged back. It needs the Operator's explicit agreement and the Architect
+  present, and it proceeds only once the server job is proven gone and nothing has the store or
+  its sidecar files open.
 
 The two paths are sequential, not parallel. The interim procedure is retired at cutover, not
 merged into the new path. #2040 owns its documentation.

@@ -35,15 +35,18 @@ snapshot in step 1. Stop and tell the Architect. Until step 16 replaces it, Rule
 If any step's expected result does not appear, stop and go to
 [Roll the operator bridge back](roll-back-the-operator-bridge.md).
 
-1. **Release executor:** while the old build is still running, take a snapshot of the store.
-   In a terminal, set `TC_CHECKOUT=<the checkout the service runs from>`, then paste this as it
-   is. The parentheses matter: a failure stops the block, not your terminal. With `TC_CHECKOUT`
-   unset or empty the block stops before it runs anything.
+1. <a id="snapshot"></a>**Release executor:** while the old build is still running, take a
+   snapshot of the store. In a terminal, set `TC_CHECKOUT=<the checkout the service runs from>`,
+   then paste this as it is. The parentheses matter: a failure stops the block, not your
+   terminal. With `TC_CHECKOUT` unset, empty, or not the directory the server's launchd job
+   runs from, the block stops before it runs anything. Keep this terminal: every later command
+   of the release executor uses `TC_CHECKOUT`, and refuses to run without it.
 
    ```sh
    (
    set -eu
    : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
+   grep -Fq "<string>$TC_CHECKOUT</string>" "$HOME/Library/LaunchAgents/com.tangleclaw.server.plist" || { echo "TC_CHECKOUT is not the checkout the server job runs from" >&2; exit 1; }
    umask 077
    STORE="${TC_STORE:-$HOME/.tangleclaw/tangleclaw.db}"
    FROM="$(git -C "$TC_CHECKOUT" describe --tags --always)-$(git -C "$TC_CHECKOUT" rev-parse --short=12 HEAD)"
@@ -98,7 +101,7 @@ If any step's expected result does not appear, stop and go to
 
 ## Phase B: prepare
 
-6. **Operator:** bring the Master's first hard rule to the shipped text. Open the Master panel,
+6. <a id="master-rule"></a>**Operator:** bring the Master's first hard rule to the shipped text. Open the Master panel,
    its settings, **Hard rules**. First write the current rule list into the cutover receipt.
    This is the Master's first hard rule as shipped, whole, word for word. The asterisks are
    part of it:
@@ -125,7 +128,7 @@ If any step's expected result does not appear, stop and go to
    > activation is that check. A rule row cannot be edited once added: if the new row is not
    > the text above, delete that new row and add it again.
 
-7. **Operator:** relaunch the Master. In the Master bar press **Kill** and confirm "Stop the
+7. <a id="master-relaunch"></a>**Operator:** relaunch the Master. In the Master bar press **Kill** and confirm "Stop the
    Project Master?". The bar says `Master stopped`. Then press **Retry**, or **Launch** if the bar
    shows that instead: both start it again.
    → Expected: the Master's pane opens on a fresh session.
@@ -152,13 +155,13 @@ If any step's expected result does not appear, stop and go to
 10. **Release executor:** store the helper token, then configure the helper. Run the first
     command, have the Operator press **Copy**, paste at the command's prompt, then have the
     Operator press **I have stored it**:
-    `bin/tc-bridge-helper set-secret helper`
-    `bin/tc-bridge-helper configure --base-url <loopback address> --author <id> --guild <id> --channel <id>`
+    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" set-secret helper`
+    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" configure --base-url <loopback address> --author <id> --guild <id> --channel <id>`
     The address is the one TangleClaw answers on from this machine itself, `http://127.0.0.1:3102`
     on a default install. The helper refuses any other host.
     → Expected: `Stored the helper token in the Keychain.` and `Config written.`
 
-11. **Release executor:** `bin/tc-bridge-helper preflight`
+11. **Release executor:** `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" preflight`
     → Expected: exit 0; every check `ok` except `bridge-enabled` and `discord-post`, which say
     `unproven`; and a last line beginning `No check failed.`
     → If any line says `FAIL`: fix what it names and run it again. Do not go on.
@@ -166,7 +169,11 @@ If any step's expected result does not appear, stop and go to
 ## Phase C: switch on and prove
 
 12. **Operator:** press **Enable the bridge** and confirm. Then the release executor runs
-    `bin/tc-bridge-helper install-launchd`, then `bin/tc-bridge-helper status`.
+    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" install-launchd`
+    `grep -c "<string>${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper</string>" "$HOME/Library/LaunchAgents/com.tangleclaw.bridge-helper.plist"`
+    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" status`
+    → Expected of the second command: `1`. The helper's launchd job runs the helper of this exact
+    checkout. Anything else: roll back.
     → Expected: the panel's Bridge line says **enabled** and Project Master shows `listener
     listening`. `status` prints `helper: running (pid <n>)`, `gateway: ready`, `held: nothing`, and a
     `last pass:` line ending `ok`. `status` shows what the helper last wrote down, once a pass: if
@@ -230,8 +237,11 @@ If any step's expected result does not appear, stop and go to
     → Expected: the session says yes, and the line still says only `on`.
     The verb is named only in what a session is given as it starts. `tc start review` re-reads
     the launch steps, which do not carry that section, so it cannot show this.
-    → The session says no and the line says only `on`: do not roll back for this. Sessions can be
-    told the command, as in step 14. Tell the Architect, and go on.
+    → The session says no and the line says only `on`: the verb did not reach this one session.
+    That is degraded delivery, not a failed activation. Tell that session the command, as in
+    step 14, write its project and the time into the cutover receipt, and go on.
+    → Roll back only if the line says `off`, the session was launched before the switch was
+    turned on, or the bridge itself fails one of the checks in this runbook.
     → If the line adds "a session of project <id> was not told", with this session's project and
     a time after you launched it: that session's context had no room for the verb. The switch is
     on and nothing is posted wrongly. Tell the Architect the two numbers it shows, and go on.
@@ -248,7 +258,8 @@ If any step's expected result does not appear, stop and go to
 ## Done when
 
 Step 18's answer is in Discord. `tc bridge status`, run by the Master in its own pane, shows the
-bridge enabled with no circuit open. `bin/tc-bridge-helper status` shows `held: nothing` and a
+bridge enabled with no circuit open. `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" status`
+shows `held: nothing` and a
 `last pass:` line ending `ok`. The cutover receipt holds: the five snapshot lines, the Master's
 rule list before step 6, and the number of the new Discord rule.
 

@@ -113,7 +113,7 @@ describe('the operator bridge runbooks (#2031)', () => {
       assert.ok(!/GET \/api\/health/.test(ACTIVATE + ROLLBACK), 'no route is called by hand');
       assert.ok(!/server is not running the merged commit/.test(text), 'the precondition that the new code runs first is gone');
       // The restore uses that snapshot and no other file.
-      assert.match(flat(ROLLBACK), /`TC_COMMIT` and `TC_SNAPSHOT` to the `commit:` and `snapshot:` lines of the cutover receipt, and no other commit or file\./);
+      assert.match(flat(ROLLBACK), /Set `TC_COMMIT`, `TC_SNAPSHOT`, `TC_SNAPSHOT_SHA256` and `TC_SNAPSHOT_SCHEMA` to the `commit:`, `snapshot:`, `sha256:` and `schema:` lines of the cutover receipt, and nothing else\./);
       assert.ok(!/tangleclaw\.pre-bridge\.db/.test(ACTIVATE + ROLLBACK), 'no fixed backup name that a second activation would overwrite');
     });
 
@@ -159,36 +159,77 @@ describe('the operator bridge runbooks (#2031)', () => {
       }
     });
 
-    it('the restore is one block, run as printed: it changes nothing until everything it needs is there, and stops at the first failure', () => {
+    it('the restore is one block, run as printed: it proves everything before it changes anything, keeps what it replaces, and stops at the first failure', { skip: sqlite ? false : 'sqlite3 is not installed here' }, () => {
       const m = /```sh\n([\s\S]*?)```/.exec(ROLLBACK);
       assert.ok(m, 'rollback has a shell block');
       const restore = m[1].split('\n').map((line) => line.replace(/^ {3}/, '')).join('\n');
       assert.match(restore.trim(), /^\(\nset -eu\n[\s\S]*\n\)$/, 'a subshell that stops at the first failure');
-      assert.ok(!/`(launchctl|cp|git) [^`]*`/.test(ROLLBACK.replace(/```sh[\s\S]*?```/g, '').split('8. Only if')[1].split('## Done when')[0]),
-        'no restore command is printed outside the block, where a failed guard would not stop the next line');
-      assert.ok(fs.existsSync(path.join(ROOT, 'deploy', 'com.tangleclaw.server.plist')));
+      assert.ok(!/#|\|\s*(cut|awk|sed|head)\b/.test(restore), 'no comment a pasting shell would run as a command, and no pipeline that hides a failure');
+      const step8 = ROLLBACK.slice(ROLLBACK.indexOf('8. <a id="restore-the-previous-build">'), ROLLBACK.indexOf('## Done when'));
+      assert.ok(!/`(launchctl|cp|mv|git|rm) [^`]*`/.test(step8.replace(/```sh[\s\S]*?```/, '')), 'no restore command is printed outside the block');
+      assert.ok(!/\brm\b/.test(restore), 'nothing is deleted');
+      // The job it stops and starts is the server's, by the label its job file carries.
+      assert.ok(read('deploy/com.tangleclaw.server.plist').includes('<string>com.tangleclaw.server</string>'));
 
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-restore-'));
       try {
         const log = path.join(dir, 'calls');
         const bin = path.join(dir, 'bin');
-        fs.mkdirSync(bin);
-        // Each tool records its call. git fails where GIT_FAILS names its subcommand; launchctl bootout fails where told to.
-        fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\necho "git $*" >> "${log}"\ncase " $* " in *" $GIT_FAILS "*) exit 1;; esac\n`, { mode: 0o755 });
-        fs.writeFileSync(path.join(bin, 'launchctl'), `#!/bin/sh\necho "launchctl $1" >> "${log}"\n[ "$1" != "$LAUNCHCTL_FAILS" ]\n`, { mode: 0o755 });
-        fs.writeFileSync(path.join(bin, 'cp'), `#!/bin/sh\necho "cp $*" >> "${log}"\n`, { mode: 0o755 });
+        const state = path.join(dir, 'tc');
+        const agents = path.join(dir, 'Library', 'LaunchAgents');
+        for (const d of [bin, state, agents]) fs.mkdirSync(d, { recursive: true });
+        const plist = path.join(agents, 'com.tangleclaw.server.plist');
+        fs.writeFileSync(plist, '<key>WorkingDirectory</key>\n    <string>/some/checkout</string>\n');
+        const tool = (name, body) => fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        // Recording stand-ins for what touches the machine. git fails where told; the job is "gone" unless told otherwise.
+        tool('git', `echo "git $*" >> "${log}"\ncase " $* " in *" $GIT_FAILS "*) exit 1;; esac`);
+        tool('launchctl', [
+          `echo "launchctl $*" >> "${log}"`,
+          'case "$1" in',
+          '  bootout) [ "${JOB_BOOTOUT:-ok}" = ok ] || { echo "Boot-out failed: 3: No such process" >&2; exit 3; } ;;',
+          '  print) case "${JOB_STATE:-gone}" in',
+          '      gone) echo "Could not find service \\"com.tangleclaw.server\\" in domain for user gui" >&2; exit 113 ;;',
+          '      loaded) echo "state = running"; exit 0 ;;',
+          '      unknown) echo "Bad request." >&2; exit 64 ;;',
+          '    esac ;;',
+          'esac'
+        ].join('\n'));
+        tool('lsof', `echo "lsof $*" >> "${log}"\ncase "$3" in *"$HELD_SUFFIX") [ -n "$HELD_SUFFIX" ] && { echo p4242; echo f12; exit 0; } ;; esac\n[ -z "$LSOF_BROKEN" ] || { echo "lsof: cannot read the process table" >&2; }\nexit 1`);
+        tool('sleep', 'exit 0');
+        tool('cp', 'case "${CP_MODE:-ok}" in\n  fails) printf partial > "$2"; exit 1 ;;\n  corrupts) /bin/cp "$1" "$2" && printf x >> "$2" ;;\n  *) exec /bin/cp "$@" ;;\nesac');
+
         const snapshot = path.join(dir, 'snap.db');
-        fs.writeFileSync(snapshot, 'a snapshot');
-        const storePath = path.join(dir, 'live.db');
-        const good = { TC_CHECKOUT: '/some/checkout', TC_COMMIT: '0123456789abcdef', TC_SNAPSHOT: snapshot, TC_STORE: storePath };
-        const run = (vars) => {
+        execFileSync('sqlite3', [snapshot, 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (52); CREATE TABLE t (x); INSERT INTO t VALUES (1);']);
+        const digest = (file) => require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+        const storePath = path.join(state, 'tangleclaw.db');
+        const sidecars = ['-journal', '-wal', '-shm'];
+        const fresh = () => {
+          fs.rmSync(state, { recursive: true, force: true });
+          fs.mkdirSync(state);
+          execFileSync('sqlite3', [storePath, 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (54);']);
+          for (const sfx of sidecars) fs.writeFileSync(storePath + sfx, `live${sfx}`);
+          return Object.fromEntries(['', ...sidecars].map((sfx) => [sfx, digest(storePath + sfx)]));
+        };
+        const good = {
+          TC_CHECKOUT: '/some/checkout', TC_COMMIT: '0123456789abcdef', TC_SNAPSHOT: snapshot, TC_SNAPSHOT_SHA256: digest(snapshot),
+          TC_SNAPSHOT_SCHEMA: '52', TC_OPERATOR_CONFIRMED: 'return-to-snapshot', TC_STORE: storePath, TC_RESTORE_STAMP: 'T1'
+        };
+        const run = (vars, shell = 'sh') => {
           fs.rmSync(log, { force: true });
-          const res = spawnSync('sh', ['-c', restore], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ...vars }, encoding: 'utf8' });
+          const res = spawnSync(shell, ['-c', restore], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, ...vars }, encoding: 'utf8' });
           return { status: res.status, stderr: res.stderr, stdout: res.stdout, calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : [] };
         };
+        const uid = process.getuid();
+        const job = `gui/${uid}/com.tangleclaw.server`;
+        const untouched = (before, why) => {
+          for (const sfx of ['', ...sidecars]) assert.equal(digest(storePath + sfx), before[sfx], `${why}: ${sfx || 'the store'} is as it was`);
+          assert.deepEqual(fs.readdirSync(state).sort(), ['tangleclaw.db', 'tangleclaw.db-journal', 'tangleclaw.db-shm', 'tangleclaw.db-wal'], `${why}: nothing was moved or added`);
+        };
+        const mutating = (calls) => calls.filter((c) => /^launchctl (bootout|bootstrap)|^git .* checkout /.test(c));
 
-        // Anything missing or empty: refused, by name, with nothing run at all.
-        for (const name of ['TC_CHECKOUT', 'TC_COMMIT', 'TC_SNAPSHOT']) {
+        // 1. Anything the receipt supplies missing or empty, or no agreement: refused by name, with nothing run at all.
+        let before = fresh();
+        for (const name of ['TC_CHECKOUT', 'TC_COMMIT', 'TC_SNAPSHOT', 'TC_SNAPSHOT_SHA256', 'TC_SNAPSHOT_SCHEMA']) {
           for (const value of [undefined, '']) {
             const vars = { ...good };
             if (value === undefined) delete vars[name]; else vars[name] = value;
@@ -198,39 +239,187 @@ describe('the operator bridge runbooks (#2031)', () => {
             assert.deepEqual(res.calls, [], 'nothing ran');
           }
         }
-        // A snapshot that is not there, or a commit the checkout does not have: refused before the server is stopped.
-        const noFile = run({ ...good, TC_SNAPSHOT: path.join(dir, 'missing.db') });
-        assert.notEqual(noFile.status, 0);
-        assert.match(noFile.stderr, /no such snapshot: /);
-        assert.deepEqual(noFile.calls, []);
-        const noCommit = run({ ...good, GIT_FAILS: 'cat-file' });
-        assert.notEqual(noCommit.status, 0);
-        assert.deepEqual(noCommit.calls, ['git -C /some/checkout cat-file -e 0123456789abcdef^{commit}'], 'only the read-only check ran');
-        // git refuses the checkout: the store is not replaced and the server is not started on the wrong build.
+        for (const said of [undefined, '', 'yes', 'return-to-snapshot ']) {
+          const vars = { ...good };
+          if (said === undefined) delete vars.TC_OPERATOR_CONFIRMED; else vars.TC_OPERATOR_CONFIRMED = said;
+          const res = run(vars);
+          assert.notEqual(res.status, 0);
+          assert.match(res.stderr, /not confirmed: the Operator has not agreed to return the store to the snapshot/);
+          assert.deepEqual(res.calls, []);
+        }
+        untouched(before, 'no agreement');
+
+        // 2. Every proof of the checkout and the snapshot comes before the server is touched.
+        const refusedEarly = (vars, message, why) => {
+          const res = run({ ...good, ...vars });
+          assert.notEqual(res.status, 0, why);
+          if (message) assert.match(res.stderr, message, why);
+          assert.deepEqual(mutating(res.calls), [], `${why}: the server was not stopped and no checkout was made`);
+          assert.ok(!res.calls.some((c) => c.startsWith('launchctl')), `${why}: launchd was not asked anything`);
+          untouched(before, why);
+        };
+        refusedEarly({ TC_CHECKOUT: '/another/worktree' }, /TC_CHECKOUT is not the checkout the server job runs from/, 'a checkout the job does not run from');
+        refusedEarly({ GIT_FAILS: 'cat-file' }, null, 'a commit the checkout does not have');
+        refusedEarly({ TC_SNAPSHOT: path.join(dir, 'missing.db') }, /no such snapshot: /, 'a snapshot that is not there');
+        refusedEarly({ TC_SNAPSHOT_SHA256: 'f'.repeat(64) }, /sha256 does not match the receipt/, 'a snapshot that is not the one in the receipt');
+        refusedEarly({ TC_SNAPSHOT_SCHEMA: '53' }, /schema does not match the receipt/, 'a snapshot of another schema');
+        const notADatabase = path.join(dir, 'garbage.db');
+        fs.writeFileSync(notADatabase, 'not a database at all, but with a digest the receipt could carry');
+        refusedEarly({ TC_SNAPSHOT: notADatabase, TC_SNAPSHOT_SHA256: digest(notADatabase) }, /integrity check failed/, 'a snapshot that is not a sound database');
+
+        // 3. The stop is proved, not assumed. A job still loaded, or an answer that is not "no such job", stops it.
+        const stillLoaded = run({ ...good, JOB_STATE: 'loaded' });
+        assert.notEqual(stillLoaded.status, 0);
+        assert.match(stillLoaded.stderr, /the server job is still loaded: gui\/\d+\/com\.tangleclaw\.server/);
+        assert.equal(stillLoaded.calls.filter((c) => c === `launchctl print ${job}`).length, 30, 'it looked for the whole wait');
+        assert.ok(!stillLoaded.calls.some((c) => / checkout |bootstrap|^lsof/.test(c)));
+        untouched(before, 'a job still loaded');
+        const unproven = run({ ...good, JOB_STATE: 'unknown' });
+        assert.notEqual(unproven.status, 0);
+        assert.match(unproven.stderr, /could not prove the server job is gone/);
+        assert.ok(!unproven.calls.some((c) => / checkout |bootstrap/.test(c)));
+        untouched(before, 'an answer that proves nothing');
+
+        // 4. Nothing may have the store or a sidecar open. A holder is named by process id and path, and nothing is stopped.
+        for (const sfx of ['.db', '-journal', '-wal', '-shm']) {
+          const held = run({ ...good, HELD_SUFFIX: sfx });
+          assert.notEqual(held.status, 0, sfx);
+          assert.match(held.stderr, new RegExp(`still open, so nothing was changed: .*tangleclaw\\.db${sfx === '.db' ? '' : sfx}\\np4242`));
+          assert.ok(!held.calls.some((c) => / checkout |bootstrap/.test(c)), 'no checkout, no start');
+          untouched(before, `a holder of ${sfx}`);
+        }
+        const blind = run({ ...good, LSOF_BROKEN: '1' });
+        assert.notEqual(blind.status, 0, 'an lsof that could not look proves nothing');
+        untouched(before, 'an lsof that could not look');
+        assert.match(restore, /command -v lsof >\/dev\/null \|\| \{ echo "lsof is needed/);
+
+        // 5. A refused checkout: the store is not touched and the server is not started on the wrong build.
         const dirty = run({ ...good, GIT_FAILS: 'checkout' });
         assert.notEqual(dirty.status, 0);
-        assert.deepEqual(dirty.calls.slice(-2), ['launchctl bootout', 'git -C /some/checkout checkout --detach 0123456789abcdef']);
-        assert.ok(!dirty.calls.some((c) => /^cp |bootstrap/.test(c)), 'no copy and no start after a refused checkout');
+        assert.ok(!dirty.calls.some((c) => /bootstrap/.test(c)));
+        untouched(before, 'a refused checkout');
 
-        // Everything there: the ruled order, the receipt's commit and snapshot and no other, into the store.
-        const order = [
-          'git -C /some/checkout cat-file -e 0123456789abcdef^{commit}', 'launchctl bootout',
-          'git -C /some/checkout checkout --detach 0123456789abcdef', `cp ${snapshot} ${storePath}`, 'launchctl bootstrap'
-        ];
-        const ok = run(good);
-        assert.equal(ok.status, 0, ok.stderr);
-        assert.deepEqual(ok.calls, order);
-        assert.match(ok.stdout, /^restored: 0123456789abcdef with /m);
-        // A server that was never loaded does not stop the restore: that is the case the step is for.
-        const notLoaded = run({ ...good, LAUNCHCTL_FAILS: 'bootout' });
-        assert.equal(notLoaded.status, 0, notLoaded.stderr);
-        assert.deepEqual(notLoaded.calls, order);
+        // 6. A copy that fails or comes out wrong never becomes the active store, and what was there is kept.
+        for (const mode of ['fails', 'corrupts']) {
+          before = fresh();
+          const res = run({ ...good, CP_MODE: mode, TC_RESTORE_STAMP: `copy-${mode}` });
+          assert.notEqual(res.status, 0, mode);
+          assert.ok(!fs.existsSync(storePath), `${mode}: no partial active store`);
+          assert.ok(!res.calls.some((c) => /bootstrap/.test(c)), `${mode}: the server is not started on it`);
+          const kept = path.join(state, `quarantine-v5.31.copy-${mode}`);
+          for (const sfx of ['', ...sidecars]) assert.equal(digest(path.join(kept, `tangleclaw.db${sfx}`)), before[sfx], `${mode}: ${sfx || 'the store'} is kept whole`);
+          assert.match(res.stdout, /^quarantine: /m);
+        }
+
+        // 7. Everything there: the ruled order, the receipt's commit and snapshot, the old store and every sidecar kept.
+        for (const shell of ['sh', ...(fs.existsSync('/bin/zsh') ? ['/bin/zsh'] : [])]) {
+          before = fresh();
+          const ok = run({ ...good, JOB_BOOTOUT: shell === 'sh' ? 'ok' : 'fails' }, shell);
+          assert.equal(ok.status, 0, `${shell}: ${ok.stderr}`);
+          assert.deepEqual(ok.calls, [
+            'git -C /some/checkout cat-file -e 0123456789abcdef^{commit}',
+            `launchctl bootout ${job}`,
+            `launchctl print ${job}`,
+            ...['', ...sidecars].map((sfx) => `lsof -Fp -- ${storePath}${sfx}`),
+            'git -C /some/checkout checkout --detach 0123456789abcdef',
+            `launchctl bootstrap gui/${uid} ${plist}`
+          ], `${shell}: a bootout that says the job was not loaded is not the proof; the job's absence is`);
+          const kept = path.join(state, 'quarantine-v5.31.T1');
+          assert.equal(fs.statSync(kept).mode & 0o777, 0o700, 'the quarantine is owner-only');
+          assert.deepEqual(fs.readdirSync(kept).sort(), ['tangleclaw.db', 'tangleclaw.db-journal', 'tangleclaw.db-shm', 'tangleclaw.db-wal']);
+          for (const sfx of ['', ...sidecars]) assert.equal(digest(path.join(kept, `tangleclaw.db${sfx}`)), before[sfx], `${sfx || 'the store'} is kept byte for byte`);
+          assert.deepEqual(fs.readdirSync(state).sort(), ['quarantine-v5.31.T1', 'tangleclaw.db'], 'one active store, no stale sidecar beside it, no unfinished copy');
+          assert.equal(digest(storePath), good.TC_SNAPSHOT_SHA256, 'the active store is the snapshot');
+          assert.equal(fs.statSync(storePath).mode & 0o777, 0o600, 'owner-only');
+          assert.deepEqual(ok.stdout.trim().split('\n').map((l) => l.split(':')[0]), shell === 'sh' ? ['quarantine', 'restored'] : ['bootout did not succeed; checking the job itself', 'quarantine', 'restored']);
+        }
+        // 8. Pasted again with the same stamp, it overwrites no quarantine: it stops, and both stores are still whole.
+        const again = run(good);
+        assert.notEqual(again.status, 0);
+        assert.equal(digest(storePath), good.TC_SNAPSHOT_SHA256);
+        assert.equal(digest(path.join(state, 'quarantine-v5.31.T1', 'tangleclaw.db')), before['']);
         // The default store is the one the server opens.
-        const dflt = run({ TC_CHECKOUT: good.TC_CHECKOUT, TC_COMMIT: good.TC_COMMIT, TC_SNAPSHOT: snapshot });
-        assert.ok(dflt.calls.includes(`cp ${snapshot} ${path.join(dir, '.tangleclaw', 'tangleclaw.db')}`));
+        assert.match(restore, /STORE="\$\{TC_STORE:-\$HOME\/\.tangleclaw\/tangleclaw\.db\}"/);
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    it('the restore says what it costs, who must agree, and that a bridge rollback does not need it', () => {
+      const text = flat(ROLLBACK);
+      assert.match(text, /\*\*Emergency only: put back the previous build and its store\.\*\* This is not a step of rolling the bridge back, and it is never used because the bridge misbehaves/);
+      assert.match(text, /Use it only when v5\.31\.0 itself cannot start or stay healthy, and the previous build has to run\./);
+      assert.match(text, /It is a rollback in time\. .* Everything written after that is absent from the active store: sessions, workload and Medusa state, audit rows, the bridge's settings, routes and items, and the rule and configuration changes made during activation\./);
+      assert.match(text, /moved into a quarantine directory and kept, byte for byte, but nothing merges them back\./);
+      assert.match(text, /\*\*Operator:\*\* say that you agree to return the store to the snapshot and to lose what was written since\. \*\*Architect:\*\* be present\. Without both, do not run it\./);
+      assert.match(text, /Once the Operator has agreed, set `TC_OPERATOR_CONFIRMED=return-to-snapshot`\./);
+      assert.match(text, /Stop nothing by name or pattern\./);
+    });
+
+    it('every helper command runs the helper of the verified checkout, and the job it installs names that checkout', () => {
+      const guard = '${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}';
+      const both = ACTIVATE + ROLLBACK;
+      const mentions = both.match(/bin\/tc-bridge-helper/g).length;
+      const guarded = both.split(`"${guard}/bin/tc-bridge-helper"`).length - 1;
+      const inJobCheck = both.split(`<string>${guard}/bin/tc-bridge-helper</string>`).length - 1;
+      assert.equal(inJobCheck, 1);
+      assert.equal(guarded + inJobCheck, mentions, 'no helper command is relative to whatever directory the terminal is in');
+      assert.ok(guarded >= 9, 'activation, rollback and both end states');
+
+      const commands = [...both.matchAll(/`("\$\{TC_CHECKOUT:\?[^`]+)`/g)].map((m) => m[1].replace(/<[^>]+>/g, 'x'));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-helper-path-'));
+      try {
+        const called = path.join(dir, 'called');
+        const checkout = path.join(dir, 'service checkout');
+        fs.mkdirSync(path.join(checkout, 'bin'), { recursive: true });
+        fs.writeFileSync(path.join(checkout, 'bin', 'tc-bridge-helper'), `#!/bin/sh\necho "$0 $*" >> "${called}"\n`, { mode: 0o755 });
+        for (const command of commands) {
+          for (const value of [undefined, '']) {
+            const env = { PATH: '/usr/bin:/bin', HOME: dir };
+            if (value !== undefined) env.TC_CHECKOUT = value;
+            const res = spawnSync('sh', ['-c', command], { env, cwd: checkout, encoding: 'utf8' });
+            assert.notEqual(res.status, 0, command);
+            assert.match(res.stderr, /TC_CHECKOUT: set TC_CHECKOUT to the checkout the service runs from/);
+          }
+          assert.ok(!fs.existsSync(called), 'no helper ran, even standing in a checkout that has one');
+        }
+        // Set, each runs that checkout's helper by its whole path, from anywhere.
+        for (const command of commands) {
+          const res = spawnSync('sh', ['-c', command], { env: { PATH: '/usr/bin:/bin', HOME: dir, TC_CHECKOUT: checkout }, cwd: os.tmpdir(), encoding: 'utf8' });
+          assert.equal(res.status, 0, res.stderr);
+        }
+        const ran = fs.readFileSync(called, 'utf8').trim().split('\n');
+        assert.equal(ran.length, commands.length);
+        for (const line of ran) assert.ok(line.startsWith(`${path.join(checkout, 'bin', 'tc-bridge-helper')} `), line);
+
+        // The real install-launchd writes the path of the script it was run as, which is why the path matters.
+        const home = path.join(dir, 'home');
+        fs.mkdirSync(home);
+        const installed = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'tc-bridge-helper'), 'install-launchd', '--no-load'], { env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8' });
+        assert.equal(installed.status, 0, installed.stderr);
+        const check = /`(grep -c [^`]+com\.tangleclaw\.bridge-helper\.plist")`/.exec(ACTIVATE);
+        assert.ok(check, 'activation checks the installed job');
+        const counted = (checkoutPath) => spawnSync('sh', ['-c', check[1]], { env: { PATH: '/usr/bin:/bin', HOME: home, TC_CHECKOUT: checkoutPath }, encoding: 'utf8' }).stdout.trim();
+        assert.equal(counted(fs.realpathSync(ROOT)), '1', 'the job runs the helper of the checkout it was installed from');
+        assert.equal(counted(checkout), '0', 'and of no other');
+        assert.match(flat(ACTIVATE), /Expected of the second command: `1`\. The helper's launchd job runs the helper of this exact checkout\. Anything else: roll back\./);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('one runbook cites the other by a named anchor, never by a step number', () => {
+      const anchors = (doc) => [...doc.matchAll(/<a id="([a-z-]+)"><\/a>/g)].map((m) => m[1]);
+      const cites = (doc, file) => [...doc.matchAll(new RegExp(`\\(${file.replace('.', '\\.')}#([a-z-]+)\\)`, 'g'))].map((m) => m[1]);
+      const fromRollback = cites(ROLLBACK, 'activate-the-operator-bridge.md');
+      assert.deepEqual(fromRollback, ['master-rule', 'master-relaunch', 'snapshot']);
+      for (const id of fromRollback) assert.ok(anchors(ACTIVATE).includes(id), `activation has the anchor ${id}`);
+      for (const id of cites(ACTIVATE, 'roll-back-the-operator-bridge.md')) assert.ok(anchors(ROLLBACK).includes(id), `rollback has the anchor ${id}`);
+      assert.ok(!/steps? \d+[^.\n]* of the (activation|rollback) runbook/.test(flat(ACTIVATE) + flat(ROLLBACK)), 'no step number of the other runbook');
+      // The anchors sit on the steps they name.
+      assert.match(ACTIVATE, /1\. <a id="snapshot"><\/a>\*\*Release executor:\*\* while the old build is still running, take a\n   snapshot of the store\./);
+      assert.match(ACTIVATE, /6\. <a id="master-rule"><\/a>\*\*Operator:\*\* bring the Master's first hard rule to the shipped text\./);
+      assert.match(ACTIVATE, /7\. <a id="master-relaunch"><\/a>\*\*Operator:\*\* relaunch the Master\./);
     });
 
     it('run as printed: an owner-only, verified copy named for where it came from, and it refuses to overwrite', { skip: sqlite ? false : 'sqlite3 is not installed here' }, () => {
@@ -242,6 +431,17 @@ describe('the operator bridge runbooks (#2031)', () => {
         fs.mkdirSync(snapshots);
         const env = { PATH: process.env.PATH, HOME: dir, TC_CHECKOUT: ROOT, TC_STORE: storePath, TC_SNAPSHOT_DIR: snapshots, TC_SNAPSHOT_STAMP: '20261004T120000Z' };
         const run = () => spawnSync('sh', ['-c', block()], { env, encoding: 'utf8' });
+        // The checkout is the one the server's launchd job runs from, or nothing is taken.
+        const agents = path.join(dir, 'Library', 'LaunchAgents');
+        fs.mkdirSync(agents, { recursive: true });
+        const jobFile = (checkout) => fs.writeFileSync(path.join(agents, 'com.tangleclaw.server.plist'), `<key>WorkingDirectory</key>\n    <string>${checkout}</string>\n`);
+        jobFile(path.join(dir, 'some-other-worktree'));
+        const elsewhere = run();
+        assert.notEqual(elsewhere.status, 0);
+        assert.match(elsewhere.stderr, /TC_CHECKOUT is not the checkout the server job runs from/);
+        assert.deepEqual(fs.readdirSync(snapshots), [], 'no snapshot named for the wrong checkout');
+        jobFile(ROOT);
+        assert.ok(read('deploy/com.tangleclaw.server.plist').includes('<key>WorkingDirectory</key>\n    <string>__REPO_DIR__</string>'), 'the job file names its checkout in that form');
 
         const first = run();
         assert.equal(first.status, 0, first.stderr);
@@ -339,7 +539,9 @@ describe('the operator bridge runbooks (#2031)', () => {
       for (const used of [...both.matchAll(/`tc bridge ([a-z]+)/g)].map((m) => m[1])) {
         assert.ok(BRIDGE_SUBVERBS.includes(used), `tc bridge ${used} is a subverb`);
       }
-      for (const used of [...both.matchAll(/`bin\/tc-bridge-helper ([a-z-]+)/g)].map((m) => m[1])) {
+      const usedHelper = [...both.matchAll(/\/bin\/tc-bridge-helper" ([a-z-]+)/g)].map((m) => m[1]);
+      assert.deepEqual([...new Set(usedHelper)].sort(), ['configure', 'install-launchd', 'preflight', 'set-secret', 'status', 'uninstall-launchd']);
+      for (const used of usedHelper) {
         assert.ok(cli.includes(`'${used}'`) || cli.includes(`  ${used} `), `tc-bridge-helper ${used} is a command`);
       }
       assert.match(ACTIVATE, /tc candidate submit --kind milestone --receipt workload:<seq> --text "<text>"/);
@@ -371,20 +573,22 @@ describe('the operator bridge runbooks (#2031)', () => {
       // Honest about what Disable alone does not stop.
       assert.match(text, /Until steps 3 and 4 are done, a post the helper was already making can still land, and the helper still answers the Operator/);
       // Met already done, or with the server down.
-      assert.match(text, /A step is already done only when its Expected line is already true on a signed-in panel: then go on\. A panel that says "Sign in to see and change it" shows nothing either way: sign in\. If the server is down, do steps 3, 7 and 8\./);
+      assert.match(text, /A step is already done only when its Expected line is already true on a signed-in panel: then go on\. A panel that says "Sign in to see and change it" shows nothing either way: sign in\. If the server is down, do steps 3 and 7\. Step 8 is not part of rolling the bridge back: it has its own conditions\./);
       assert.ok(PANEL.includes('Sign in to see and change it.'));
       for (const already of ['If it already does, and the buttons beside it are **Enable the bridge** and **Refresh**, go on.', 'If it already says `off`, go on.', 'If there is no **Revoke it** button, there is no token: go on.', 'An error from `bootout` because the job was never loaded is fine.']) {
         assert.ok(text.includes(already), already);
       }
       // A Master whose stored rule is the old one.
-      assert.match(text, /The Master declines, saying its rules forbid it: its stored first rule is the old one\. Do steps 6 and 7 of the activation runbook/);
+      assert.match(text, /The Master declines, saying its rules forbid it: its stored first rule is the old one\. Do \[the Master rule step\]\(activate-the-operator-bridge\.md#master-rule\) and then \[the Master relaunch step\]\(activate-the-operator-bridge\.md#master-relaunch\)/);
+      // A bridge rolled back stays on v5.31.0; the restore is something else.
+      assert.match(text, /If the steps above gave their expected results, the rollback is complete: stay on v5\.31\.0 and do not restore the database\./);
       // The end state: both lists empty, by the words the code prints.
       const done = text.slice(text.indexOf('## Done when'), text.indexOf('## If this doesn\'t work'));
       assert.match(done, /`tc bridge routes`, run by the Master, prints `No routes in those states\.`/);
       assert.match(done, /"Nothing is queued without a route\."/);
       assert.match(done, /`helper: not running`/);
       // And the server can be started again after it was booted out.
-      assert.ok(ROLLBACK.includes('launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.tangleclaw.server.plist"'));
+      assert.ok(ROLLBACK.includes('PLIST="$HOME/Library/LaunchAgents/com.tangleclaw.server.plist"') && ROLLBACK.includes('launchctl bootstrap "gui/$(id -u)" "$PLIST"'));
       assert.ok(fs.existsSync(path.join(ROOT, 'deploy', 'com.tangleclaw.server.plist')));
     });
 
@@ -404,6 +608,8 @@ describe('the operator bridge runbooks (#2031)', () => {
       // nowhere a session can re-read. Held to the code that renders that section and serves a review.
       assert.match(text, /ask it: "In the TangleClaw Ecosystem section of your opening context, does the list of `tc` verbs name `candidate`\?"/);
       assert.ok(!/have it run `tc start review`/.test(text));
+      assert.match(text, /The session says no and the line says only `on`: the verb did not reach this one session\. That is degraded delivery, not a failed activation\. Tell that session the command, as in step 14, write its project and the time into the cutover receipt, and go on\./);
+      assert.match(text, /Roll back only if the line says `off`, the session was launched before the switch was turned on, or the bridge itself fails one of the checks in this runbook\./);
       const primer = require('../lib/ecosystem-primer');
       const ctx = { apiOrigin: 'http://127.0.0.1:3102', projectId: 7, projectName: 'p', workspaceId: 'w' };
       const section = (switches) => primer.renderEcosystemPrimerSection(ctx, switches).join('\n');
