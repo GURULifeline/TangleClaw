@@ -1592,8 +1592,8 @@ describe('coordinator context rotation (#2032)', () => {
         store.close();
         const after = new DatabaseSync(dbPath);
         try {
-          assert.equal(after.prepare('SELECT MAX(version) v FROM schema_version').get().v, 51);
-          assert.equal(store.CURRENT_SCHEMA_VERSION, 51, 'v51 is this migration: #2032 lands first (ruling A17)');
+          assert.equal(after.prepare('SELECT MAX(version) v FROM schema_version').get().v, store.CURRENT_SCHEMA_VERSION);
+          assert.ok(store.CURRENT_SCHEMA_VERSION >= 51, 'v51 is this migration: #2032 lands first (ruling A17)');
           const index = after.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_coordinator_rotations_open'").get();
           assert.match(index.sql, /UNIQUE/);
           assert.match(index.sql, /WHERE state IN/);
@@ -1609,7 +1609,7 @@ describe('coordinator context rotation (#2032)', () => {
       }
     });
 
-    it('a fresh install is stamped v51 with both tables and their indexes, and no migration ran', () => {
+    it('a fresh install is stamped at the current version with both tables and their indexes, and no migration ran', () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-rotation-fresh-'));
       const saved = store._getBasePath();
       store.close();
@@ -1619,7 +1619,7 @@ describe('coordinator context rotation (#2032)', () => {
         store.close();
         const db = new DatabaseSync(path.join(dir, 'tangleclaw.db'));
         try {
-          assert.deepEqual(db.prepare('SELECT version FROM schema_version').all().map((r) => r.version), [51]);
+          assert.deepEqual(db.prepare('SELECT version FROM schema_version').all().map((r) => r.version), [store.CURRENT_SCHEMA_VERSION]);
           for (const name of ['coordinator_rotations', 'coordinator_roles', 'idx_coordinator_rotations_open', 'idx_coordinator_roles_active']) {
             assert.ok(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name), name);
           }

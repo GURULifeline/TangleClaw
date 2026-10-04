@@ -114,13 +114,42 @@ ordinary tracked exchange, and what makes it the bridge's is a row in `bridge_ro
 | `bridge_master_credentials` | One row per Master generation: the hash, its status and why it was revoked. |
 | `bridge_helper_tokens` | The chat helper's scoped token, hash only. |
 | `bridge_nonces` | Request nonces already seen from the helper. |
-| `bridge_routes` | One row per inbound operator message, unique on the chat's own message id. |
+| `bridge_routes` | One row per inbound operator message, unique on the chat's own message id. A replay of the same message returns the same route; the same id with a different body or chat context is refused. |
 | `bridge_route_bodies` | The text of a route, held apart so it can be cleared while the route stays. |
 | `bridge_route_proofs` | Which Hub message belongs to which route, under which proof and Master generation. |
 | `bridge_outbound` | What waits for the helper. Each row has its own idempotency key; `hub_id` is optional. |
-| `bridge_candidates` | Receipt-bound facts a session offers the Master. |
-| `bridge_aliases`, `bridge_pins` | Routing policy. Global entries are the operator's; the Master may hold a conversation pin only. |
-| `bridge_audit` | Every bridge write. Append-only. |
+| `bridge_candidates` | Facts a session offers the Master. |
+| `bridge_candidate_receipts` | The receipts a candidate rests on, each by kind, id and digest. Immutable. |
+| `bridge_aliases`, `bridge_pins` | Routing policy. Global entries are the operator's; the Master may hold a conversation pin only. One pin is active per scope and conversation. A global pin names one conversation, or none, which means all of them. |
+| `bridge_audit` | Every bridge write. Never updated; removed only by a compaction. |
+| `bridge_audit_compactions` | One row per compaction: how many audit rows left and a digest of them, chained to the compaction before. Append-only. |
+
+The database does not run with foreign keys, so triggers enforce the same integrity: a body, a
+proof or a route-bound outbound item needs its route; a candidate-bound item needs its
+candidate; a candidate needs its source project; a receipt needs its candidate. Removing a route
+removes its bodies, proofs and outbound items.
+
+### Retention
+
+`lib/bridge-store.js#prune` removes what has outlived its retention. Nothing calls it on a
+schedule yet; the gateway will.
+
+| Record | Kept for |
+|---|---|
+| Message text | Until confirmed delivery or close. Not by age. |
+| Helper nonces | 24 hours |
+| Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
+| Delivered or dropped outbound items | 30 days |
+| Decided candidates | 30 days |
+| Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
+| Audit rows | 90 days, then compacted |
+
+An open route, an undelivered item, an undecided candidate and the live credential are never
+removed, whatever their age. An audit row of a route that is still open is never compacted, and
+neither is any row written after it.
+
+After a compaction a request id older than the retention is no longer remembered, so it could
+be accepted again.
 
 The shape of every table, index and trigger is checked at each startup. A store that fails the
 check is refused, and the message names each object that is missing or misshapen.

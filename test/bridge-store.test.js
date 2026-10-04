@@ -68,13 +68,26 @@ describe('bridge store (#2031)', () => {
 
   it('stores a replayed inbound message once', () => {
     const first = bridgeStore.routes.accept(inbound());
-    const again = bridgeStore.routes.accept(inbound({ routeId: 'rt_2', text: 'different text' }));
+    const again = bridgeStore.routes.accept(inbound({ routeId: 'rt_2' }));
     assert.equal(first.created, true);
-    assert.equal(again.created, false);
-    assert.equal(again.route.routeId, 'rt_1');
+    assert.deepEqual([again.created, again.mismatch, again.route.routeId], [false, false, 'rt_1']);
     assert.equal(bridgeStore.routes.list().length, 1);
     assert.deepEqual(bridgeStore.routes.bodies('rt_1').map((b) => b.text), ['hello']);
-    assert.deepEqual(bridgeStore.routes.bodies('rt_2'), []);
+  });
+
+  it('refuses a known message id that arrives with a different body or from a different place', () => {
+    bridgeStore.routes.accept(inbound());
+    const other = 'b'.repeat(64);
+    for (const change of [
+      { text: 'different text', digest: other },
+      { authorId: 'someone-else' }, { spaceId: 'other-space' }, { channelId: 'other-channel' },
+      { threadId: 'a-thread' }, { replyToExternalId: 'ext-0' }
+    ]) {
+      const result = bridgeStore.routes.accept(inbound({ routeId: 'rt_x', ...change }));
+      assert.deepEqual(result, { created: false, mismatch: true, route: null }, JSON.stringify(change));
+    }
+    assert.equal(bridgeStore.routes.list().length, 1);
+    assert.deepEqual(bridgeStore.routes.bodies('rt_1').map((b) => b.text), ['hello']);
   });
 
   it('keeps one live Master generation and revokes the one before it', () => {
@@ -148,6 +161,56 @@ describe('bridge store (#2031)', () => {
     ]);
     assert.equal(bridgeStore.routes.get('rt_1').externalId, 'ext-1');
     assert.equal(bridgeStore.routes.clearBodies('rt_1'), 0);
+  });
+
+  it('compacts old audit rows into a chained digest, and never a row of a route still open', () => {
+    const old = '2026-01-01T00:00:00.000Z';
+    bridgeStore.routes.accept(inbound({ at: old }));
+    bridgeStore.routes.accept(inbound({ routeId: 'rt_2', externalId: 'ext-2', at: old }));
+    bridgeStore.applyRouteWrite(closeWrite({ at: old }));
+    bridgeStore.applyRouteWrite(closeWrite({ routeId: 'rt_2', requestId: 'req-00000002', at: old, change: () => ({ set: { state: 'awaiting-master' } }) }));
+    bridgeStore.applyRouteWrite(closeWrite({ requestId: 'req-00000003', expectedVersion: 2, at: old, change: () => ({ refuse: 'already-closed' }) }));
+
+    // rt_2 is open, so its row and everything after it stays.
+    const first = bridgeStore.audit.compact({ before: '2026-06-01T00:00:00.000Z' });
+    assert.equal(first.removed, 1);
+    assert.equal(bridgeStore.audit.forRoute('rt_1').length, 1);
+    assert.equal(bridgeStore.audit.forRoute('rt_2').length, 1);
+
+    bridgeStore.applyRouteWrite(closeWrite({ routeId: 'rt_2', requestId: 'req-00000004', expectedVersion: 2, at: old }));
+    const second = bridgeStore.audit.compact({ before: '2026-06-01T00:00:00.000Z' });
+    assert.equal(second.removed, 3);
+    const chain = store.getDb().prepare('SELECT * FROM bridge_audit_compactions ORDER BY compaction_id').all();
+    assert.deepEqual(chain.map((c) => [c.row_count, c.previous_digest]), [[1, null], [3, first.digest]]);
+    assert.equal(chain[1].rows_digest, second.digest);
+    assert.deepEqual(bridgeStore.audit.compact({ before: '2026-06-01T00:00:00.000Z' }), { removed: 0, throughSeq: null, digest: null });
+  });
+
+  it('prunes what has outlived its retention and nothing still in progress', () => {
+    const old = '2026-01-01T00:00:00.000Z';
+    const now = '2026-10-04T00:00:00.000Z';
+    bridgeStore.routes.accept(inbound({ at: old }));
+    bridgeStore.routes.accept(inbound({ routeId: 'rt_open', externalId: 'ext-open', at: old }));
+    bridgeStore.routes.accept(inbound({ routeId: 'rt_recent', externalId: 'ext-recent', at: now }));
+    bridgeStore.applyRouteWrite(closeWrite({ at: old,
+      change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: old } }) }));
+    bridgeStore.applyRouteWrite(closeWrite({ routeId: 'rt_recent', requestId: 'req-00000009', at: now,
+      change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: now } }) }));
+    const db = store.getDb();
+    db.prepare('INSERT INTO bridge_nonces (nonce, seen_at) VALUES (?, ?), (?, ?)').run('n'.repeat(16), old, 'm'.repeat(16), now);
+    const g1 = bridgeStore.masterCredentials.mint('b'.repeat(64), { at: old });
+    bridgeStore.masterCredentials.revoke('master-killed', { at: old });
+    const g2 = bridgeStore.masterCredentials.mint('c'.repeat(64), { at: old });
+    bridgeStore.masterCredentials.revoke('master-killed', { at: old });
+
+    const removed = bridgeStore.prune({ now });
+    assert.deepEqual(removed, { nonces: 1, routes: 1, outbound: 0, candidates: 0, credentials: 1, audit: 1 });
+    assert.equal(bridgeStore.routes.get('rt_1'), null);
+    assert.deepEqual(bridgeStore.routes.bodies('rt_1'), [], 'a removed route takes its bodies with it');
+    assert.ok(bridgeStore.routes.get('rt_open'), 'an open route stays whatever its age');
+    assert.ok(bridgeStore.routes.get('rt_recent'));
+    assert.equal(bridgeStore.masterCredentials.mint('d'.repeat(64)), g2 + 1, 'generations are still never reused');
+    assert.ok(g1 < g2);
   });
 
   it('lists open routes oldest first and leaves closed ones out', () => {

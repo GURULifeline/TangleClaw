@@ -173,6 +173,7 @@ describe('store: operator bridge constraints (#2031)', () => {
     const mint = db.prepare('INSERT INTO bridge_master_credentials (generation, credential_hash, status, minted_at) VALUES (?, ?, ?, ?)');
     mint.run(1, 'b'.repeat(64), 'active', at);
     assert.throws(() => mint.run(2, 'c'.repeat(64), 'active', at), /UNIQUE/);
+    assert.throws(() => mint.run(2, 'c'.repeat(64), 'pending', at), /UNIQUE/, 'pending and active are one slot');
     mint.run(2, 'c'.repeat(64), 'revoked', at);
 
     const token = db.prepare("INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at) VALUES (?, ?, 'active', 'operator', ?)");
@@ -196,8 +197,20 @@ describe('store: operator bridge constraints (#2031)', () => {
     assert.throws(() => insert.run('notify:x:1', 'release-action-needed', digest, at, at), /CHECK/);
   });
 
+  /**
+   * Insert a bare route row.
+   * @param {string} id - Route id.
+   * @returns {void}
+   */
+  function route(id) {
+    store.getDb().prepare(
+      "INSERT INTO bridge_routes (route_id, external_id, author_id, space_id, channel_id, body_digest, state, created_at, updated_at) VALUES (?, ?, 'a', 's', 'c', ?, 'accepted', ?, ?)"
+    ).run(id, `ext-${id}`, digest, at, at);
+  }
+
   it('refuses a reply that was not released by a Master generation', () => {
     freshStore('reply');
+    route('r1');
     assert.throws(() => store.getDb().prepare(
       'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
       + "VALUES ('route:r1:answer', 'reply', 'r1', 'Master', 'x', ?, 'ready', ?, ?)"
@@ -207,6 +220,8 @@ describe('store: operator bridge constraints (#2031)', () => {
   it('refuses a reply proof that does not name its launch, project and the message it answers', () => {
     freshStore('proof');
     const db = store.getDb();
+    route('r1');
+    route('r2');
     assert.throws(() => db.prepare(
       "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, recorded_at) VALUES ('r1', 'from-target', 'h2', 'launch', ?)"
     ).run(at), /CHECK/);
@@ -222,15 +237,103 @@ describe('store: operator bridge constraints (#2031)', () => {
     ).run(at), /UNIQUE/);
   });
 
-  it('keeps a global pin for the operator and a conversation pin to one per conversation', () => {
+  it('refuses a child row whose parent does not exist', () => {
+    freshStore('orphans');
+    const db = store.getDb();
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_bodies (route_id, role, text, digest, created_at) VALUES ('none', 'inbound', 'x', ?, ?)"
+    ).run(digest, at), /needs its route/);
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, recorded_at) VALUES ('none', 'to-target', 'h9', 'master-launch', 1, ?)"
+    ).run(at), /needs its route/);
+    assert.throws(() => db.prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
+      + "VALUES ('route:none:failure', 'failure', 'none', 'TangleClaw', 'x', ?, 'ready', ?, ?)"
+    ).run(digest, at, at), /needs its route or candidate/);
+    assert.throws(() => db.prepare(
+      'INSERT INTO bridge_candidates (candidate_id, idem_key, kind, source_project_id, source_launch_id, text, digest, state, created_at) '
+      + "VALUES ('c1', 'cand:1', 'milestone', 424242, 'launch', 'x', ?, 'submitted', ?)"
+    ).run(digest, at), /needs its source project/);
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_candidate_receipts (candidate_id, receipt_kind, receipt_id, receipt_digest) VALUES ('none', 'workload', 'w1', ?)"
+    ).run(digest), /needs its candidate/);
+  });
+
+  it('binds a candidate to its receipts by id and digest, immutably', () => {
+    freshStore('receipts');
+    const db = store.getDb();
+    const project = store.projects.create({ name: 'p', path: path.join(tmpDir, 'p') });
+    db.prepare(
+      'INSERT INTO bridge_candidates (candidate_id, idem_key, kind, source_project_id, source_launch_id, text, digest, state, created_at) '
+      + "VALUES ('c1', 'cand:1', 'milestone', ?, 'launch', 'x', ?, 'submitted', ?)"
+    ).run(project.id, digest, at);
+    const bind = db.prepare('INSERT INTO bridge_candidate_receipts (candidate_id, receipt_kind, receipt_id, receipt_digest) VALUES (?, ?, ?, ?)');
+    bind.run('c1', 'workload', 'w1', digest);
+    assert.throws(() => bind.run('c1', 'workload', 'w1', 'b'.repeat(64)), /UNIQUE|PRIMARY/);
+    assert.throws(() => db.exec("UPDATE bridge_candidate_receipts SET receipt_digest = 'x'"), /immutable/);
+    db.exec("DELETE FROM bridge_candidates WHERE candidate_id = 'c1'");
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM bridge_candidate_receipts').get().n, 0);
+  });
+
+  it('removing a route removes its bodies, proofs and outbound items', () => {
+    freshStore('cascade');
+    const db = store.getDb();
+    route('r1');
+    db.prepare("INSERT INTO bridge_route_bodies (route_id, role, text, digest, created_at) VALUES ('r1', 'inbound', 'x', ?, ?)").run(digest, at);
+    db.prepare("INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 1, ?)").run(at);
+    db.prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
+      + "VALUES ('route:r1:failure', 'failure', 'r1', 'TangleClaw', 'x', ?, 'ready', ?, ?)"
+    ).run(digest, at, at);
+    db.exec("DELETE FROM bridge_routes WHERE route_id = 'r1'");
+    for (const table of ['bridge_route_bodies', 'bridge_route_proofs', 'bridge_outbound']) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, table);
+    }
+  });
+
+  it('keeps an unresolved route free of destination fields and ties a generation to a Master decision', () => {
+    freshStore('route-checks');
+    const db = store.getDb();
+    route('r1');
+    const set = (sql) => () => db.exec(`UPDATE bridge_routes SET ${sql} WHERE route_id = 'r1'`);
+    assert.throws(set("destination_workspace_id = 'ws'"), /CHECK/);
+    assert.throws(set('resolved_generation = 2'), /CHECK/);
+    assert.throws(set("resolved_by = 'master', destination_kind = 'master'"), /CHECK/, 'a Master decision needs its generation');
+    assert.throws(set("resolved_by = 'alias', destination_kind = 'master', resolved_generation = 2"), /CHECK/, 'a mechanical resolution has none');
+    set("resolved_by = 'master', destination_kind = 'project', destination_project_id = 5, resolved_generation = 2")();
+    set("resolved_by = 'default', destination_kind = 'master', destination_project_id = NULL, resolved_generation = NULL")();
+  });
+
+  it('lets a compaction remove audit rows it has recorded, and nothing else', () => {
+    freshStore('compaction');
+    const db = store.getDb();
+    const add = db.prepare("INSERT INTO bridge_audit (op, actor, proof, outcome, at) VALUES ('close', 'operator', 'operator', 'applied', ?)");
+    add.run(at);
+    add.run(at);
+    db.prepare('INSERT INTO bridge_audit_compactions (through_seq, row_count, rows_digest, at) VALUES (1, 1, ?, ?)').run(digest, at);
+    assert.equal(db.prepare('DELETE FROM bridge_audit WHERE audit_seq = 1').run().changes, 1);
+    assert.throws(() => db.exec('DELETE FROM bridge_audit WHERE audit_seq = 2'), /append-only/);
+    assert.throws(() => db.exec('UPDATE bridge_audit_compactions SET row_count = 9'), /append-only/);
+    assert.throws(() => db.exec('DELETE FROM bridge_audit_compactions'), /append-only/);
+  });
+
+  it('keeps global pins for the operator, one active pin per conversation in each scope', () => {
     freshStore('pins');
     const db = store.getDb();
     const pin = db.prepare(
       'INSERT INTO bridge_pins (pin_id, scope, conversation_key, destination_kind, created_by, master_generation, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
-    assert.throws(() => pin.run('p0', 'global', null, 'master', 'master', 1, at), /CHECK/);
+    assert.throws(() => pin.run('p0', 'global', null, 'master', 'master', 1, at), /CHECK/, 'Master cannot hold a global pin');
+    assert.throws(() => pin.run('p0', 'conversation', null, 'master', 'master', 1, at), /CHECK/, 'a conversation pin names its conversation');
     pin.run('p1', 'conversation', 'chan:1', 'master', 'master', 1, at);
     assert.throws(() => pin.run('p2', 'conversation', 'chan:1', 'master', 'master', 1, at), /UNIQUE/);
+    // The operator may pin every conversation, and any number of single ones.
     pin.run('p3', 'global', null, 'master', 'operator', null, at);
+    pin.run('p4', 'global', 'chan:1', 'master', 'operator', null, at);
+    pin.run('p5', 'global', 'chan:2', 'master', 'operator', null, at);
+    assert.throws(() => pin.run('p6', 'global', null, 'master', 'operator', null, at), /UNIQUE/);
+    assert.throws(() => pin.run('p7', 'global', 'chan:1', 'master', 'operator', null, at), /UNIQUE/);
+    db.exec("UPDATE bridge_pins SET revoked_at = '2026-10-05T00:00:00.000Z' WHERE pin_id = 'p4'");
+    pin.run('p8', 'global', 'chan:1', 'master', 'operator', null, at);
   });
 });
