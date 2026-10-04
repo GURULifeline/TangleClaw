@@ -46,9 +46,10 @@ truncated. An oversized section is fixed by shortening it in `CHANGELOG.md`; "If
 go out" below has the steps, because the fix is a new commit and touches the released-section lock.
 
 That refusal should never be the first warning. `test/changelog-unreleased-size.test.js` fails the
-suite once `[Unreleased]` would publish more than **110,000 bytes**, measured through the same
-extractor the workflow uses, so the pull request whose entry crosses the line goes red while there
-is still room to condense the section or to release what has accumulated.
+suite once `[Unreleased]` would publish more than **110,000 bytes**. It runs the workflow's own
+extractor command and counts the file that command writes, trailing newline included, so the pull
+request whose entry crosses the line goes red while there is still room to condense the section or
+to release what has accumulated.
 
 The workflow never moves or deletes a tag. A refusal is for the Operator to resolve.
 
@@ -154,14 +155,22 @@ the tag is on origin or it is not.
   current head and creates the still-absent tag on that commit, which carries the same
   `version.json`. Do not re-run the original run: it checks out the old commit, which still lacks
   the fix, and fails again.
-- **The notes were refused as oversized.** This is the new-commit case with one extra step. The
-  version's section is already in `test/fixtures/changelog-released-sections.lock.json`, added by
-  the cut, so shortening it fails `test/changelog-released-immutable.test.js`. That test's rule
-  against relocking protects sections that were *published*. This one never was: no tag and no
-  Release exist. So shorten the section, regenerate its lock line in the same commit (the command
-  is in that test's failure message), land the commit on `main`, and dispatch from `main`. If
-  step 3 shows the tag on origin, the section may already be published: do not relock, and
-  escalate to the Operator.
+- **The notes were refused as oversized** (the `notes-gate` step). This is the new-commit
+  case with one extra step, because the cut already recorded this version's section in
+  `test/fixtures/changelog-released-sections.lock.json`:
+  1. Confirm with step 3 that the tag is not on origin. The section was then never published, so
+     it may still change. If the tag *is* on origin, stop: see the next heading.
+  2. Shorten the version's section in `CHANGELOG.md`. Keep every entry; cut narration.
+  3. Delete **that one version's line** from the lock file, then run
+     `node scripts/release-prepare.js`. It re-adds only that line, from the shortened section, and
+     still refuses if any other released section has drifted.
+  4. Land both files in one commit on `main`, then dispatch from `main`.
+
+  Do not do what the failing test seems to ask. With the section shortened and the lock untouched,
+  `test/changelog-released-immutable.test.js` says to move the edits back and not relock, and
+  `release-prepare.js` refuses the same way. Both are right for a section that was published,
+  which this one was not. Never regenerate the whole lock: that would accept every other drift
+  the lock exists to catch.
 - **Nothing needed fixing** (a flaky test, a network error): open the original run and choose
   **Re-run all jobs**. That is the default. A dispatch from `main` is equivalent only while main's
   head is still that run's commit. If `main` has moved on, a dispatch releases a *different*
@@ -173,6 +182,13 @@ the tag is on origin or it is not.
 the failed ones, so that commit is freshly tested. A dispatch from `main` heals it too, but only
 while main's head is still the tagged commit. Once a later commit has landed, a dispatch refuses,
 because the tag names an earlier commit. That refusal is intended, not a fault.
+
+**One case a re-run cannot heal: the tag is on origin and the notes are refused as oversized.** The
+workflow no longer produces this state, since the notes are measured before it tags, but a tag
+pushed by an older workflow or by hand can still meet it. The re-run tests the same commit, extracts
+the same notes and is refused again. Shortening the section does not help either: the fix would be
+a new commit, and the tag names the old one. Do not shorten, relock, move the tag or dispatch.
+Escalate to the Operator, who decides how that tag gets its Release.
 
 **GitHub allows re-running a run for 30 days.** If a tag is on origin with no Release and the
 original run can no longer be re-run, do not work around it. Stop and escalate to the Operator.

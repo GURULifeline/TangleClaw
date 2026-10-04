@@ -45,8 +45,12 @@ PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out o
 
 **What.**
 - `scripts/release-notes-gate.js` and a `notes-gate` step between extraction and tagging, taken from #1951 unchanged apart from the issue it cites. It refuses empty notes and notes over 120,000 UTF-8 bytes, and never truncates (the Architect's earlier ruling on #1947). The tag step requires `steps.notes-gate.outcome == 'success'`.
-- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in memory and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
+- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in a scratch copy and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
 - `docs/release-process.md`, `FEATURES.md`, `CHANGELOG.md`.
+
+**After review of PR #2085 (the Architect and Pilot-B1, independently).**
+- The size test counted the extractor's return value, one byte short of the file the workflow publishes, because the extractor command appends a newline. It now runs that command and counts the file it writes; 110,000 passes and 110,001 fails. The same file is also run through the gate CLI at the 120,000 boundary.
+- The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
 
 **Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
 
