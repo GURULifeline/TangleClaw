@@ -27,8 +27,8 @@ because this page exists.
   says, and the helper attaches no meaning to it.
 - **One operator, one server, one channel, checked twice.** The helper ignores a message from
   anyone else, another server or channel, a bot (itself included) or a webhook. It decides on
-  ids alone, before reading the text, so nothing of theirs reaches TangleClaw, a log or a
-  reply. The bridge then checks the same three ids against the operator's own allowlist. Both
+  ids alone, before reading the text, and logs nothing for it, so nothing of theirs reaches
+  TangleClaw, a log or a reply. The bridge then checks the same three ids against the operator's own allowlist. Both
   must agree.
 - **One channel out.** The helper posts to its configured channel only. An item naming another
   channel is not posted.
@@ -106,14 +106,18 @@ seconds. `--no-load` writes the job without loading it.
 
 - **`bin/tc-bridge-helper status`** shows whether the config is set, whether each secret is
   present (never its value), whether the helper is running, the Gateway's state, the last pass,
-  and any item held for you. It shows no secret, no message text and no Discord id.
+  how many items are in progress, and any item held for you. It shows no secret, no message text and no Discord id.
 - **The log** is `~/.tangleclaw/logs/bridge-helper.log`: one JSON line per event, with a
   timestamp, a closed code, and ids or numbers. It never holds message text, tokens, headers or
-  Discord's raw answers. The codes are listed in `lib/bridge-helper/log.js`.
+  Discord's raw answers. The codes are listed in `lib/bridge-helper/log.js`. Nothing rotates
+  this file. It gets a line per message relayed and per failure, not per poll, so it grows
+  slowly; truncate it or add a `newsyslog` rule if it matters.
 - **Stopping:** `launchctl bootout gui/$(id -u)/com.tangleclaw.bridge-helper`. The job file
   stays, and launchd loads it again at your next login.
 - **Starting again:** `bin/tc-bridge-helper install-launchd`.
 - **Only one helper runs.** A second refuses to start, because two would post every item twice.
+  The lock names a process id and counts only if that process is a helper, so a lock left by a
+  helper that died is taken over even when something else now has its id.
 
 ## Removing it
 
@@ -158,7 +162,13 @@ to refuse a repeat for a few minutes.
 | Discord rejects the item's content (HTTP 400) | That item is held as `rejected`, and the ones after it keep moving. |
 | Discord refuses for another reason (permissions, a rate limit) | The pass stops and the helper backs off. Nothing is held. |
 | The bridge let the item go before the acknowledgement arrived | The helper drops its record and stops trying. The post stays in the channel. |
-| The record cannot be written | The helper posts nothing it could not record first, logs `state-write-failed` and tries again later. |
+| The bridge already has the item as delivered | The acknowledgement is a repeat. The helper drops its record. |
+| The record cannot be written | The helper posts nothing it could not record first, logs `state-write-failed` and tries again later. A part that did post before a write failed is remembered while the helper runs; if the helper also stops before it can write, the restarted helper finds the attempt on record as in doubt and falls back on the nonce, or holds the item as `uncertain`. |
+
+One case is not covered. If a long item was posted in part and the bridge then let it go, the
+bridge never hands it over again, and the helper's record of the parts stays where it is.
+`status` counts it under "in progress". It does no harm; remove it by removing the record once
+nothing else is in progress.
 
 ## Settling a held item
 

@@ -274,7 +274,7 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       for (const d of others) assert.equal(await handle(d, { selfId: BOT_ID }), 'inbound-ignored');
       assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_routes').get().n, before);
       assert.deepEqual([discord.posts, discord.reactions], [[], []], 'and nothing is said back');
-      assert.deepEqual(codes, others.map(() => ['inbound-ignored', {}]), 'the log names no id of theirs');
+      assert.deepEqual(codes, [], 'and nothing is logged: other people\'s traffic does not fill the log');
     });
 
     it('tells the operator in fixed words when the bridge refuses a message', async () => {
@@ -582,6 +582,60 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual(atBridge(outboundId), ['ready', null]);
     });
 
+    it('an attempt that could not be recorded is not remembered as made: every later pass must record it first', async () => {
+      const { outboundId } = await answered('the answer');
+      const relay = outbound();
+      // The claim is recorded; then the record stops taking writes, for two passes running.
+      const failing = { ...relay.state, set: () => { throw new Error('disk full'); } };
+      const stuck = createOutbound({ channelId: IDS.channelId, bridge, rest: restClient(), state: failing, log, now: () => clock });
+      for (let i = 0; i < 2; i++) {
+        assert.deepEqual(await stuck.pass(), { ok: false, posted: 0, acked: 0, held: 0 }, `pass ${i + 1}`);
+        assert.deepEqual(discord.posts, [], `pass ${i + 1}: nothing is posted that is not on disk first`);
+      }
+      assert.equal(relay.state.get(outboundId), undefined, 'and nothing was recorded');
+      assert.equal(logged().filter((c) => c === 'state-write-failed').length, 2);
+
+      // The record takes writes again: one post, one acknowledgement.
+      failing.set = relay.state.set;
+      assert.deepEqual(await stuck.pass(), { ok: true, posted: 1, acked: 1, held: 0 });
+      assert.equal(discord.posts.length, 1);
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+    });
+
+    it('a part that posted is remembered while the helper runs, even when recording it failed', async () => {
+      const { outboundId } = await answered('the answer');
+      const relay = outbound();
+      let writes = 0;
+      // The write before the post succeeds; the write after it fails once.
+      const flaky = { ...relay.state, set: (id, entry) => { writes += 1; if (writes === 2) throw new Error('disk full'); relay.state.set(id, entry); } };
+      const helper = createOutbound({ channelId: IDS.channelId, bridge, rest: restClient(), state: flaky, log, now: () => clock });
+      assert.deepEqual(await helper.pass(), { ok: false, posted: 0, acked: 0, held: 0 });
+      assert.equal(discord.posts.length, 1, 'it posted');
+      assert.deepEqual(relay.state.get(outboundId).parts, [], 'and the record does not say so');
+
+      assert.deepEqual(await helper.pass(), { ok: true, posted: 0, acked: 1, held: 0 });
+      assert.equal(discord.posts.length, 1, 'the running helper did not post it again');
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id]);
+    });
+
+    it('stops asking about an item the bridge has settled, whatever became of its lease', async () => {
+      const { outboundId } = await answered('the answer');
+      const relay = outbound({ bridge: losingOnce('ack') });
+      assert.equal((await relay.pass()).ok, false);
+      assert.deepEqual(atBridge(outboundId), ['delivered', discord.posts[0].id], 'the bridge has it; the helper does not know');
+
+      // The lease is gone by retention, and the operator has replaced the token.
+      store.getDb().prepare('DELETE FROM bridge_outbound_leases WHERE outbound_id = ?').run(outboundId);
+      helperToken = (await asOperator('POST', '/api/bridge/operator/helper-token')).body.token;
+      bridge = createBridgeClient({ origin, token: helperToken });
+      const later = outbound();
+      codes.length = 0;
+      assert.deepEqual(await later.pass(), { ok: true, posted: 0, acked: 1, held: 0 });
+      assert.deepEqual(later.state.entries(), [], 'the helper lets go of its record');
+      assert.deepEqual(logged(), ['outbound-acked'], 'at once, with no failed attempt first');
+      assert.equal(discord.posts.length, 1);
+    });
+
     it('drops a claim in progress when the helper token was replaced, and collects under the new one', async () => {
       const { outboundId } = await answered('the answer');
       discord.script.push({ status: 403, body: { code: 50013 } });
@@ -645,6 +699,7 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       const ws = fakeWebSocket();
       const lines = [];
       const sleeps = [];
+      const cleared = [];
       let stop;
       const exit = main(['run'], {
         home, repoDir: path.join(__dirname, '..'), nodePath: process.execPath, uid: 501, pid: process.pid,
@@ -652,7 +707,8 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
         onStop: (fn) => { stop = fn; },
         secrets: { readSecret: async (name) => ({ bot: BOT_TOKEN, helper: helperToken }[name]) },
         WebSocket: ws.WebSocket, discordApi: discord.api,
-        sleep: (ms) => new Promise((resolve) => { sleeps.push({ ms, resolve }); })
+        isAlive: () => false,
+        timers: { setTimeout: (resolve, ms) => sleeps.push({ ms, resolve }), clearTimeout: (id) => cleared.push(id) }
       });
 
       // Discord says hello; the helper identifies; the session is ready.
@@ -693,15 +749,17 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       assert.deepEqual([snapshot.pid, snapshot.gateway.state, snapshot.lastPassOk], [process.pid, 'ready', true]);
       assert.equal(fs.readFileSync(paths(home).lock, 'utf8'), `${process.pid}\n`);
 
+      await until(() => sleeps.length === 2, 'the helper to wait for its next pass');
       stop();
       assert.equal(await exit, EXIT.ok);
+      assert.deepEqual(cleared, [2], 'the wait in progress is cancelled, so nothing outlives the stop');
       assert.equal(socket.closedWith, 1000);
       assert.equal(fs.existsSync(paths(home).lock), false, 'the lock is given back');
 
       const records = lines.map((line) => JSON.parse(line));
       for (const record of records) assert.ok(Object.prototype.hasOwnProperty.call(CODES, record.code) && record.code !== 'unknown-code', record.code);
       assert.deepEqual(records.map((r) => r.code).filter((c) => !c.startsWith('gateway')),
-        ['helper-start', 'inbound-ignored', 'inbound-accepted', 'outbound-posted', 'outbound-acked', 'helper-stop']);
+        ['helper-start', 'inbound-accepted', 'outbound-posted', 'outbound-acked', 'helper-stop']);
       const everything = lines.join('\n');
       for (const secret of [BOT_TOKEN, helperToken, 'fleet', 'sessions', 'let me in', '100000000000000099']) assert.ok(!everything.includes(secret), secret);
     });

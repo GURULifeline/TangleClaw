@@ -157,13 +157,25 @@ describe('bridge helper: its commands (#2031)', () => {
 
     // Another helper holds the lock.
     fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
-    assert.equal(await main(['run'], env({ pid: 424242 })), EXIT.config);
+    assert.equal(await main(['run'], env({ pid: 424242, isAlive: () => true })), EXIT.config);
     assert.deepEqual([codeOf(), JSON.parse(err.at(-1)).pid], ['helper-already-running', process.pid]);
     fs.writeFileSync(paths(home).lock, 'not a pid');
     assert.equal(await main(['run'], env({ pid: 424242 })), EXIT.config);
     assert.equal(JSON.parse(err.at(-1)).pid, -1, 'a lock that cannot be read is not taken over');
     for (const line of err) assert.ok(Object.prototype.hasOwnProperty.call(CODES, JSON.parse(line).code));
     assert.ok(!printed().includes(BOT_TOKEN) && !printed().includes(HELPER_TOKEN));
+  });
+
+  it('does not mistake a live process that is not a helper for one', async () => {
+    // This test process is alive and is not a helper: a pid reused after an unclean exit looks like this.
+    await configured();
+    keychain.set('bot', BOT_TOKEN).set('helper', HELPER_TOKEN);
+    fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
+    assert.equal(await main(['status'], env()), EXIT.ok);
+    assert.ok(out.includes('helper: not running'));
+    const state = openState(paths(home).state);
+    state.set(12, { status: 'rejected', parts: [], round: 0 });
+    assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242 })), EXIT.ok, 'the stale lock is taken over');
   });
 
   it('takes over a lock a dead helper left, and gives its own back', () => {
@@ -189,16 +201,18 @@ describe('bridge helper: its commands (#2031)', () => {
     state.set(12, { status: 'uncertain', parts: ['400000000000000001'], round: 0, since: 1 });
     state.set(15, { status: 'rejected', parts: [], round: 0 });
     state.set(16, { status: 'posted', parts: ['400000000000000002'], round: 0 });
+    const running = { isAlive: () => true };
     fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
     fs.writeFileSync(paths(home).status, JSON.stringify({ pid: process.pid, at: '2026-10-04T00:00:00.000Z', gateway: { state: 'fatal', fatalCloseCode: 4014 }, lastPassOk: false, held: 2 }));
     out.length = 0;
-    assert.equal(await main(['status'], env()), EXIT.ok);
+    assert.equal(await main(['status'], env(running)), EXIT.ok);
     assert.deepEqual(out, [
       'config: set (TangleClaw at http://127.0.0.1:3102, every 15s)',
       'bot token: present', 'helper token: present',
       `helper: running (pid ${process.pid})`,
       'gateway: fatal (close code 4014)',
       'last pass: 2026-10-04T00:00:00.000Z, failed; backing off',
+      'in progress: 1 item posting or awaiting acknowledgement',
       'item 12: uncertain, part 2 (settle it: see docs/operator-bridge-helper.md)',
       'item 15: rejected, part 1 (settle it: see docs/operator-bridge-helper.md)'
     ]);
@@ -211,7 +225,7 @@ describe('bridge helper: its commands (#2031)', () => {
     state.set(15, { status: 'rejected', parts: [], round: 0 });
 
     fs.writeFileSync(paths(home).lock, `${process.pid}\n`);
-    assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242 })), EXIT.failed);
+    assert.equal(await main(['settle', '12', '--repost'], env({ pid: 424242, isAlive: () => true })), EXIT.failed);
     assert.equal(err.at(-1), 'Nothing settled: stop the helper first.');
     fs.rmSync(paths(home).lock);
 

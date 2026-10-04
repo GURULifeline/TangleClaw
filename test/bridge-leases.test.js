@@ -189,7 +189,6 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
     const [again] = claim().body.items;
     assert.deepEqual([again.outboundId, again.text, again.leaseId !== held.leaseId], [id, 'notice a', true]);
     assert.deepEqual(leasesOf(id).map((l) => l[0]), ['lapsed', 'live'], 'one live lease at a time');
-    assert.equal(store.getDb().prepare('SELECT attempts FROM bridge_outbound WHERE outbound_id = ?').get(id).attempts, 2);
 
     const stale = ack(held, 'posted-1');
     assert.deepEqual([stale.status, stale.body.code], [409, 'LEASE_LAPSED']);
@@ -230,7 +229,12 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
 
     assert.deepEqual([ack(first, 'posted-1').body.replayed, ack(first, 'posted-1').body.replayed], [false, true]);
     assert.equal(ack(first, 'posted-2').body.code, 'ACK_MISMATCH');
-    assert.equal(ack(first, 'posted-1', { tokenId: 'bht_another' }).body.code, 'LEASE_NOT_YOURS', 'a repeat is still the lease holder\'s to make');
+    // What became of the item is answered before the lease is looked at: it
+    // will never be handed over again, and its lease is removed a day later.
+    assert.equal(ack(first, 'posted-1', { tokenId: 'bht_another' }).body.replayed, true);
+    assert.equal(ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-1').body.replayed, true);
+    assert.equal(ack({ outboundId: a, leaseId: 'bol_nosuchlease00000000000' }, 'posted-2').body.code, 'ACK_MISMATCH');
+    assert.equal(ack(second, 'posted-b', { tokenId: 'bht_another' }).body.code, 'LEASE_NOT_YOURS', 'an item still waiting is the lease holder\'s alone');
   });
 
   it('a live lease carries an item across its limit; without one the limit is final', () => {

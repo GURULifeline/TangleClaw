@@ -304,6 +304,34 @@ from a click per open to the bridge opt-in.
 - **Failures have a bounded retention policy too.**
 - **No secret and no body appears in routine logs.**
 
+### 21. How the helper collects and acknowledges (Architect rulings, 2026-10-04)
+
+Decision 11 keeps "an outbound item is acknowledged only after Discord confirms the post", and
+Decision 20 bounds how long an item may wait. Together they left a hole: a helper that had
+fetched an item and posted it just as the item's limit passed could not acknowledge it, because
+nothing recorded the fetch. These rulings close it.
+
+- **Collecting is a claim, not a read.** The helper has no way to read the mailbox without
+  claiming from it. Each item is handed over under a **lease**: its own id, the item, the helper
+  token it was issued to, when it was issued and when it lapses. The window is short.
+- **One live lease per item.** A lapsed lease returns its item to the next claim.
+- **A claim is token-bound and idempotent on its nonce.** An exact repeat returns the same
+  leases and issues nothing; the same nonce with a different request or token conflicts.
+- **An acknowledgement names its lease.** For an item still waiting it is taken only from the
+  token the lease was issued to, inside the lease's window. What has already become of an item
+  is answered first, whatever lease is named: a delivered item answers a repeat as a repeat,
+  and one let go is refused for good.
+- **A live lease is the one thing that holds an item past its retention limit,** and no lease
+  is issued for an item already past it. So an acknowledgement can cross the limit by at most
+  the lease window. Without a live lease, being let go stays final.
+- **A lease bounds how long the helper may hold an item; it does not make a post safe to
+  repeat.** That is the helper's own record and Discord's nonce. A post whose outcome cannot be
+  known, or that Discord rejects, is held for the operator to settle and is never retried by
+  itself.
+
+The detail is in `docs/operator-bridge.md` ("Claims and leases") and
+`docs/operator-bridge-helper.md`.
+
 ## Records that carry the decision (proposed, not ruled)
 
 The rulings fix responsibilities and behavior. This section proposes the records that would carry

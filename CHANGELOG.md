@@ -28,6 +28,8 @@ All notable changes to TangleClaw are documented in this file.
   - **Across the retention limit.** An item with a live lease is not let go, so an acknowledgement can cross the limit by at most the lease window. Without one, being let go stays final: `410 OUTBOUND_EXPIRED`.
   - **Schema v54.** Adds `bridge_outbound_claims` and `bridge_outbound_leases`, and a CHECK tying a revoked helper token to the time it was revoked. The migration first proves the store is a sound v53 store.
   - `OUTBOUND_NOT_READY` is retired: no request could reach it.
+  - **What became of an item is answered before its lease is looked at.** An acknowledgement for an item already delivered is a repeat, and for one let go is refused for good, whatever lease it names.
+  - ADR 0023 records the claim and lease rulings as Decision 21.
 
 - **Sessions can offer the Master news for the operator, and the bridge has its three server notifications** (#2031, ADR 0023). Still off by default, with no Discord helper built. `docs/operator-bridge.md` has the detail.
   - **Candidates.** `tc candidate submit` lets any verified session offer the Project Master a milestone or an operator action, resting on its own workload receipts. A session cannot post: the Master approves, rejects or merges through `tc bridge`, and only an approval creates something for the operator. Each receipt is verified when the candidate is offered and again when it is approved, by a digest of the stored row.

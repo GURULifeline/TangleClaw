@@ -381,6 +381,11 @@ and when it lapses. The window is two minutes.
   acknowledges nothing: `409 LEASE_LAPSED`.
 - **Bound to the token.** A lease is good only from the helper token it was issued to:
   `403 LEASE_NOT_YOURS`. Replacing or revoking the token lapses everything it held at once.
+- **What became of the item is answered first.** An acknowledgement for an item already
+  delivered is a repeat (or `409 ACK_MISMATCH` for another message id), and for one let go is
+  `410 OUTBOUND_EXPIRED`, whatever lease it names. Neither item will be handed over again, and
+  a lease is removed a day after it settles, so the lease is consulted only for an item still
+  waiting.
 - **A claim is named by its nonce.** Repeating a claim with the same nonce, token and request
   returns the leases it issued the first time, each in its present state, and issues nothing.
   A lease that is no longer live comes back without its text. The same nonce with a different

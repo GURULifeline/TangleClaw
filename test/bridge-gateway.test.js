@@ -67,6 +67,17 @@ function helper() {
   return bridgeStore.helperTokens.active() || gateway.mintHelperToken();
 }
 
+/**
+ * What waits to be posted, oldest first, without claiming any of it.
+ * @returns {object[]}
+ */
+function waitingForHelper() {
+  return bridgeStore.outbound.ready().map((item) => ({
+    outboundId: item.outboundId, kind: item.kind, sourceLabel: item.sourceLabel, text: item.text,
+    inReplyTo: item.routeId ? { externalId: bridgeStore.routes.get(item.routeId).externalId } : null
+  }));
+}
+
 let claimSeq = 0;
 
 /**
@@ -279,7 +290,7 @@ describe('bridge gateway (#2031)', () => {
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.equal(route.state, 'reply-held');
       assert.equal(bridgeStore.routes.body(route.routeId, 'reply').text, 'all green');
-      assert.deepEqual(gateway.outboundForHelper(), [], 'nothing reaches the helper before Master releases it');
+      assert.deepEqual(waitingForHelper(), [], 'nothing reaches the helper before Master releases it');
       assert.deepEqual(hub.handled, [sent.body.id]);
       assert.match(hub.system[hub.system.length - 1].message, /has a reply held for your release/);
       const audit = bridgeStore.audit.forRoute(route.routeId).pop();
@@ -348,7 +359,7 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual(dropReasons(), ['not-a-reply', 'not-addressed-to-the-gateway', 'system-notice', 'malformed']);
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
       assert.equal(bridgeStore.routes.body(r.body.routeId, 'reply'), null);
-      assert.deepEqual(gateway.outboundForHelper(), []);
+      assert.deepEqual(waitingForHelper(), []);
     });
 
     it('the Medusa layer itself refuses a reply from an unverified caller or another project', async () => {
@@ -470,7 +481,7 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([a.state, b.state], ['routed', 'routed']);
       const audit = bridgeStore.audit.forRoute('rt_race');
       assert.deepEqual(audit.filter((x) => x.outcome === 'applied').map((x) => x.op), ['resolve', 'dispatch']);
-      assert.equal(gateway.outboundForHelper().length, 0, 'no failure notice for a send that worked');
+      assert.equal(waitingForHelper().length, 0, 'no failure notice for a send that worked');
       assert.ok(alpha.sessionId);
     });
 
@@ -515,7 +526,7 @@ describe('bridge gateway (#2031)', () => {
       const route = bridgeStore.routes.get('rt_pin');
       assert.equal(route.state, 'routed');
       assert.ok(bridgeStore.proofs.latestToTarget('rt_pin'), 'the proof is recorded against the route as it now is');
-      assert.equal(gateway.outboundForHelper().length, 0);
+      assert.equal(waitingForHelper().length, 0);
       assert.ok(alpha.sessionId);
     });
 
@@ -535,7 +546,7 @@ describe('bridge gateway (#2031)', () => {
       route = bridgeStore.routes.get(routeId);
       assert.equal(route.state, 'accepted');
       assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed').length, 1, 'marked once');
-      assert.deepEqual(gateway.outboundForHelper().map((i) => i.kind).sort(), ['failure', 'status']);
+      assert.deepEqual(waitingForHelper().map((i) => i.kind).sort(), ['failure', 'status']);
       assert.match(hub.system[0].message, new RegExp(`route ${routeId} is waiting for you`), 'the Master is told');
 
       // The Master cannot route it again: only a proven failure reopens routing.
@@ -738,7 +749,7 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', 'target-offline', null]);
       await gateway.tick();
       await gateway.tick();
-      const items = gateway.outboundForHelper();
+      const items = waitingForHelper();
       assert.deepEqual(items.map((i) => i.kind), ['failure']);
       assert.equal(items[0].inReplyTo.externalId, 'm1');
       assert.ok(project.id);
@@ -754,7 +765,7 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([first.failed, second.failed], [1, 0]);
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'exchange-undeliverable']);
-      assert.equal(gateway.outboundForHelper().filter((i) => i.kind === 'failure').length, 1);
+      assert.equal(waitingForHelper().filter((i) => i.kind === 'failure').length, 1);
     });
 
     it('raises one fixed still-waiting notice after five minutes, and never another', async () => {
@@ -766,7 +777,7 @@ describe('bridge gateway (#2031)', () => {
       assert.equal((await gateway.tick()).pendingNotices, 1);
       later(60 * 60 * 1000);
       assert.equal((await gateway.tick()).pendingNotices, 0);
-      const items = gateway.outboundForHelper();
+      const items = waitingForHelper();
       assert.deepEqual(items.map((i) => i.kind), ['status']);
       assert.match(items[0].text, /^Still waiting/);
     });
@@ -786,7 +797,7 @@ describe('bridge gateway (#2031)', () => {
       later(16 * 1000);
       await gateway.tick();
       assert.equal(masterState.ensures, 2, 'the window doubled');
-      assert.deepEqual(gateway.outboundForHelper().map((i) => [i.kind, i.text]),
+      assert.deepEqual(waitingForHelper().map((i) => [i.kind, i.text]),
         [['status', 'Your message is queued: the Project Master is not available right now.']]);
 
       masterState.ensureError = null;
@@ -897,13 +908,13 @@ describe('bridge gateway (#2031)', () => {
 
       const pass = await gateway.tick();
       assert.equal(pass.notifications.workBlocked, 1);
-      assert.deepEqual(gateway.outboundForHelper().map((i) => [i.kind, i.text, i.inReplyTo]),
+      assert.deepEqual(waitingForHelper().map((i) => [i.kind, i.text, i.inReplyTo]),
         [['notification', 'Alpha reports its work is blocked.', null]]);
 
       const [fetched] = helperClaims().body.items;
       later(bridgeStore.EXPIRY_MS.notification['work-blocked'] + 60000);
       await gateway.tick();
-      assert.deepEqual(gateway.outboundForHelper(), [], 'a week-old notification is not handed to a helper that attaches late');
+      assert.deepEqual(waitingForHelper(), [], 'a week-old notification is not handed to a helper that attaches late');
       const expiry = store.getDb().prepare("SELECT * FROM bridge_audit WHERE op = 'expire'").get();
       assert.deepEqual([expiry.actor, expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['gateway', 'uncollected-expired', fetched.outboundId],
         'what was let go is on the record, by its id');
@@ -974,7 +985,7 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(helperAcks(item, 'posted-2').body.code, 'ACK_MISMATCH');
       assert.equal(helperAcks({ ...item, outboundId: 9999 }, 'posted-1').body.code, 'OUTBOUND_NOT_FOUND');
       assert.equal(helperAcks(item, 'bad ref!').body.code, 'BAD_ACK');
-      assert.deepEqual(gateway.outboundForHelper(), []);
+      assert.deepEqual(waitingForHelper(), []);
       assert.equal(bridgeStore.outbound.get(item.outboundId).text, null, 'the text is dropped once the chat has it');
       assert.ok(project.id);
     });
