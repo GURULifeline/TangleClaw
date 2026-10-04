@@ -29,6 +29,7 @@ All notable changes to TangleClaw are documented in this file.
   - `tc message status <workspace-id>` prints the class and what to do beside the reason. The peers route returns `class`, `nextAction` and `nextActionMeaning`.
   - `GET /api/medusa/deliveries` keeps `undelivered` as the whole list, in the same order, with every existing field. Each item gains its class, whether the session is live, its age, when the monitor last looked, and what to do. The response adds `actionable`, `configuration` and `historical` lists of the same items, and a `summary`.
   - A reason code with no declared class is shown as `configuration`, to be investigated, and logged once. A row is `historical` only when its session is positively not live.
+  - Neither surface tells anyone to wait for a wake monitor that is not running. With it stopped, a held wake that would have been `actionable` is `configuration`, to be investigated.
   - Nothing is removed or expired. Old rows are classified, not deleted.
 
 ### Fixed

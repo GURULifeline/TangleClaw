@@ -2741,8 +2741,38 @@ describe('medusa delivery ledger (#792)', () => {
     let waiting;
     let optedOut;
     let ended;
+    const wake = require('../lib/medusa-wake');
+    let monitorWasRunning;
+
+    /**
+     * Put the wake monitor back as this suite found it, whatever a test did to it.
+     * @returns {void}
+     */
+    const restoreMonitor = () => {
+      if (monitorWasRunning) wake.start({ intervalMs: 2 ** 30 }); else wake.stop();
+    };
+
+    /**
+     * Run a test body with the monitor positively running, on an interval too
+     * long ever to fire, and put it back afterwards.
+     * @template T
+     * @param {() => Promise<T>} fn - The test body
+     * @returns {Promise<T>}
+     */
+    const withMonitorRunning = async (fn) => {
+      wake.start({ intervalMs: 2 ** 30 });
+      try {
+        return await fn();
+      } finally {
+        wake.stop();
+        restoreMonitor();
+      }
+    };
+
+    after(() => restoreMonitor());
 
     before(() => {
+      monitorWasRunning = wake.isRunning();
       const mk = (tag) => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-disposition-${tag}-`));
         const proj = store.projects.create({ name: `disposition-${tag}`, path: dir, engine: 'claude' });
@@ -2765,8 +2795,8 @@ describe('medusa delivery ledger (#792)', () => {
      */
     const of = (list, session) => list.find((r) => String(r.sessionId) === String(session.id));
 
-    it('a live session held by a busy pane is actionable: the monitor retries by itself', async () => {
-      const { data } = await get('/api/medusa/deliveries');
+    it('a live session held by a busy pane is actionable while the monitor is running: it retries by itself', async () => {
+      const { data } = await withMonitorRunning(() => get('/api/medusa/deliveries'));
       const item = of(data.undelivered, waiting);
       assert.deepEqual([item.class, item.live, item.reason, item.nextAction], ['actionable', true, 'pane-turn-in-flight', 'wait']);
       assert.ok(of(data.actionable, waiting));
@@ -2797,7 +2827,6 @@ describe('medusa delivery ledger (#792)', () => {
     });
 
     it('a stopped Master with mail deferred is configuration, to be started, and never historical', async () => {
-      const wake = require('../lib/medusa-wake');
       const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
       store.medusaDeliveries.record({ sessionId: masterKey, messageKey: 'mm1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'pane-turn-in-flight' });
       const saved = { ...wake._internal };
@@ -2815,22 +2844,88 @@ describe('medusa delivery ledger (#792)', () => {
       } finally {
         Object.assign(wake._internal, saved);
         wake.stop();
+        restoreMonitor();
       }
     });
 
     it('a Master the monitor has not ticked over is liveness-unknown: configuration, to be investigated, never historical', async () => {
-      const wake = require('../lib/medusa-wake');
       const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
       // A stopped monitor has asked nothing about the Master.
       wake.stop();
-      assert.equal(wake.masterIsLive(), null);
-      const { data } = await get('/api/medusa/deliveries');
+      let data;
+      try {
+        assert.equal(wake.masterIsLive(), null);
+        ({ data } = await get('/api/medusa/deliveries'));
+      } finally {
+        restoreMonitor();
+      }
       const item = data.undelivered.find((r) => String(r.sessionId) === masterKey);
       assert.ok(item, 'the Master\'s row is listed');
       assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', null, 'investigate']);
       assert.ok(data.configuration.includes(data.configuration.find((r) => String(r.sessionId) === masterKey)));
       assert.equal(data.historical.find((r) => String(r.sessionId) === masterKey), undefined);
       assert.equal(data.actionable.find((r) => String(r.sessionId) === masterKey), undefined);
+    });
+
+    it('with the monitor not running, no row is actionable or promises a retry, and nothing else about the list changes', async () => {
+      const disposition = require('../lib/medusa-delivery-disposition');
+      // Retryable reasons, an undeclared one, and the rows the suite already holds.
+      const mk = (tag) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-disposition-${tag}-`));
+        const proj = store.projects.create({ name: `disposition-${tag}`, path: dir, engine: 'claude' });
+        return store.sessions.start({ projectId: proj.id, engineId: 'claude', tmuxSession: `fake-disposition-${tag}` });
+      };
+      const cases = { 'wrap-running': mk('stopped-wrap'), 'listener-connecting': mk('stopped-listener'), 'engine-thread-unknown': mk('stopped-engine'), 'brand-new-gate': mk('stopped-unknown') };
+      for (const [skipReason, session] of Object.entries(cases)) {
+        store.medusaDeliveries.record({ sessionId: session.id, messageKey: `s-${session.id}`, unread: 1, channel: 'none', outcome: 'skipped', skipReason });
+      }
+      const ledger = JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail());
+
+      const running = (await withMonitorRunning(() => get('/api/medusa/deliveries'))).data;
+      wake.stop();
+      let stopped;
+      try {
+        assert.equal(wake.isRunning(), false);
+        stopped = (await get('/api/medusa/deliveries')).data;
+      } finally {
+        restoreMonitor();
+      }
+
+      // Running: the retryable ones are actionable, the undeclared one is not.
+      for (const code of ['wrap-running', 'listener-connecting', 'engine-thread-unknown']) {
+        assert.equal(of(running.undelivered, cases[code]).class, 'actionable', code);
+      }
+      assert.deepEqual([of(running.undelivered, cases['brand-new-gate']).class, of(running.undelivered, cases['brand-new-gate']).nextAction], ['configuration', 'investigate']);
+      assert.ok(running.summary.unknownReasons.includes('brand-new-gate'));
+
+      // Stopped: nothing is actionable, and nothing says the monitor retries.
+      assert.deepEqual(stopped.actionable, []);
+      assert.equal(stopped.summary.actionable, 0);
+      for (const item of stopped.undelivered) {
+        assert.notEqual(item.class, 'actionable', String(item.sessionId));
+        assert.doesNotMatch(item.nextActionMeaning, /retries by itself/, String(item.sessionId));
+      }
+      for (const session of [...Object.values(cases), waiting]) {
+        const item = of(stopped.undelivered, session);
+        assert.deepEqual([item.class, item.nextAction, item.nextActionMeaning], ['configuration', 'investigate', disposition.NEXT_ACTIONS.investigate]);
+      }
+
+      // What was not actionable is classed exactly as it was.
+      assert.deepEqual([of(stopped.undelivered, optedOut).class, of(stopped.undelivered, optedOut).nextAction], ['configuration', 'enable-wake']);
+      assert.deepEqual([of(stopped.undelivered, ended).class, of(stopped.undelivered, ended).nextAction], ['historical', 'resend']);
+      assert.deepEqual(stopped.historical.map((r) => String(r.sessionId)), running.historical.map((r) => String(r.sessionId)));
+
+      // Membership, order and every legacy field are as they were.
+      assert.deepEqual(stopped.undelivered.map((r) => String(r.sessionId)), running.undelivered.map((r) => String(r.sessionId)));
+      const stored = store.medusaDeliveries.sessionsWithUndeliveredMail();
+      for (const [i, raw] of stored.entries()) {
+        for (const key of Object.keys(raw)) assert.deepEqual(stopped.undelivered[i][key], raw[key], `${key} of row ${i}`);
+      }
+
+      // The partitions still add up, and nothing was written.
+      assert.equal(stopped.actionable.length + stopped.configuration.length + stopped.historical.length, stopped.undelivered.length);
+      assert.equal(stopped.summary.total, stopped.undelivered.length);
+      assert.equal(JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail()), ledger);
     });
 
     it('undelivered is still the whole list in its old order, and every old field is still there', async () => {

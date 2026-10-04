@@ -5523,7 +5523,7 @@ route('GET', '/api/medusa/deliveries', (req, res) => {
   // #2086: the same rows, in the same order, each one classified, and the same
   // items again partitioned by class. `undelivered` is still the complete list.
   const rows = store.medusaDeliveries.sessionsWithUndeliveredMail().filter(_stillHasUnhandledMail);
-  const view = deliveryDisposition.buildView(rows, { factsFor: _deliveryFacts, now: Date.now() });
+  const view = deliveryDisposition.buildView(rows, { factsFor: _deliveryFacts, monitorRunning: medusaWake.isRunning(), now: Date.now() });
   for (const code of view.summary.unknownReasons) {
     if (_unknownDeliveryReasons.has(code)) continue;
     _unknownDeliveryReasons.add(code);

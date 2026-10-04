@@ -245,6 +245,12 @@ know is `configuration`, to be investigated, and is logged once. A row is
 store holds no active session under that id. Where that cannot be established
 the row is `configuration`, never `historical`.
 
+`actionable` is a promise that the monitor retries by itself, so no row is
+`actionable` unless the monitor is positively running. With it stopped, a row
+that would have been is `configuration`, to be investigated, in the words the
+sender-facing answer uses. Rows that were already `configuration` or
+`historical` are classed as they were.
+
 The Project Master is the one exception to "not live means historical". It is
 a single identity that stops and starts, so a stopped Master holding mail is
 `configuration`, to be started, and its mail waits for it. A project session

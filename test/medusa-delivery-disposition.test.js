@@ -128,7 +128,7 @@ describe('delivery disposition — the doubtful cases fail towards someone looki
   });
 
   it('being restartable changes nothing for a recipient that is live or whose liveness is unknown', () => {
-    assert.equal(d.classifyDelivery(row(), { live: true, restartable: true, now: NOW }).class, 'actionable');
+    assert.equal(d.classifyDelivery(row(), { live: true, restartable: true, monitorRunning: true, now: NOW }).class, 'actionable');
     assert.deepEqual(
       [d.classifyDelivery(row(), { live: null, restartable: true, now: NOW }).class, d.classifyDelivery(row(), { live: null, restartable: true, now: NOW }).nextAction],
       ['configuration', 'investigate']
@@ -150,9 +150,75 @@ describe('delivery disposition — the doubtful cases fail towards someone looki
   });
 });
 
+describe('delivery disposition — a list row never promises a retry from a monitor that is not running', () => {
+  /** Reasons the table classes as actionable, one per shape: exact codes and a prefixed one. */
+  const RETRYABLE = [
+    ...Object.entries(d.REASONS).filter(([, e]) => e.class === 'actionable').map(([code]) => code),
+    'listener-connecting',
+    'inject-failed: tmux send-keys exited 1'
+  ];
+
+  it('the table has retryable reasons to test with', () => {
+    assert.ok(RETRYABLE.length > 10);
+  });
+
+  it('with the monitor running, each retryable reason on a live row is actionable, to be waited out', () => {
+    for (const skipReason of RETRYABLE) {
+      const item = d.classifyDelivery(row({ skipReason }), { live: true, monitorRunning: true, now: NOW });
+      assert.deepEqual([item.class, item.nextAction], ['actionable', 'wait'], skipReason);
+    }
+  });
+
+  for (const monitorRunning of [false, undefined, null, 'yes', 1]) {
+    it(`with the monitor not positively running (${JSON.stringify(monitorRunning)}), none is actionable and none promises a retry`, () => {
+      for (const skipReason of [...RETRYABLE, 'brand-new-gate']) {
+        const item = d.classifyDelivery(row({ skipReason }), { live: true, monitorRunning, now: NOW });
+        assert.deepEqual([item.class, item.nextAction], ['configuration', 'investigate'], skipReason);
+        assert.equal(item.nextActionMeaning, d.NEXT_ACTIONS.investigate);
+        assert.doesNotMatch(item.nextActionMeaning, /retries by itself/, skipReason);
+      }
+    });
+  }
+
+  it('the words are the ones the sender-facing answer uses for a stopped monitor', () => {
+    const listed = d.classifyDelivery(row(), { live: true, monitorRunning: false, now: NOW });
+    const told = d.classifyForSender('pane-turn-in-flight', { monitorRunning: false });
+    assert.deepEqual([listed.class, listed.nextAction, listed.nextActionMeaning], [told.class, told.nextAction, told.nextActionMeaning]);
+  });
+
+  it('a stopped monitor changes nothing for a row that was not actionable', () => {
+    const config = d.classifyDelivery(row({ skipReason: 'wake-not-opted-in' }), { live: true, monitorRunning: false, now: NOW });
+    assert.deepEqual([config.class, config.nextAction], ['configuration', 'enable-wake']);
+    const gone = d.classifyDelivery(row(), { live: false, monitorRunning: false, now: NOW });
+    assert.deepEqual([gone.class, gone.nextAction], ['historical', 'resend']);
+    const master = d.classifyDelivery(row({ sessionId: 'master' }), { live: false, restartable: true, monitorRunning: false, now: NOW });
+    assert.deepEqual([master.class, master.nextAction], ['configuration', 'start-recipient']);
+  });
+
+  it('the view of a stopped monitor has no actionable items, the same membership and order, and partitions that still add up', () => {
+    const rows = [
+      row({ sessionId: '1', skipReason: 'wrap-running' }),
+      row({ sessionId: '2', skipReason: 'pane-writing' }),
+      row({ sessionId: '3', skipReason: 'wake-not-opted-in' }),
+      row({ sessionId: '4', skipReason: 'engine-thread-busy' })
+    ];
+    const factsFor = (r) => ({ live: r.sessionId !== '1' });
+    const running = d.buildView(rows, { factsFor, monitorRunning: true, now: NOW });
+    const stopped = d.buildView(rows, { factsFor, now: NOW });
+    assert.deepEqual(running.actionable.map((i) => i.sessionId), ['2', '4']);
+    assert.deepEqual(stopped.actionable, []);
+    assert.deepEqual(stopped.undelivered.map((i) => i.sessionId), running.undelivered.map((i) => i.sessionId));
+    assert.deepEqual(stopped.configuration.map((i) => i.sessionId), ['2', '3', '4']);
+    assert.deepEqual(stopped.historical.map((i) => i.sessionId), ['1']);
+    assert.equal(stopped.actionable.length + stopped.configuration.length + stopped.historical.length, stopped.undelivered.length);
+    assert.deepEqual([stopped.summary.actionable, stopped.summary.oldestActionableAgeMs], [0, null]);
+    for (const item of stopped.undelivered) assert.doesNotMatch(item.nextActionMeaning, /retries by itself/);
+  });
+});
+
 describe('delivery disposition — what each item carries', () => {
   it('keeps every field of the row and adds the class, timestamps and next action', () => {
-    const item = d.classifyDelivery(row(), { live: true, lastAssessedAt: '2026-10-04T11:59:55.000Z', now: NOW });
+    const item = d.classifyDelivery(row(), { live: true, lastAssessedAt: '2026-10-04T11:59:55.000Z', monitorRunning: true, now: NOW });
     assert.equal(item.sessionId, '41');
     assert.equal(item.skipReason, 'pane-turn-in-flight');
     assert.deepEqual(
@@ -193,7 +259,7 @@ describe('delivery disposition — the fleet view', () => {
     if (r.sessionId === 'master') throw new Error('could not tell');
     return { live: live[r.sessionId], lastAssessedAt: '2026-10-04T11:59:58.000Z' };
   };
-  const view = d.buildView(rows, { factsFor, now: NOW });
+  const view = d.buildView(rows, { factsFor, monitorRunning: true, now: NOW });
 
   it('keeps undelivered complete and in the order given', () => {
     assert.deepEqual(view.undelivered.map((i) => i.sessionId), ['1', '2', '3', '4', '5', 'master']);
@@ -270,6 +336,7 @@ describe('delivery disposition — a stopped monitor never tells a sender to wai
 describe('delivery disposition — the sender-facing answer uses the same classifier', () => {
   it('peerReachability from a stopped monitor says the monitor is not running and does not promise a retry', () => {
     const saved = { ...wake._internal };
+    const wasRunning = wake.isRunning();
     try {
       wake.stop();
       wake._internal.listLiveAll = () => [{ id: 1, projectId: 10, sessionMode: 'tmux', tmuxSession: 'tc-1', engineId: 'claude' }];
@@ -296,11 +363,14 @@ describe('delivery disposition — the sender-facing answer uses the same classi
     } finally {
       wake.stop();
       Object.assign(wake._internal, saved);
+      // Leave the singleton monitor as this test found it.
+      if (wasRunning) wake.start({ intervalMs: 2 ** 30 });
     }
   });
 
   it('peerReachability carries the class and next action of its reason', () => {
     const saved = { ...wake._internal };
+    const wasRunning = wake.isRunning();
     try {
       wake.stop();
       wake.start({ intervalMs: 2 ** 30 });
@@ -328,6 +398,8 @@ describe('delivery disposition — the sender-facing answer uses the same classi
     } finally {
       wake.stop();
       Object.assign(wake._internal, saved);
+      // Leave the singleton monitor as this test found it.
+      if (wasRunning) wake.start({ intervalMs: 2 ** 30 });
     }
   });
 });
