@@ -11,6 +11,11 @@ All notable changes to TangleClaw are documented in this file.
   - **`docs/discord-operator-notifications.md`** separates the interim procedure in force today (the Architect is the sole Discord sender, under Rule #145) from the future Master-mediated path, and says the first is retired at cutover and not merged into the second. Cutover needs Rule #145 replaced with the operator's approval and a verified live round trip.
 - **Docs: say which hosts the plain-HTTP port redirects** (#575). `docs/configuration-reference.md` said `caddyHttpPort` redirects to the HTTPS site. That is only true with neither `caddyTailnetHost` nor `caddyRemoteHttp` set, when Caddy redirects every name it serves. With `caddyTailnetHost` set, only that name is redirected. Any other host is served over plain HTTP without a redirect when `caddyRemoteHttp` is enabled, which is how a phone can stay on the plain-HTTP port (`:8080` by default), and is not served on that port at all when it is not. The reference and `deploy/INGRESS.md` now say so and name the address to bookmark. No behaviour change.
 
+- **The Medusa wake monitor and delivery watchdog now record what each pass cost, and a synthetic fleet measures them at scale** (#2086). Measurement only: no wake verdict, gate or delivery changed.
+  - `lib/tick-meter.js` records each tick's duration, how late it started, overruns, and each session's scan position, time and verdict. It is in memory, bounded, and read through `medusaWake.tickMetrics()` and `medusaWatchdog.tickMetrics()`. No route exposes it yet.
+  - `test/helpers/medusa-wake-matrix.js` drives the real monitor over synthetic sessions at 1 to 30 sessions on a virtual clock, with busy, drafting, unprofiled, listener-off and ended sessions, a hung pane and a throwing scan. `node scripts/medusa-wake-matrix.js` prints the tables.
+  - `docs/medusa-wake-measurements.md` records the results. Fleet size alone does not delay a wake. A session holding mail costs two tmux reads, the tick blocks the whole server while it runs, and each hung pane adds its 5-second timeout to every tick. `/api/medusa/deliveries` keeps an ended session's last skipped row for ever.
+
 ## [5.30.0] - 2026-10-04
 
 ### Added
