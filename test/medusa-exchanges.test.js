@@ -463,6 +463,26 @@ describe('medusa-exchanges (#1839)', () => {
     });
   });
 
+  describe('a re-arm is taken once per count (#2086)', () => {
+    it('a caller holding a stale count re-arms nothing, though the trigger is valid', () => {
+      const x = sendPmToBuilder({}, 'hub-1');
+      mx.recordArrival({ hubId: 'hub-1', recipientWorkspaceId: 'builder-ws' });
+      const miss = (nonce) => {
+        mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux', detail: { nonce } });
+        mx.recordWakeForRecipient('builder-ws', 'wake_not_accepted', { code: 'nonce-in-composer', detail: { nonce }, attemptNonce: nonce });
+      };
+      miss('n1');
+      assert.equal(mx.rearm(x.exchange_id, { expectRearmCount: 1, nextEligibleAt: '2026-09-25T12:05:00.000Z' }), null, 'a count it has not reached');
+      assert.ok(mx.rearm(x.exchange_id, { expectRearmCount: 0, nextEligibleAt: '2026-09-25T12:05:00.000Z' }));
+      miss('n2');
+      // A second pass that read the row before the first re-arm still holds count 0.
+      assert.equal(mx.rearm(x.exchange_id, { expectRearmCount: 0, nextEligibleAt: '2026-09-25T12:09:00.000Z' }), null);
+      assert.equal(store.medusaExchanges.get(x.exchange_id).rearm_count, 1);
+      assert.ok(mx.rearm(x.exchange_id, { expectRearmCount: 1, nextEligibleAt: '2026-09-25T12:09:00.000Z' }));
+      assert.equal(store.medusaExchanges.get(x.exchange_id).rearm_count, 2);
+    });
+  });
+
   describe('whether an inbox has been nudged already, by each message\'s own id (#2086)', () => {
     /** A delivered message to the Builder, optionally nudged. */
     const delivered = (hubId, { nudged = true } = {}) => {

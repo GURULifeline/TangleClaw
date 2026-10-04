@@ -120,6 +120,39 @@ describe('wakes on the real exchange record (#2086)', () => {
     });
   });
 
+  describe('a receipt is about the nudge it names', () => {
+    it('a late miss for an earlier nudge marks nothing once a newer nudge has gone out', () => {
+      const out = phase([
+        { op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 },
+        { op: 'send', hubId: 'h2' }, { op: 'ticks', n: 4 },
+        { op: 'answerReceipt', outcome: 'not-accepted' }
+      ], { receipt: 'deferred' });
+      assert.equal(out.injected.length, 2);
+      const [first, second] = attemptNonces(exchange(out, 'h1'));
+      assert.deepEqual(attemptNonces(exchange(out, 'h2')), [second]);
+      assert.notEqual(first, second);
+      for (const hubId of ['h1', 'h2']) {
+        assert.equal(factsOf(exchange(out, hubId), 'wake_not_accepted').length, 0, `${hubId}: the miss was for a nudge that is no longer its newest`);
+        assert.equal(exchange(out, hubId).state, 'wake_attempted');
+      }
+      // So nothing is re-armed on the strength of it, in this lifetime or the next.
+      const later = phase([{ op: 'advance', ms: 10 * MIN }, { op: 'watchdog' }, { op: 'ticks', n: 4 }], { receipt: 'unknown' });
+      assert.equal(later.injected.length, 0);
+      assert.equal(exchange(later, 'h1').rearmCount, 0);
+    });
+
+    it('a miss for the newest nudge marks every message that nudge was about', () => {
+      const out = phase([
+        { op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'send', hubId: 'h2' }, { op: 'ticks', n: 4 },
+        { op: 'answerReceipt', outcome: 'not-accepted' }
+      ], { receipt: 'deferred' });
+      const nonce = attemptNonces(exchange(out, 'h1'))[0];
+      for (const hubId of ['h1', 'h2']) {
+        assert.deepEqual(factsOf(exchange(out, hubId), 'wake_not_accepted').map((f) => f.nonce), [nonce]);
+      }
+    });
+  });
+
   describe('a nudge that provably missed is retried within a budget that survives restarts', () => {
     it('one re-arm per miss, however many watchdog passes and restarts see it', () => {
       const missed = phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }], { receipt: 'not-accepted' });
@@ -258,6 +291,15 @@ describe('wakes on the real exchange record (#2086)', () => {
         assert.deepEqual(attemptNonces(exchange(restarted, 'h1')), nonce);
         assert.equal(exchange(restarted, 'h1').rearmCount, 0);
       }
+    });
+
+    it('redelivered and fetched again after a restart, it is still one arrival and one read on record', () => {
+      phase([{ op: 'setup' }, { op: 'send', hubId: 'h1' }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }]);
+      const again = phase([{ op: 'redeliver', hubIds: ['h1'] }, { op: 'ticks', n: 4 }, { op: 'read', hubIds: ['h1'] }, { op: 'ticks', n: 4 }]);
+      const x = exchange(again, 'h1');
+      assert.deepEqual([factsOf(x, 'arrived').length, factsOf(x, 'read').length, attemptNonces(x).length], [1, 1, 1]);
+      assert.equal(again.injected.length, 0);
+      assert.equal(again.durable.exchanges.length, 1, 'a redelivery opens no second exchange');
     });
 
     it('does not hide new mail: old fetched mail and one new message get exactly one new nudge', () => {

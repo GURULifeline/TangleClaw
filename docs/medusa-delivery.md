@@ -138,7 +138,14 @@ The wake monitor still nudges once per fresh-mail edge, and now:
 - **After a nudge, the monitor keeps judging the pane without typing**, so a
   later change in readiness is recorded.
 - **After a restart**, the monitor consults the recorded attempts before
-  treating mail as un-nudged, so a restart never sends an extra wake.
+  treating mail as un-nudged, so a restart never sends an extra wake. It asks
+  about each message in the inbox by its own Hub id (#2086). The Hub
+  redelivers mail that was never marked handled, so a message the recipient
+  already fetched comes back as unread; it has a nudge on record, and a
+  restart is not a reason for another. A message the record cannot vouch for
+  (no id, no exchange, never nudged, or re-armed) makes the answer no, so new
+  mail is not hidden behind old. Untracked mail and mail with no exchange
+  record are therefore nudged once per server lifetime.
 
 The watchdog re-arms a wake only on a durable trigger newer than the attempt:
 
@@ -404,6 +411,45 @@ never used.
 - **Nothing prunes these tables yet.** Retention is #1879.
 - **Retraction** is modelled (the `retracted` state and its guarded
   transition) but has no route yet; that is #1873.
+
+## What is proven, and what is not
+
+`test/medusa-wake-exchange-proof.test.js` runs the real wake monitor, the real
+exchange record and the real watchdog against a store on disk (#2086). Each
+server lifetime is a separate process on the same database, so nothing in
+memory crosses a restart. Only the tmux pane, the listener and Hub, and time
+are stand-ins. It holds that:
+
+- an eligible recipient gets one nudge, one recorded attempt and one nonce,
+  across any number of ticks and restarts;
+- a miss buys one re-arm, the backoff and the re-arm budget survive restarts,
+  and time alone re-arms nothing;
+- a receipt marks only the messages whose newest nudge it names;
+- a held wake is recorded once, survives a restart and is still delivered;
+- the aged notice and the operator alert are each sent once across restarts;
+- mail that was fetched but not marked handled is not nudged again by a
+  restart, and never hides new mail.
+
+Limits of that proof, which are not defects:
+
+- **No positive receipt.** The tmux transport can prove a miss only, so there
+  is no `wake_accepted` case for a project session.
+- **The delivery ledger is not exactly-once.** A held wake writes one more
+  `skipped` ledger row per restart. The exchange fact is not repeated.
+- **The operator alert is a snapshot.** A nudge that keeps missing alerts once
+  at the hour as `prolonged-actionable` while a re-arm is still pending, and a
+  budget that runs out later does not alert again.
+- **Real tmux, a real Hub and a real server restart are not exercised.**
+
+`test/medusa-wake-codex-fixtures.test.js` runs every Codex pane fixture
+against every answer the engine's channel can give. The fixtures carry the
+codex-cli version they were captured from. **The only version proven is
+0.155.1.** No other version is, and nothing infers that another behaves the
+same. Two further limits: the `thinking` pane was derived from Codex's help
+text and never captured, so what the gate does with it when the channel says
+idle is not asserted; and the channel's answers are TangleClaw's own
+normalized shape, so the Codex app-server protocol is not proven by these
+fixtures.
 
 ## Rolling back
 

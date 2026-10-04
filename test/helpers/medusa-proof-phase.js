@@ -49,7 +49,9 @@ const world = {
   inbox: (input.inbox || []).slice(),
   live: input.live !== false,
   injected: [],
-  notices: []
+  notices: [],
+  // Receipts the pane has not answered yet, oldest first (`receipt: 'deferred'`).
+  awaited: []
 };
 
 /** Let promise callbacks and deferred monitor work run. @returns {Promise<void>} */
@@ -85,7 +87,9 @@ function installWorld() {
     world.injected.push({ at: world.now, projectName, command });
     return { ok: true, error: null };
   };
-  s.verifySubmission = () => Promise.resolve({ outcome: world.receipt, reason: 'proof' });
+  s.verifySubmission = () => (world.receipt === 'deferred'
+    ? new Promise((resolve) => { world.awaited.push(resolve); })
+    : Promise.resolve({ outcome: world.receipt, reason: 'proof' }));
   // The listener and the Hub.
   s.getStatus = () => ({ state: 'listening', workspaceId: RECIPIENT_WS, unread: world.inbox.length, lastError: null });
   s.getMessages = () => world.inbox.map((id) => ({ id, from: SENDER_WS, message: 'proof' }));
@@ -137,6 +141,10 @@ const STEPS = {
     mx.bindHubId(x.exchange_id, step.hubId);
     world.inbox.push(step.hubId);
   },
+  /** The Hub hands over again what was never marked handled, as it does after a restart. */
+  redeliver(step) {
+    for (const hubId of step.hubIds) mx.recordArrival({ hubId, recipientWorkspaceId: RECIPIENT_WS });
+  },
   /** Mail in the inbox that has no exchange record at all (a system broadcast). */
   deliverUnrecorded(step) { world.inbox.push(step.hubId); },
   /** Fire the monitor's tick `n` times, five seconds apart, letting each pane read answer. */
@@ -157,6 +165,11 @@ const STEPS = {
   /** The outside world changes. */
   pane(step) { world.pane = step.name; },
   receipt(step) { world.receipt = step.outcome; },
+  /** The oldest receipt still out is answered, late. */
+  async answerReceipt(step) {
+    world.awaited.shift()({ outcome: step.outcome, reason: 'proof' });
+    await settle();
+  },
   /** The recipient fetches, then marks handled. */
   read(step) {
     mx.recordRead(step.hubIds, RECIPIENT_WS, { kind: 'project', projectId: byName('proof-builder').id });
