@@ -200,8 +200,11 @@ send prose to Discord.
   as the standing fallback, stays rejected. It exists so that the operator can still be reached
   without a rule being rewritten in the middle of an incident. Activation confirms the clause
   is in the replacement text before the rule is replaced.
-- **Rule #128** is flagged as concurrently active though superseded. A future rule change
-  reconciles it. Nothing here touches it.
+- **Rule #128** is the older Discord rule, concurrently active though superseded by Rule #145.
+  This ADR and its PR edit neither. At cutover, once the replacement rule is active under its
+  own newly assigned number, the operator disables the legacy Rules #145 and #128 and keeps both
+  for audit. A rollback leaves the new rule active and uses its own fallback for a disabled
+  bridge; it re-enables neither legacy rule.
 
 The two paths are sequential, not parallel. The interim procedure is retired at cutover, not
 merged into the new path. #2040 owns its documentation.

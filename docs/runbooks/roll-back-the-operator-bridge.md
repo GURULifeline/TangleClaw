@@ -56,9 +56,10 @@ server is down, do steps 3, 7 and 8.
    → The Master declines, saying its rules forbid it: its stored first rule is the old one. Do
    steps 6 and 7 of the activation runbook (the rule, then the relaunch), then repeat this step.
    Nothing reaches Discord meanwhile: steps 3 and 4 saw to that.
-   → `refused [OUTBOUND_IN_FLIGHT]`: step 4 has not been done. Do it, then close. If the Operator
-   cannot be reached, run the close again once the helper has been stopped for longer than a
-   lease lasts, which is 120 seconds.
+   → `refused [OUTBOUND_IN_FLIGHT]`: step 4 has not been done. Do it, then close: with the token
+   revoked there is nothing to wait for.
+   → Only if the Operator cannot be reached, so the token cannot be revoked: run the close again
+   once the helper has been stopped for longer than a lease lasts, which is 120 seconds.
 
 6. **Operator:** under "Queued with no open route", press **Withdraw** on every row and confirm
    each.
@@ -75,10 +76,14 @@ server is down, do steps 3, 7 and 8.
 8. Only if the server itself will not start on v5.31.0: stop it, put back the snapshot and the
    build it came from, and start it. `<snapshot>` and `<commit>` are the `snapshot:` and
    `commit:` lines in the cutover receipt, and no other file or commit.
+   `: "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"`
    `launchctl bootout gui/$(id -u)/com.tangleclaw.server`
-   `git -C "$TC_CHECKOUT" checkout --detach <commit>`
+   `git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" checkout --detach <commit>`
    `cp <snapshot> ~/.tangleclaw/tangleclaw.db`
    `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tangleclaw.server.plist`
+   → The first line answers naming `TC_CHECKOUT`: it is not set in this terminal, and nothing
+   has been stopped or changed. Set it to the checkout the service runs from and start the step
+   again. Unset, git would act on whatever directory the terminal is in.
    → Expected: the dashboard loads, and
    `sqlite3 ~/.tangleclaw/tangleclaw.db 'SELECT MAX(version) FROM schema_version'` prints the
    `schema:` line of the receipt.

@@ -110,13 +110,59 @@ describe('the operator bridge runbooks (#2031)', () => {
       const beacon = read('public/update-beacon.js');
       assert.ok(beacon.includes("' or newer — update available'") && beacon.includes('or newer and restart?'));
       // The notice names a floor, so the version is proved from the checkout, exactly.
-      assert.match(text, /`git -C "\$TC_CHECKOUT" describe --tags` → Expected: `v5\.31\.0`, exactly\. Anything else: stop\./);
+      assert.match(text, /describe --tags` → Expected: `v5\.31\.0`, exactly\. Anything else: stop\./);
       assert.ok(!/GET \/api\/health/.test(ACTIVATE + ROLLBACK), 'no route is called by hand');
       assert.ok(!/server is not running the merged commit/.test(text), 'the precondition that the new code runs first is gone');
       // The restore uses that snapshot and no other file.
       assert.match(flat(ROLLBACK), /`<snapshot>` and `<commit>` are the `snapshot:` and `commit:` lines in the cutover receipt, and no other file or commit\./);
-      assert.match(ROLLBACK, /git -C "\$TC_CHECKOUT" checkout --detach <commit>/);
+      assert.ok(ROLLBACK.includes('git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" checkout --detach <commit>'));
       assert.ok(!/tangleclaw\.pre-bridge\.db/.test(ACTIVATE + ROLLBACK), 'no fixed backup name that a second activation would overwrite');
+    });
+
+    it('no git command runs with TC_CHECKOUT unset or empty: every one is guarded, and the guard fails closed', () => {
+      const guard = '${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}';
+      // Every git operation either runbook prints: the snapshot block, and each one-line command.
+      const oneLiners = [];
+      for (const doc of [ACTIVATE, ROLLBACK]) {
+        for (const m of doc.matchAll(/`(git [^`]+)`/g)) oneLiners.push(m[1]);
+      }
+      assert.deepEqual(oneLiners.map((c) => c.replace(guard, 'G')), ['git -C "G" describe --tags', 'git -C "G" checkout --detach <commit>'],
+        'the two git commands outside the block, each naming its checkout through the guard');
+      assert.ok(!/TC_CHECKOUT"/.test(ACTIVATE.replace(/```sh[\s\S]*?```/, '') + ROLLBACK), 'no bare "$TC_CHECKOUT" outside the guarded block');
+      const lines = block().split('\n');
+      assert.ok(lines.indexOf(`: "${guard}"`) > -1 && lines.indexOf(`: "${guard}"`) < lines.findIndex((l) => /\bgit\b|sqlite3/.test(l)),
+        'the block checks it before its first git or sqlite3 command');
+      // The restore checks it before it stops the server, so a refusal leaves everything as it was.
+      const restore = ROLLBACK.slice(ROLLBACK.indexOf('8. Only if the server itself will not start'));
+      assert.ok(restore.indexOf('`: "' + guard + '"`') > -1 && restore.indexOf('`: "' + guard + '"`') < restore.indexOf('launchctl bootout'));
+
+      // Run as printed, with a git that records being called. Unset and empty both refuse, and git is never reached.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-guard-'));
+      try {
+        const called = path.join(dir, 'git-was-called');
+        const bin = path.join(dir, 'bin');
+        fs.mkdirSync(bin);
+        for (const tool of ['git', 'sqlite3', 'launchctl']) {
+          fs.writeFileSync(path.join(bin, tool), `#!/bin/sh\necho "${tool} $*" >> "${called}"\n`, { mode: 0o755 });
+        }
+        const scripts = [block(), ...oneLiners.map((c) => c.replace('<commit>', '0123456789abcdef')), ': "' + guard + '"\nlaunchctl bootout gui/501/com.tangleclaw.server'];
+        for (const script of scripts) {
+          for (const value of [undefined, '']) {
+            const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir };
+            if (value !== undefined) env.TC_CHECKOUT = value;
+            const res = spawnSync('sh', ['-c', script], { env, encoding: 'utf8' });
+            assert.notEqual(res.status, 0, `refused with TC_CHECKOUT ${value === undefined ? 'unset' : 'empty'}: ${script.slice(0, 40)}`);
+            assert.match(res.stderr, /TC_CHECKOUT: set TC_CHECKOUT to the checkout the service runs from/);
+            assert.ok(!fs.existsSync(called), `nothing ran: ${fs.existsSync(called) ? fs.readFileSync(called, 'utf8') : ''}`);
+          }
+        }
+        // And the same commands do reach git once it is set: the recorder is real.
+        const set = spawnSync('sh', ['-c', oneLiners[0]], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, TC_CHECKOUT: '/some/checkout' }, encoding: 'utf8' });
+        assert.equal(set.status, 0);
+        assert.equal(fs.readFileSync(called, 'utf8'), 'git -C /some/checkout describe --tags\n');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('run as printed: an owner-only, verified copy named for where it came from, and it refuses to overwrite', { skip: sqlite ? false : 'sqlite3 is not installed here' }, () => {
@@ -246,9 +292,13 @@ describe('the operator bridge runbooks (#2031)', () => {
         assert.ok(at > last, `"${step}" comes after the step before it`);
         last = at;
       }
-      // The token goes before the routes are closed, so no close waits on a lease; and nothing says to wait one out.
+      // The token goes before the routes are closed, so the normal path closes with no wait. One wait is
+      // kept, and only for the branch where the Operator cannot be reached and the token cannot be revoked.
       assert.match(text, /revoking the token ends every lease the helper held, at once/);
-      assert.match(text, /`refused \[OUTBOUND_IN_FLIGHT\]`: step 4 has not been done\. Do it, then close\. If the Operator cannot be reached, run the close again once the helper has been stopped for longer than a lease lasts, which is 120 seconds\./);
+      assert.match(text, /`refused \[OUTBOUND_IN_FLIGHT\]`: step 4 has not been done\. Do it, then close: with the token revoked there is nothing to wait for\./);
+      assert.match(text, /Only if the Operator cannot be reached, so the token cannot be revoked: run the close again once the helper has been stopped for longer than a lease lasts, which is 120 seconds\./);
+      assert.equal((text.match(/120 seconds|two minutes|longer than a lease/g) || []).length, 2, 'a wait is named once, and only in that branch');
+      assert.ok(text.indexOf('nothing to wait for') < text.indexOf('Only if the Operator cannot be reached'), 'the normal path first, with no wait');
       assert.equal(require('../lib/bridge-store').LEASE_MS, 120 * 1000, 'the wait the step names is the lease the store grants');
       // Honest about what Disable alone does not stop.
       assert.match(text, /Until steps 3 and 4 are done, a post the helper was already making can still land, and the helper still answers the Operator/);

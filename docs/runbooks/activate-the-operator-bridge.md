@@ -37,11 +37,13 @@ If any step's expected result does not appear, stop and go to
 
 1. **Release executor:** while the old build is still running, take a snapshot of the store.
    In a terminal, set `TC_CHECKOUT=<the checkout the service runs from>`, then paste this as it
-   is. The parentheses matter: a failure stops the block, not your terminal.
+   is. The parentheses matter: a failure stops the block, not your terminal. With `TC_CHECKOUT`
+   unset or empty the block stops before it runs anything.
 
    ```sh
    (
    set -eu
+   : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
    umask 077
    STORE="${TC_STORE:-$HOME/.tangleclaw/tangleclaw.db}"
    FROM="$(git -C "$TC_CHECKOUT" describe --tags --always)-$(git -C "$TC_CHECKOUT" rev-parse --short=12 HEAD)"
@@ -86,7 +88,9 @@ If any step's expected result does not appear, stop and go to
    → Expected: it finishes and the dashboard loads.
 
 5. **Release executor:** confirm what is running.
-   `git -C "$TC_CHECKOUT" describe --tags` → Expected: `v5.31.0`, exactly. Anything else: stop.
+   `git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" describe --tags`
+   → Expected: `v5.31.0`, exactly. Anything else: stop. An answer naming `TC_CHECKOUT` means it
+   is not set in this terminal: nothing ran. Set it and run the line again.
    `sqlite3 ~/.tangleclaw/tangleclaw.db 'SELECT MAX(version) FROM schema_version'` → Expected: `54`.
    The dashboard loads.
    → If the server does not come up: `~/.tangleclaw/logs/server.err.log` names each bridge object
