@@ -205,6 +205,17 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.deepEqual(bridgeStore.audit.forRoute(routeId).map((a) => a.outcome), ['version-conflict', 'applied', 'already-closed']);
   });
 
+  it('answers an id that could not be a route\'s as no such route, on read and on close', async () => {
+    for (const bad of ['x'.repeat(65), 'has space', 'semi;colon']) {
+      const id = encodeURIComponent(bad);
+      const read = await call('GET', `/api/bridge/master/routes/${id}`);
+      assert.deepEqual([read.status, read.body.code], [404, 'ROUTE_NOT_FOUND']);
+      const close = await call('POST', `/api/bridge/master/routes/${id}/close`, { body: { requestId: 'req-badid-0001', expectedVersion: 1 } });
+      assert.deepEqual([close.status, close.body.code], [404, 'ROUTE_NOT_FOUND']);
+    }
+    assert.equal(bridgeStore.audit.findRequest('close', 'req-badid-0001'), null);
+  });
+
   it('tc bridge works from a pane holding the credential, and names the refusal from one that does not', async () => {
     const routeId = acceptRoute('cli', 'hello from the operator');
     const env = { [handoff.CREDENTIAL_ENV]: credential };
@@ -233,7 +244,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.match(usage.stderr, /needs --version/);
   });
 
-  it('tc sends the credential on the bridge verb and on no other', async () => {
+  it('tc sends the credential to the bridge\'s own routes and nowhere else, whatever the verb', async () => {
     const seen = [];
     const http = require('node:http');
     const spy = http.createServer((req, res) => {
@@ -242,7 +253,12 @@ describe('bridge API: the Master surface (#2031)', () => {
       res.end('{}');
     });
     await new Promise((resolve) => spy.listen(0, '127.0.0.1', resolve));
-    const env = { [handoff.CREDENTIAL_ENV]: credential, TANGLECLAW_API: `http://127.0.0.1:${spy.address().port}` };
+    // A launch id, as every Master pane has: it is what makes `tc` add its
+    // control-banner lookup to a bridge call.
+    const env = {
+      [handoff.CREDENTIAL_ENV]: credential, TANGLECLAW_LAUNCH_ID: 'launch-for-this-test',
+      TANGLECLAW_API: `http://127.0.0.1:${spy.address().port}`
+    };
     try {
       await tc(['bridge', 'status'], env);
       await tc(['whoami'], env);
@@ -254,6 +270,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     const otherCalls = seen.filter((s) => !s.url.startsWith('/api/bridge/'));
     assert.ok(bridgeCalls.length >= 1 && otherCalls.length >= 1);
     assert.ok(bridgeCalls.every((s) => s.credential === credential));
-    assert.ok(otherCalls.every((s) => s.credential === null), 'no other verb carries the credential');
+    assert.ok(otherCalls.every((s) => s.credential === null), 'no other request carries the credential');
+    assert.ok(otherCalls.some((s) => s.url.startsWith('/api/control/mine')), 'the banner lookup a bridge call makes was observed');
   });
 });

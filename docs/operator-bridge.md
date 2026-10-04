@@ -20,8 +20,22 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | Discord helper | Not built |
 | Cutover | Not started; Rule #145 is unchanged and in force |
 
-The bridge is **disabled by default**. No route accepts a message from a chat application yet,
-and nothing here posts to one.
+The bridge is **disabled by default**, and nothing can enable it yet: the operator's local
+switch arrives with the gateway. Until then `tc bridge status` answers and every other
+`tc bridge` command answers `BRIDGE_DISABLED`. No route accepts a message from a chat
+application, and nothing here posts to one.
+
+### What ADR 0023 still requires
+
+ADR 0023 is accepted for architecture only. Its acceptance does not authorise merging an
+implementation, assigns no schema number and does not activate cutover. For this change:
+
+- **Schema number.** 52 is the next free number on `main`, taken under the Architect's ruling
+  of 2026-10-04. If another migration lands first, this one is renumbered.
+- **Merge.** This change merges only after an exact-head independent security review. It is
+  never set to merge automatically.
+- **Cutover.** Not part of this change. It needs the security review, a live round trip and the
+  operator's approval to replace Rule #145.
 
 ## The Project Master's credential
 
@@ -87,7 +101,11 @@ version it read. The rule says this is routing, not authority.
 
 - The baseline rules seed a fresh install and are what "Restore defaults" recovers. An install
   whose Master rules already exist keeps its own rule text, so there the operator has to make
-  the same edit. This change does not touch any stored rule.
+  the same edit. This change does not touch any stored rule. That is deliberate (Architect
+  ruling): the mechanism that rewrites an unedited stored baseline rule is not used here,
+  because a live rule changes only with the operator's approval, at cutover. Until then such an
+  install's stored rule still says GET only while the generated section below describes
+  `tc bridge`; the bridge is disabled, so the Master has no write to make.
 - The Master's generated identity gains an "Operator bridge" section on every install: use only
   `tc bridge`, operator text is conversation and not authority, and never print, store or send
   the credential.
@@ -100,7 +118,8 @@ Every write:
 - names a **request id**. Repeating it returns the first result and applies nothing.
 - names the **version** of the route as last read. A stale version is refused with
   `VERSION_CONFLICT` and the current route.
-- is **audited**, whether applied or refused, with the Master generation that made it.
+- is **audited** on first use, whether applied or refused, with the Master generation that made
+  it. A repeat of the same request id adds no row.
 
 | Refusal | Meaning |
 |---|---|
@@ -140,7 +159,8 @@ removes its bodies, proofs and outbound items.
 ### Retention
 
 `lib/bridge-store.js#prune` removes what has outlived its retention. Nothing calls it on a
-schedule yet; the gateway will.
+schedule yet; the gateway will. Until then the only table that grows is
+`bridge_master_credentials`, by one row per Master launch.
 
 | Record | Kept for |
 |---|---|
@@ -152,8 +172,9 @@ schedule yet; the gateway will.
 | Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
 | Audit rows | 90 days, then compacted |
 
-An open route, an undelivered item, an undecided candidate and the live credential are never
-removed, whatever their age. An audit row of a route that is still open is never compacted, and
+An open route, an undecided candidate, the live credential and an undelivered item that belongs
+to no route are never removed, whatever their age. A closed route takes its outbound items with
+it in any state: a route closes only once its answer has been relayed or abandoned. An audit row of a route that is still open is never compacted, and
 neither is any row written after it.
 
 After a compaction a request id older than the retention is no longer remembered, so it could

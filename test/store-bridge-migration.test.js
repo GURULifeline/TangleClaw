@@ -171,10 +171,12 @@ describe('store: operator bridge constraints (#2031)', () => {
     freshStore('single');
     const db = store.getDb();
     const mint = db.prepare('INSERT INTO bridge_master_credentials (generation, credential_hash, status, minted_at) VALUES (?, ?, ?, ?)');
+    const revoked = db.prepare("INSERT INTO bridge_master_credentials (generation, credential_hash, status, minted_at, revoked_at) VALUES (?, ?, 'revoked', ?, ?)");
     mint.run(1, 'b'.repeat(64), 'active', at);
     assert.throws(() => mint.run(2, 'c'.repeat(64), 'active', at), /UNIQUE/);
     assert.throws(() => mint.run(2, 'c'.repeat(64), 'pending', at), /UNIQUE/, 'pending and active are one slot');
-    mint.run(2, 'c'.repeat(64), 'revoked', at);
+    revoked.run(2, 'c'.repeat(64), at, at);
+    assert.throws(() => mint.run(3, 'f'.repeat(64), 'revoked', at), /CHECK/, 'a revoked generation records when');
 
     const token = db.prepare("INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at) VALUES (?, ?, 'active', 'operator', ?)");
     token.run('t1', 'd'.repeat(64), at);
@@ -289,6 +291,22 @@ describe('store: operator bridge constraints (#2031)', () => {
     for (const table of ['bridge_route_bodies', 'bridge_route_proofs', 'bridge_outbound']) {
       assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, table);
     }
+  });
+
+  it('gives every terminal row the timestamp retention works from', () => {
+    freshStore('terminal');
+    const db = store.getDb();
+    route('r1');
+    assert.throws(() => db.exec("UPDATE bridge_routes SET state = 'closed' WHERE route_id = 'r1'"), /CHECK/);
+    assert.throws(() => db.exec(`UPDATE bridge_routes SET closed_at = '${at}' WHERE route_id = 'r1'`), /CHECK/);
+    db.exec(`UPDATE bridge_routes SET state = 'closed', closed_at = '${at}' WHERE route_id = 'r1'`);
+    const item = db.prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, delivered_at, created_at, updated_at) '
+      + "VALUES (?, 'notification', 'fleet-idle', 'TangleClaw', 'x', ?, ?, ?, ?, ?)"
+    );
+    assert.throws(() => item.run('n:1', digest, 'delivered', null, at, at), /CHECK/);
+    assert.throws(() => item.run('n:1', digest, 'ready', at, at, at), /CHECK/);
+    item.run('n:1', digest, 'delivered', at, at, at);
   });
 
   it('keeps an unresolved route free of destination fields and ties a generation to a Master decision', () => {
