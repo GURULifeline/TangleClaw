@@ -76,7 +76,8 @@ async function guestRun(opts = {}) {
   await publication.update({ state, manifest, events: admitted.events });
   if (opts.finalize !== false && hostAttested) {
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
-    await hc.finalize({ hostBase, manifest, manifestDigest: opts.finalizeDigest || digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: opts.observe || GREEN });
+    await hc.finalize({ hostBase, manifest, manifestDigest: opts.finalizeDigest || digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: opts.observe || GREEN,
+      soakJudgement: fx.soakJudgement(manifest, opts.finalizeDigest || digest) });
   }
   return { manifest, digest, publication, state, events: admitted.events, clock };
 }
@@ -211,15 +212,35 @@ describe('host relay: every check fails closed and publishes nothing', () => {
 });
 
 describe('host relay: what counts as certification of record', () => {
-  for (const [name, card, fin, want] of [
-    ['a passed canonical run the host finalized', { state: 'passed', canonicalThresholds: true }, { ok: true }, true],
-    ['a passed run judged by other thresholds', { state: 'passed', canonicalThresholds: false }, { ok: true }, false],
-    ['a run awaiting review', { state: 'awaiting-review', canonicalThresholds: true }, { ok: true }, false],
-    ['a passed run whose finalization failed', { state: 'passed', canonicalThresholds: true }, { ok: false }, false],
-    ['a passed run with no finalization', { state: 'passed', canonicalThresholds: true }, null, false]
+  const m = fx.manifest({ runId: fx.RUN_ID });
+  const D = 'd'.repeat(64);
+  // A finalization of that run, holding the soak judgement given.
+  const fin = (ok, soak = fx.soakJudgement(m, D)) => ({ ok, candidateSha: m.candidateSha, runId: m.runId, manifestDigest: D, soak });
+  const PASSED = { state: 'passed', canonicalThresholds: true, acceptance: { actor: 'operator', at: 1 } };
+  const BOUND = { sha256: fx.DISPOSITION_SHA, candidateSha: m.candidateSha, runId: m.runId };
+  // A passed scorecard whose acceptance binds a soak disposition proposal.
+  const ACCEPTED_WITH = (soakDisposition) => ({ ...PASSED, acceptance: { ...PASSED.acceptance, soakDisposition } });
+  for (const [name, card, finalization, want] of [
+    ['a passed canonical run the host finalized with a bound, passing soak judgement', PASSED, fin(true), true],
+    ['a passed run judged by other thresholds', { state: 'passed', canonicalThresholds: false }, fin(true), false],
+    ['a run awaiting review', { state: 'awaiting-review', canonicalThresholds: true }, fin(true), false],
+    ['a passed run whose finalization failed', PASSED, fin(false), false],
+    ['a passed run with no finalization', PASSED, null, false],
+    ['a passed run whose finalization holds no soak judgement', PASSED, fin(true, null), false],
+    ['a passed run whose soak judgement failed', PASSED, fin(true, fx.soakJudgement(m, D, { verdict: 'fail', reasons: [{ code: 'DATA_CORRUPTION', class: 'terminal' }] })), false],
+    ['a passed run whose soak judgement is bound to another run', PASSED, fin(true, fx.soakJudgement({ ...m, runId: 'e'.repeat(32) }, D)), false],
+    ['a passed run whose soak judgement is bound to another manifest', PASSED, fin(true, fx.soakJudgement(m, 'f'.repeat(64))), false],
+    ['a passed run whose soak bundle named another candidate', PASSED,
+      fin(true, fx.soakJudgement(m, D, { binding: { ...fx.soakJudgement(m, D).binding, bundleCandidateSha: 'b'.repeat(40) } })), false],
+    ['a passed run whose soak findings the acceptance disposed of by exactly the recorded proposal', ACCEPTED_WITH(BOUND), fin(true, fx.soakWithFindings(m, D)), true],
+    ['a passed run with soak findings and an acceptance that binds no proposal', PASSED, fin(true, fx.soakWithFindings(m, D)), false],
+    ['a passed run with soak findings and an acceptance of another proposal', ACCEPTED_WITH({ ...BOUND, sha256: '9'.repeat(64) }), fin(true, fx.soakWithFindings(m, D)), false],
+    ['a passed run with soak findings and an acceptance made for another run', ACCEPTED_WITH({ ...BOUND, runId: 'e'.repeat(32) }), fin(true, fx.soakWithFindings(m, D)), false],
+    ['a passed run with soak findings no proposal covers', ACCEPTED_WITH(BOUND), fin(true, fx.soakWithFindings(m, D, { disposition: null })), false],
+    ['a passed run with a clean soak and an acceptance naming a proposal', ACCEPTED_WITH(BOUND), fin(true), false]
   ]) {
     it(`${want ? 'certifies' : 'does not certify'} ${name}`, () => {
-      assert.equal(hostPublish.certifiedFrom(card, fin), want);
+      assert.equal(hostPublish.certifiedFrom(card, finalization), want);
     });
   }
 });
@@ -246,7 +267,8 @@ describe('rc-cert: the guest publishes locally with no git identity, and the hos
     assert.equal(JSON.parse(refused.err).error, REFUSAL.NOT_FINALIZED);
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => fx.RUN_ID });
     const m = fx.manifest({ checksSource: 'host-attested', checksExchange: '/x', publishRemote: guest, isolationProducer: '/x/guest-setup.sh' });
-    await hc.finalize({ hostBase, manifest: m, manifestDigest: store.manifestDigest(store.manifestText(m)), state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN });
+    await hc.finalize({ hostBase, manifest: m, manifestDigest: store.manifestDigest(store.manifestText(m)), state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN,
+      soakJudgement: fx.soakJudgement(m, store.manifestDigest(store.manifestText(m))) });
     const relayed = await run(['host-publish', '--sha', SHA, '--guest-metrics', guest, '--remote', pub, '--host-base', hostBase]);
     assert.equal(relayed.code, 0, relayed.err);
     assert.equal(JSON.parse(relayed.out).oid, tip(pub));
@@ -421,7 +443,7 @@ describe('host relay: a relayed run\'s finalization is sealed (RM05 finding 1)',
     const r = await hostPublish.relay({ hostBase, candidateSha: SHA, guestMetrics: guest, remoteUrl: pub });
     const before = fs.readFileSync(hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID), 'utf8');
     await assert.rejects(
-      () => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 99 }),
+      () => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 99, soakJudgement: fx.soakJudgement(run.manifest, run.digest) }),
       (e) => e.code === REFUSAL.FINALIZATION_SEALED
     );
     assert.equal(fs.readFileSync(hc.hostPaths(hostBase, SHA).finalization(fx.RUN_ID), 'utf8'), before, 'not rewritten');
@@ -433,7 +455,8 @@ describe('host relay: a relayed run\'s finalization is sealed (RM05 finding 1)',
   it('allows a re-finalize before any relay, e.g. after a failed one', async () => {
     const run = await guestRun({ observe: async () => ({ observation: { state: 'ok', checks: { test: 'failure' } }, error: null }) });
     assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, false);
-    const out = await hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN });
+    const out = await hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN,
+      soakJudgement: fx.soakJudgement(run.manifest, run.digest) });
     assert.equal(out.ok, true);
     assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, true);
   });
@@ -441,7 +464,7 @@ describe('host relay: a relayed run\'s finalization is sealed (RM05 finding 1)',
 
 describe('host relay and finalize never interleave (Architect ruling 727dcaaf, B9 review R-1)', () => {
   const lockfile = require('../lib/release-certification/lockfile');
-  const refin = (run) => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 7 });
+  const refin = (run) => hc.finalize({ hostBase, manifest: run.manifest, manifestDigest: run.digest, state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, samples: [], observe: GREEN, now: () => T0 + 7, soakJudgement: fx.soakJudgement(run.manifest, run.digest) });
 
   it('refuses a finalize that lands in the middle of a relay, and the record still verifies', async () => {
     const run = await guestRun();

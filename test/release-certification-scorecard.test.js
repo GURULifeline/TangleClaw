@@ -128,6 +128,32 @@ describe('published documents (#1949 C02)', () => {
     assert.deepEqual(overridden.acceptance, { at: T0 + 3 * MIN }, 'no caller option can publish an id the manifest withheld');
   });
 
+  it('publishes the soak disposition an acceptance bound, and still withholds the actor when asked', () => {
+    const reviewing = run(manifest(FAST), [sample(MIN, busy(1, MIN)), sample(2 * MIN, busy(2, 2 * MIN))]).state;
+    const canonical = manifest();
+    const D = 'd'.repeat(64);
+    const bound = { sha256: D, candidateSha: canonical.candidateSha, runId: canonical.runId };
+    const passed = sm.accept(reviewing, 'jason', T0 + 3 * MIN, canonical, D).state;
+    const card = sc.scorecard(passed, canonical, T0 + 3 * MIN, 1);
+    assert.deepEqual(card.acceptance, { actor: 'jason', at: T0 + 3 * MIN, soakDisposition: bound });
+    assert.deepEqual(sc.validateScorecard(card), []);
+    const quiet = sc.scorecard(passed, { ...canonical, publishActor: false }, T0 + 3 * MIN, 1);
+    assert.deepEqual(quiet.acceptance, { at: T0 + 3 * MIN, soakDisposition: bound });
+    assert.deepEqual(sc.validateScorecard(quiet), []);
+    for (const [name, soakDisposition] of [
+      ['a short digest', { ...bound, sha256: 'abc' }],
+      ['another candidate', { ...bound, candidateSha: 'c'.repeat(40) }],
+      ['a malformed run id', { ...bound, runId: 'nope' }],
+      ['an extra field', { ...bound, actor: 'jason' }],
+      ['no run id', { sha256: D, candidateSha: canonical.candidateSha }],
+      ['a bare digest', D]
+    ]) {
+      assert.ok(sc.validateScorecard({ ...card, acceptance: { ...card.acceptance, soakDisposition } }).includes('FIELD:acceptance'), name);
+    }
+    const cancelled = sc.scorecard(sm.cancel(reviewing, 'jason', T0 + 3 * MIN).state, canonical, T0 + 3 * MIN, 1);
+    assert.ok(sc.validateScorecard({ ...cancelled, cancellation: { ...cancelled.cancellation, soakDisposition: bound } }).includes('FIELD:cancellation'), 'a cancellation disposes of nothing');
+  });
+
   it('never publishes the worktree path, host, ttyd generation or diagnostics', () => {
     const m = manifest();
     const { state, events } = run(m, [sample(MIN), sample(2 * MIN, obs({ github: { state: 'unavailable' } })), sample(3 * MIN, obs({ ttyd: { leakState: 'fired' } }))]);
