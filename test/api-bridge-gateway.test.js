@@ -343,6 +343,45 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
   });
 
+  it('the Master moving a route ends the gateway\'s own exchange for it at once, and leaves none open that nothing waits on', async () => {
+    const exchanges = require('../lib/medusa-exchanges');
+    /** @returns {string[]} The gateway's open sends, by request id. */
+    const open = () => exchanges.openSystemOwned(gateway.GATEWAY_KEY).map((x) => x.request_id).sort();
+    const startedWith = open();
+    const alpha = liveProject(`Alpha${++seq}`);
+    const beta = liveProject(`Beta${++seq}`);
+
+    // Closed by the Master while routed: no pass is needed for its exchange to end.
+    const one = (await operatorSays(`m${++seq}`, `@${alpha.project.name} first`)).body.routeId;
+    assert.deepEqual(open(), [...startedWith, `bridge:${one}:send1`].sort());
+    const closed = await masterWrites(one, 'close', { expectedVersion: bridgeStore.routes.get(one).version });
+    assert.equal(closed.body.route.state, 'closed');
+    const ended = store.medusaExchanges.getByRequestId(`bridge:${one}:send1`);
+    assert.deepEqual([ended.state, ended.terminal_code], ['closed', 'system-owner-closed']);
+    assert.deepEqual(open(), startedWith);
+
+    // Answered by the Master while routed, without waiting for the session: the same.
+    const two = (await operatorSays(`m${++seq}`, `@${alpha.project.name} second`)).body.routeId;
+    const read = await call('GET', `/api/bridge/master/routes/${two}`, { headers: asMaster() });
+    const answered = await masterWrites(two, 'answer', { expectedVersion: read.body.route.version, text: 'I will answer this one myself.' });
+    assert.equal(answered.body.route.state, 'released', JSON.stringify(answered.body));
+    assert.equal(store.medusaExchanges.getByRequestId(`bridge:${two}:send1`).terminal_code, 'system-owner-closed');
+    assert.deepEqual(open(), startedWith);
+
+    // Rerouted by the Master after its target went away: the new attempt is open and the old one is not.
+    const three = (await operatorSays(`m${++seq}`, `@${alpha.project.name} third`)).body.routeId;
+    exchanges.markRecipientRetired(alpha.workspaceId);
+    await gateway.tick();
+    assert.equal(bridgeStore.routes.get(three).state, 'awaiting-master');
+    const rerouted = await masterWrites(three, 'route', { expectedVersion: bridgeStore.routes.get(three).version, to: beta.project.name });
+    assert.equal(rerouted.status, 200, JSON.stringify(rerouted.body));
+    assert.equal(bridgeStore.routes.get(three).state, 'routed');
+    const mine = open().filter((id) => id.startsWith(`bridge:${three}:`));
+    assert.equal(mine.length, 1, `exactly one open send for the route: ${mine}`);
+    assert.equal(store.medusaExchanges.getByRequestId(mine[0]).recipient_workspace_id, beta.workspaceId);
+    assert.equal(store.medusaExchanges.getByRequestId(`bridge:${three}:send1`).state, 'recipient_retired');
+  });
+
   it('withdrawing a route\'s answer before it is posted closes the route and clears its text', async () => {
     /**
      * The operator writes, and the Master answers: a released route and its one unposted answer.

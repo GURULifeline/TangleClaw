@@ -88,6 +88,8 @@ All notable changes to TangleClaw are documented in this file.
   - **Withdrawing a route's answer before it is posted closes the route** and clears its text, whether the Master, the operator or a circuit reset withdrew it. The route no longer stays released with nothing coming.
   - A session's reply whose route changed while the reply was being stored is kept and judged again on the next pass. It used to be dropped.
   - A message that reached the switchboard for a session that can no longer be named is reported to the operator as that, not as an unknown outcome.
+  - **The bridge's own message to a project is never reported to the operator as unanswered.** #2086 began alerting the operator about ordinary mail left long enough, and the bridge would have forwarded that alert about its own send. The gateway now owns the exchanges it sends: the watchdog does not raise them, the gateway closes each one when its route stops waiting on it, and the bridge ignores an alert about one. The exchange stays open while the route waits, so the target session is still woken and a retired target still returns the route to the Master.
+  - **An operator alert the bridge relays says why it was raised.** Unread, read and unanswered, held by a configuration problem, or stalled each has its own sentence. It used to say "gone unanswered" for all of them.
   - Schema v54 retires `idx_bridge_routes_conversation`, an index v52 created that nothing reads. The upgrade drops it and a store that still has it at v54 is refused.
 
 - **The bridge knows what an operator's reply answers** (#2031, ADR 0023 Decision 22). Still off by default.

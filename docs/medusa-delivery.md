@@ -373,6 +373,29 @@ server time, before its notices go out:
   owns that.
 - **Retracted and closed exchanges never escalate.**
 
+### A send a TangleClaw component owns
+
+Most system messages are notices and make no exchange. One kind does: a message a TangleClaw
+component sends to a session on someone else's behalf and tracks, as the operator bridge's
+gateway does when it carries an operator's message to a project.
+
+Such a component can declare that it owns what it sends
+(`lib/medusa-exchanges.js#declareSystemOwner`). A send is then that component's when three things
+hold together: it has verified system provenance and no sending project, its sender is the
+component's listener, and its request id begins with the prefix the component declared.
+
+- **The watchdog does not raise it.** No aged notice, no escalation, no operator alert. The
+  component decides what happens when it goes unread or unanswered. It is still re-armed, still
+  woken for, and still ended when its recipient retires.
+- **The component closes it,** in-process, and only its own
+  (`closeAsSystemOwner`). No route reaches that close. `POST .../exchanges/<id>/close` admits
+  the operator and the sending project's verified launch, as before, and nobody else.
+- **Nothing else is exempt.** A system send from a component that has declared nothing, or one
+  missing any of the three proofs, is an ordinary exchange.
+
+The operator bridge's gateway is the only declared owner. See
+[operator-bridge.md](operator-bridge.md), "The one status notice".
+
 ## Undeliverable and retired recipients
 
 - **Not failures:** a listener disconnect, or a workspace missing from the

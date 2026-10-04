@@ -20,6 +20,8 @@ const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const gateway = require('../lib/bridge-gateway');
 const exchanges = require('../lib/medusa-exchanges');
+const watchdog = require('../lib/medusa-watchdog');
+const bridgeNotify = require('../lib/bridge-notify');
 const { install, GATEWAY_WS, MASTER_WS } = require('./_bridge-hub');
 
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
@@ -1252,6 +1254,239 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual(waitingForHelper(), []);
       assert.equal(bridgeStore.outbound.get(item.outboundId).text, null, 'the text is dropped once the chat has it');
       assert.ok(project.id);
+    });
+  });
+  // The gateway's own send to a project is a tracked Medusa exchange that
+  // only the gateway can end. It has to stay open while the route waits on
+  // it, because that is what wakes the target and what shows a target that
+  // retired; and it must never be raised to the operator, because the route
+  // has its own one status notice (ADR 0023 Decision 17).
+  describe('the gateway\'s own Medusa exchange', () => {
+    const OWNER = { kind: 'system', sessionKey: gateway.GATEWAY_KEY };
+    /** @returns {object} The gateway's send exchange for a Hub id. */
+    const sendOf = (hubId) => store.medusaExchanges.getByHubId(hubId, 'send');
+    /** @returns {string[]} The watchdog's facts on an exchange. */
+    const ladder = (exchangeId) => store.medusaExchanges.facts(exchangeId)
+      .map((f) => f.fact).filter((f) => /^(aged|escalat|operator_alerted)/.test(f));
+    /** @returns {object[]} Bridge notifications queued for the helper. */
+    const notices = () => store.getDb().prepare("SELECT notify_type, idem_key, text FROM bridge_outbound WHERE kind = 'notification' ORDER BY outbound_id").all();
+    /**
+     * Run the real watchdog as of the stand-in clock, and wait for its notices.
+     * @returns {Promise<void>}
+     */
+    const watchdogPass = async () => { await watchdog.tick(new Date(clock)).notices; };
+
+    it('stays open while the route waits on it: the target is still to be woken, and a target that retires is still seen', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+      const sent = sendOf(hub.fromGateway()[0].hubId);
+      assert.deepEqual([sent.terminal_at, exchanges.systemOwnerOf(sent), sent.request_id], [null, gateway.GATEWAY_KEY, `bridge:${r.body.routeId}:send1`]);
+      assert.equal(exchanges.pendingWakeCount(alpha.workspaceId), 1, 'unread mail the wake monitor nudges the session for');
+      for (let i = 0; i < 3; i++) { later(60 * 1000); await gateway.tick(); }
+      assert.equal(gateway.settleSends(), 0);
+      assert.equal(sendOf(sent.hub_id).terminal_at, null, 'no pass closes it while the route waits');
+      assert.equal(exchanges.pendingWakeCount(alpha.workspaceId), 1);
+
+      // The session ends. Its exchange records that, and the route goes back to the Master.
+      exchanges.markRecipientRetired(alpha.workspaceId);
+      assert.equal(sendOf(sent.hub_id).state, 'recipient_retired');
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'awaiting-master');
+    });
+
+    it('is never raised by the watchdog, at any age; an ordinary message still is, once, in words that are true', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      bridgeStore.settings.set(bridgeNotify.ENABLED_AT, clock);
+      const r = await operatorSays('m1', '@alpha status?');
+      const sent = sendOf(hub.fromGateway()[0].hubId);
+      // An ordinary message between two sessions, sent at the same moment and never read.
+      const ordinary = await hub.sessionSends(alpha, { to: beta.workspaceId, text: 'for beta', deliver: false });
+      const ordinaryId = store.medusaExchanges.getByHubId(ordinary.body.id, 'send').exchange_id;
+
+      // Far past every threshold the watchdog has.
+      for (const minutes of [31, 61, 6 * 60, 48 * 60]) {
+        later(minutes * 60 * 1000);
+        await watchdogPass();
+        await gateway.tick();
+      }
+      assert.deepEqual(ladder(sent.exchange_id), [], 'no aged, escalation or operator fact');
+      assert.equal(sendOf(sent.hub_id).esc_level || 'none', 'none');
+      assert.ok(!watchdog.listEscalations(new Date(clock)).some((e) => e.exchangeId === sent.exchange_id), 'so no dashboard entry or banner');
+      assert.equal(sendOf(sent.hub_id).terminal_at, null, 'and it is still open: the route still waits on it');
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'routed');
+
+      // The ordinary one climbed, and the bridge told the operator of it once, saying what is true of it.
+      assert.ok(ladder(ordinaryId).includes('operator_alerted'), 'precondition: the watchdog does raise ordinary normal mail');
+      const alert = store.medusaExchanges.facts(ordinaryId).find((f) => f.fact === 'operator_alerted');
+      const about = notices().filter((n) => n.notify_type === 'operator-needed');
+      assert.deepEqual(about.map((n) => n.idem_key), [`notify:operator-needed:exchange:${ordinaryId}`], 'one notice, for the ordinary exchange only');
+      // Why it was raised depends on what is holding it; the sentence is the one for that reason.
+      assert.ok(['prolonged-unread', 'prolonged-actionable', 'configuration-hold'].includes(alert.code), alert.code);
+      assert.equal(about[0].text, bridgeNotify.TEMPLATES['operator-needed']({ project: 'Beta', why: alert.code }));
+      assert.ok(!/unanswered/.test(about[0].text), `nobody read it, so it is not called unanswered: ${about[0].text}`);
+      assert.notEqual(about[0].text, 'A message to Beta needs you.', 'and the reason has a sentence of its own');
+      // The route got its one status notice and nothing else.
+      const forRoute = store.getDb().prepare('SELECT idem_key FROM bridge_outbound WHERE route_id = ?').all(r.body.routeId).map((x) => x.idem_key);
+      assert.deepEqual(forRoute, [`route:${r.body.routeId}:pending`]);
+    });
+
+    it('a fact an earlier build recorded for the gateway\'s own send is not turned into a notice', async () => {
+      liveProject('Alpha');
+      bridgeStore.settings.set(bridgeNotify.ENABLED_AT, clock);
+      later(1000);
+      await operatorSays('m1', '@alpha status?');
+      const sent = sendOf(hub.fromGateway()[0].hubId);
+      exchanges.recordEscalationFact(sent.exchange_id, 'operator_alerted', { code: 'prolonged-unread', at: clock });
+      assert.equal(bridgeNotify.reconcile().operatorNeeded, 0);
+      assert.deepEqual(notices(), []);
+    });
+
+    it('is closed when its reply is held, and still names the message a later reply answers', async () => {
+      const alpha = liveProject('Alpha');
+      const r = await operatorSays('m1', '@alpha status?');
+      const asked = hub.fromGateway()[0].hubId;
+      await hub.sessionSends(alpha, { inReplyTo: asked, text: 'All green.' });
+      assert.equal(gateway.drainInbox().held, 1);
+      const closed = sendOf(asked);
+      assert.deepEqual([closed.state, closed.terminal_code], ['closed', 'system-owner-closed']);
+      const facts = store.medusaExchanges.facts(closed.exchange_id);
+      assert.ok(facts.some((f) => f.fact === 'replied'), 'the reply is on its record');
+      const end = facts.find((f) => f.fact === 'closed');
+      assert.deepEqual([end.actor, end.proof, JSON.parse(end.detail_json).owner], ['system', 'system', gateway.GATEWAY_KEY]);
+      assert.equal(exchanges.pendingWakeCount(alpha.workspaceId), 0);
+      assert.equal(bridgeStore.proofs.latestToTarget(r.body.routeId).hubId, asked, 'the route still knows what it sent');
+
+      // A second reply to the same message is still a reply to it: the closed
+      // send is found by its Hub id. It is refused for where the route is.
+      const second = await hub.sessionSends(alpha, { inReplyTo: asked, text: 'One more thing.' });
+      assert.equal(second.status, 200, JSON.stringify(second.body));
+      assert.equal(store.medusaExchanges.getByHubId(second.body.id, 'send').in_reply_to, closed.exchange_id, 'its identity is intact');
+      assert.equal(gateway.drainInbox().dropped, 1);
+      assert.deepEqual(dropReasons(), ['route-not-awaiting-a-reply']);
+      assert.equal(bridgeStore.routes.body(r.body.routeId, 'reply').text, 'All green.');
+    });
+
+    it('a rerouted or closed route leaves no exchange open, and only the one it no longer waits on is closed', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      const first = await operatorSays('m1', '@alpha one');
+      const other = await operatorSays('m2', '@beta two');
+      const firstHub = hub.fromGateway()[0].hubId;
+      const otherHub = hub.fromGateway()[1].hubId;
+      /** @returns {string[]} The gateway's open sends, by request id. */
+      const open = () => exchanges.openSystemOwned(gateway.GATEWAY_KEY).map((x) => x.request_id).sort();
+      assert.deepEqual(open(), [`bridge:${first.body.routeId}:send1`, `bridge:${other.body.routeId}:send1`].sort());
+
+      // Alpha's session ends; the Master sends the message to Beta instead.
+      exchanges.markRecipientRetired(alpha.workspaceId);
+      await gateway.tick();
+      let route = bridgeStore.routes.get(first.body.routeId);
+      assert.equal(route.state, 'awaiting-master');
+      const reroute = bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-own-0001', routeId: route.routeId, expectedVersion: route.version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1, at: clock,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: beta.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      assert.equal(reroute.outcome, 'applied');
+      await gateway.advance(route.routeId);
+      assert.equal(bridgeStore.routes.get(route.routeId).state, 'routed');
+      // Every settled attempt takes a number, the one that failed included.
+      assert.deepEqual(open(), [`bridge:${first.body.routeId}:send3`, `bridge:${other.body.routeId}:send1`].sort(),
+        'the new attempt is the one waited on; the first ended with its recipient');
+      assert.equal(sendOf(firstHub).state, 'recipient_retired', 'an exchange that already ended is left as it ended');
+
+      // The Master closes the other route. Its send is closed with it, and nothing else is.
+      route = bridgeStore.routes.get(other.body.routeId);
+      const done = bridgeStore.applyRouteWrite({
+        op: 'close', requestId: 'req-close-own-0001', routeId: route.routeId, expectedVersion: route.version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1, at: clock,
+        change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: clock }, clearBodies: true })
+      });
+      assert.equal(done.outcome, 'applied');
+      assert.equal(gateway.settleSends(other.body.routeId), 1);
+      assert.deepEqual([sendOf(otherHub).state, sendOf(otherHub).terminal_code], ['closed', 'system-owner-closed']);
+      assert.deepEqual(open(), [`bridge:${first.body.routeId}:send3`]);
+      assert.equal(gateway.settleSends(), 0, 'again changes nothing');
+    });
+
+    it('a row left open by a crash is closed on the next pass; an unconfirmed attempt that may still bind is not', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      const r = await operatorSays('m1', '@alpha status?');
+      const asked = hub.fromGateway()[0].hubId;
+      // The server stops between holding the reply and closing its own exchange.
+      const realClose = exchanges.closeAsSystemOwner;
+      exchanges.closeAsSystemOwner = () => { throw new Error('the server stopped here'); };
+      try {
+        await hub.sessionSends(alpha, { inReplyTo: asked, text: 'All green.' });
+        assert.equal(gateway.drainInbox().held, 1);
+      } finally {
+        exchanges.closeAsSystemOwner = realClose;
+      }
+      assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'reply-held');
+      assert.equal(sendOf(asked).terminal_at, null, 'left open');
+
+      // A send whose outcome is not known: the route still waits on it, and its Hub id may yet bind.
+      hub.failSend = 'unknown';
+      const unsure = await operatorSays('m2', '@beta hello');
+      hub.failSend = null;
+      const pending = store.medusaExchanges.getByRequestId(`bridge:${unsure.body.routeId}:send1`);
+      assert.equal(pending.terminal_at, null);
+
+      gateway._reset();
+      const pass = await gateway.tick();
+      assert.equal(pass.settled, 1, 'the orphan, and only the orphan');
+      assert.deepEqual([sendOf(asked).state, sendOf(asked).terminal_code], ['closed', 'system-owner-closed']);
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); await watchdogPass(); }
+      const still = store.medusaExchanges.getByRequestId(`bridge:${unsure.body.routeId}:send1`);
+      assert.equal(still.terminal_at, null, 'the unconfirmed attempt stays open, to be bound if the Hub\'s answer turns up');
+      assert.deepEqual(ladder(still.exchange_id), [], 'and is not raised either');
+      assert.deepEqual([bridgeStore.routes.get(unsure.body.routeId).state, bridgeStore.routes.get(unsure.body.routeId).failureCode], ['accepted', 'send-unconfirmed']);
+    });
+
+    it('only the component that sent an exchange can close it this way, and nothing about closing over HTTP changed', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      await operatorSays('m1', '@alpha status?');
+      const own = sendOf(hub.fromGateway()[0].hubId);
+      const refused = (exchangeId, owner, code) => assert.throws(() => exchanges.closeAsSystemOwner(exchangeId, owner),
+        (err) => err.code === code, `${JSON.stringify(owner)} -> ${code}`);
+
+      // Who is asking.
+      refused(own.exchange_id, null, 'SYSTEM_OWNER_REQUIRED');
+      refused(own.exchange_id, { kind: 'project', sessionKey: gateway.GATEWAY_KEY }, 'SYSTEM_OWNER_REQUIRED');
+      refused(own.exchange_id, { kind: 'system', sessionKey: '' }, 'SYSTEM_OWNER_REQUIRED');
+      refused(own.exchange_id, { kind: 'system', sessionKey: String(alpha.sessionId) }, 'SYSTEM_OWNER_REQUIRED');
+      refused(own.exchange_id, { kind: 'system', sessionKey: 'master' }, 'NOT_SYSTEM_OWNER');
+      // What is being closed: a session's exchange never is, whoever asks.
+      const theirs = await hub.sessionSends(alpha, { to: beta.workspaceId, text: 'between sessions', deliver: false });
+      const theirsRow = store.medusaExchanges.getByHubId(theirs.body.id, 'send');
+      refused(theirsRow.exchange_id, OWNER, 'NOT_SYSTEM_OWNER');
+      assert.equal(exchanges.systemOwnerOf(theirsRow), null);
+      // A system send that is not the gateway's is nobody's to close this way, and is watched like any other.
+      const stray = exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: 'other-system-send-0001' }, { kind: 'system' }, null, {}),
+        sender: { projectId: null, sessionId: gateway.GATEWAY_KEY, workspaceId: GATEWAY_WS },
+        recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
+      });
+      assert.deepEqual([exchanges.isSystemOrigin(stray), exchanges.systemOwnerOf(stray)], [true, null], 'the gateway\'s key without the gateway\'s request id is not the gateway\'s');
+      refused(stray.exchange_id, OWNER, 'NOT_SYSTEM_OWNER');
+      assert.deepEqual(exchanges.openSystemOwned(gateway.GATEWAY_KEY).map((x) => x.exchange_id), [own.exchange_id]);
+      assert.deepEqual([exchanges.openSystemOwned('master'), exchanges.openSystemOwned(String(alpha.sessionId))], [[], []]);
+      assert.throws(() => exchanges.declareSystemOwner('7', { requestIdPrefix: 'x:' }), /named component/);
+      assert.throws(() => exchanges.declareSystemOwner('someone', { requestIdPrefix: '' }), /named component/);
+      assert.equal(sendOf(own.hub_id).terminal_at, null, 'none of that closed anything');
+
+      // The ordinary close is as it was: a system caller has no standing there.
+      assert.throws(() => exchanges.close(own.exchange_id, { kind: 'system' }), (err) => err.code === 'EXCHANGE_BINDING_REQUIRED');
+
+      // The owner closes it, and closing it again is the same answer.
+      const closed = exchanges.closeAsSystemOwner(own.exchange_id, OWNER);
+      assert.deepEqual([closed.state, closed.terminal_code], ['closed', 'system-owner-closed']);
+      assert.equal(exchanges.closeAsSystemOwner(own.exchange_id, OWNER).terminal_at, closed.terminal_at);
+      assert.equal(store.medusaExchanges.facts(own.exchange_id).filter((f) => f.fact === 'closed').length, 1);
     });
   });
 });

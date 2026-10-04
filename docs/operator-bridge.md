@@ -146,8 +146,22 @@ default does not redirect a message that is still waiting.
 A route gets at most one `status` item in its life: that the Master is unavailable, or, after
 five minutes without a final answer, that the message is still waiting. Whichever comes first
 is the only one. Its text is one of two fixed sentences the server wrote; a status item cannot
-carry anything anybody typed. The Medusa message itself is normal priority, so the delivery
-watchdog never raises it to its escalation or operator rungs.
+carry anything anybody typed.
+
+The Medusa message the gateway sends to the project gets no notice of its own. The gateway
+declares the exchanges it sends as its own (`lib/medusa-exchanges.js#declareSystemOwner`), and
+the delivery watchdog does not raise a declared owner's send to any rung: no aged notice, no
+escalation, no operator alert, no dashboard entry, however long it waits. It is still an
+ordinary open message in every other way, which is what delivers it: the wake monitor nudges the
+target session for it, and a target whose session ends is recorded on it, which is how the
+route gets back to the Master.
+
+The gateway ends that exchange itself, since no session can. It stays open exactly while the
+route is waiting on that send: the route is `routed` on that message, or is still `accepted`
+and that send is the attempt being resolved, whose Hub id may yet bind. It is closed the moment
+the route moves on (its reply is held, the Master answers, reroutes or closes it), and on every
+pass for any that a crash left open. Closing changes nothing about what it was: a later reply
+that names the message still finds it, and is then refused for where the route is, by name.
 
 ## The Project Master's credential
 
@@ -334,7 +348,7 @@ name or a count the server resolved, never anything a session or the operator ty
 | Type | Raised when | Bound to |
 |---|---|---|
 | `work-blocked` | a lane's workload receipt enters `blocked`. A lane that stays blocked and reports again is not a new event. | that workload receipt |
-| `operator-needed` | the Medusa watchdog raises an exchange to its operator rung | that exchange |
+| `operator-needed` | the Medusa watchdog raises an exchange between sessions to its operator rung. Since #2086 that includes ordinary mail left long enough. The sentence says why it was raised (unread, read and unanswered, held by configuration, stalled), from the watchdog's own reason. Never the bridge's own send to a project. | that exchange |
 | `fleet-idle` | the fleet is seen to become idle: every live lane finished and clear | the episode: when it began and which lanes were in it |
 
 - **Found, not pushed.** Nothing calls the bridge when an event happens. The gateway's pass

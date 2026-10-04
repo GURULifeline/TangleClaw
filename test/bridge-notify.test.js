@@ -202,8 +202,25 @@ describe('bridge notifications (#2031)', () => {
         assert.equal(bridgeNotify.reconcile().operatorNeeded, 0);
         assert.deepEqual(notifications(), [{
           type: 'operator-needed', key: `notify:operator-needed:exchange:${exchangeId}`,
-          text: 'A message to Alpha has gone unanswered long enough to need you.', label: 'TangleClaw', routeId: null
+          text: 'A message to Alpha was read and has gone unanswered long enough to need you.', label: 'TangleClaw', routeId: null
         }]);
+        // Each reason the watchdog gives has its own fixed sentence, and none says more than is known.
+        const said = (code) => bridgeNotify.TEMPLATES['operator-needed']({ project: 'Alpha', why: code });
+        assert.equal(said('unread'), 'A message to Alpha has gone unread long enough to need you.');
+        assert.equal(said('prolonged-unread'), said('unread'));
+        assert.equal(said('prolonged-unanswered'), said('unanswered'));
+        assert.match(said('blocking-unread'), /is blocking its sender and has gone unread/);
+        assert.match(said('critical-unread'), /is critical and has gone unread/);
+        assert.match(said('configuration-hold'), /cannot be delivered until its recipient's setup is put right/);
+        assert.match(said('engine-thread-unknown-stalled'), /is stalled: its recipient's engine cannot be identified/);
+        assert.match(said('prolonged-actionable'), /has waited long enough on a recipient that should have taken it/);
+        assert.match(said('no-escalation-route'), /has nobody else it can be escalated to/);
+        for (const unknown of ['something-new', undefined, null, '__proto__', 'constructor']) {
+          assert.equal(said(unknown), 'A message to Alpha needs you.', `${unknown}: a reason with no sentence of its own says only that`);
+        }
+        for (const code of ['unread', 'prolonged-unread', 'blocking-unread', 'critical-unread', 'configuration-hold', 'engine-thread-unknown-stalled', 'no-escalation-route', 'prolonged-actionable']) {
+          assert.ok(!/unanswered/.test(said(code)), `${code} is not called unanswered`);
+        }
       } finally {
         exchanges._internal.now = realNow;
       }

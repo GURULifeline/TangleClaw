@@ -284,6 +284,29 @@ Every write is idempotent, version-checked and audited.
 
 This is policy local to a route. It does not change the Medusa watchdog's global defaults.
 
+**How it is held, since #2086 (Architect ruling, 2026-10-04).** The gateway's message to a
+project is a normal-priority Medusa exchange, and when this Decision was written normal mail
+never reached the operator. #2086 gave it an operator rung. Left alone, the bridge's own send
+would have been raised after an hour and reported to the operator as a second notice, about the
+bridge's own message. Three things hold the cap now:
+
+- **The gateway owns the exchanges it sends, and says so.** A send is the gateway's when it has
+  verified system provenance, the gateway's listener as its sender, and a request id the gateway
+  makes. The watchdog does not raise such a send to any rung. This is not an exemption for
+  system mail in general: a system send from anything that has not declared ownership, or
+  without all three proofs, is watched like any other message.
+- **The exchange stays open while the route waits on it, and no longer.** Open is what lets the
+  wake monitor nudge the target and what records a target that retired, so it cannot be closed
+  when it is sent. The gateway closes it when the route stops waiting on that attempt, and
+  reconciles on every pass. An attempt whose outcome is unknown stays open, because its Hub id
+  may still bind. The close is in-process, for the declared owner only; who may close an
+  exchange over HTTP is unchanged.
+- **The bridge does not forward an alert about its own send,** even one recorded before any of
+  this was so.
+
+An alert the watchdog raises for an exchange between sessions is a different thing and is meant
+to reach the operator through the bridge, as `operator-needed`, once, in words that say why.
+
 ### 18. Pins and aliases (R5)
 
 - **Persistent global aliases and pins are the operator's alone**, managed through an
