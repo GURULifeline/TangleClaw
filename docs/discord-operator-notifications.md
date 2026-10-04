@@ -7,7 +7,7 @@ not been run against Discord and cutover has not happened. See
 There are two ways an operational message reaches the operator's Discord. They are sequential,
 not parallel: the first is retired when the second goes live.
 
-| | Interim (in force now) | Future (not built) |
+| | Interim (in force now) | Future (built, disabled until cutover) |
 |---|---|---|
 | What it is | The Architect session posts to Discord by hand | The Master-mediated bridge |
 | Governed by | The operator's Rule #145 | [ADR 0023](adr/0023-master-mediated-operator-bridge.md), and the rule that replaces Rule #145 |
@@ -17,7 +17,8 @@ not parallel: the first is retired when the second goes live.
 | Tracked in | #2040 | #2031, #1956, #1799 |
 
 If you are a session with something the operator should see in Discord today, read "Interim
-procedure". Do not read "Future path" as something you can use: none of it exists on `main`.
+procedure". Do not read "Future path" as something you can use: it is disabled until the operator enables
+it at cutover.
 
 ## Interim procedure — until the Master-mediated bridge ships
 

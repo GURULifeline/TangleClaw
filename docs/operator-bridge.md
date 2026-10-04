@@ -621,6 +621,15 @@ rebuilt with their rows and row ids carried over, after the store is proven a so
 holding a token marked revoked with no time recorded is refused, and left at v53 untouched. The
 v54 shape is a superset of v53's.
 
+"Superset" is a statement about shape: every object an earlier version required is still there
+in the form it required. It is not a way to run an earlier build. A rollback to the previous
+build restores the store from the backup taken before the upgrade
+([runbook](runbooks/roll-back-the-operator-bridge.md)).
+
+v54 also retires `idx_bridge_routes_conversation`, an index v52 created and nothing reads. It
+is dropped by the upgrade and again at every boot, and its presence after that fails the shape
+check.
+
 | Table | Holds |
 |---|---|
 | `bridge_settings` | The operator's switches. The bridge is off unless `enabled` is `true`. |
