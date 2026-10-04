@@ -230,7 +230,7 @@ describe('bridge store (#2031)', () => {
     bridgeStore.masterCredentials.revoke('master-killed', { at: old });
 
     const removed = bridgeStore.prune({ now });
-    assert.deepEqual(removed, { nonces: 1, routes: 1, outbound: 0, candidates: 0, pins: 1, helperTokens: 1, credentials: 1, audit: 1 });
+    assert.deepEqual(removed, { nonces: 1, leases: 0, claims: 0, routes: 1, outbound: 0, candidates: 0, pins: 1, helperTokens: 1, credentials: 1, audit: 1 });
     assert.equal(bridgeStore.helperTokens.active().tokenId, 't-new', 'the active token stays');
     assert.deepEqual(bridgeStore.pins.list().map((p) => p.pinId), ['p-new'], 'and so does the active pin');
     assert.equal(bridgeStore.routes.get('rt_1'), null);

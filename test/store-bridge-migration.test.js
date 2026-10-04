@@ -68,7 +68,7 @@ function reopen() {
   store.init();
 }
 
-describe('store: operator bridge schema (v52 and v53, #2031)', () => {
+describe('store: operator bridge schema (v52 to v54, #2031)', () => {
   afterEach(() => {
     store.close();
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -77,8 +77,10 @@ describe('store: operator bridge schema (v52 and v53, #2031)', () => {
 
   it('a fresh install has every bridge object in its checked shape', () => {
     freshStore('fresh');
-    // This file owns the exact number: v52 created the bridge's storage, v53 is its current shape.
-    assert.equal(store.CURRENT_SCHEMA_VERSION, 53);
+    // This file owns the exact number: v52 created the bridge's storage, v53
+    // reshaped two tables, and v54 added the helper's fetch leases.
+    assert.equal(store.CURRENT_SCHEMA_VERSION, 54);
+    assert.equal(bridgeSchema.BRIDGE_SCHEMA_VERSION, 54);
     assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb()), []);
     const have = bridgeObjects();
     for (const object of bridgeSchema.BRIDGE_SCHEMA_OBJECTS) assert.ok(have.has(object.name), `missing ${object.name}`);
@@ -231,6 +233,126 @@ describe('store: operator bridge schema (v52 and v53, #2031)', () => {
     rewindToV52();
     reopen();
     assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 52), []);
+  });
+
+  /**
+   * Turn the open store into one as schema v53 left it: no lease table, and a
+   * helper-token table without the revoked-time check. The stamp is 53.
+   * @param {(db: object) => void} [populate] - Insert v53-era rows.
+   * @returns {void}
+   */
+  function rewindToV53(populate) {
+    const db = store.getDb();
+    db.exec('DROP TABLE bridge_outbound_leases');
+    db.exec('DROP TABLE bridge_outbound_claims');
+    db.exec('DROP TABLE bridge_helper_tokens');
+    db.exec('DROP TRIGGER bridge_outbound_delete_leases');
+    db.exec(`
+      CREATE TABLE bridge_helper_tokens (
+        token_id    TEXT PRIMARY KEY CHECK (length(token_id) BETWEEN 1 AND 64),
+        token_hash  TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+        status      TEXT NOT NULL CHECK (status IN ('active','revoked')),
+        created_by  TEXT NOT NULL CHECK (created_by IN ('operator')),
+        created_at  TEXT NOT NULL,
+        revoked_at  TEXT
+      );
+      CREATE UNIQUE INDEX idx_bridge_helper_tokens_active ON bridge_helper_tokens(status) WHERE status = 'active';
+    `);
+    if (populate) populate(db);
+    db.exec('DELETE FROM schema_version WHERE version >= 54');
+    db.exec('INSERT INTO schema_version (version) VALUES (53)');
+    store.close();
+  }
+
+  it('upgrades a v53 store: the lease table appears and the helper tokens keep their rows', () => {
+    freshStore('v53');
+    const fresh = bridgeObjects();
+    const at = '2026-10-04T00:00:00.000Z';
+    rewindToV53((db) => {
+      const token = db.prepare('INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?)');
+      token.run('t-old', 'e'.repeat(64), 'revoked', 'operator', at, at);
+      token.run('t-live', 'f'.repeat(64), 'active', 'operator', at, null);
+    });
+    reopen();
+    assert.deepEqual([...bridgeObjects()], [...fresh], 'the upgraded store has exactly the shape of a fresh one');
+    const db = store.getDb();
+    assert.deepEqual(db.prepare('SELECT token_id, status FROM bridge_helper_tokens ORDER BY token_id').all().map((r) => [r.token_id, r.status]),
+      [['t-live', 'active'], ['t-old', 'revoked']]);
+    assert.equal(db.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 54);
+    assert.throws(() => db.exec("UPDATE bridge_helper_tokens SET status = 'revoked' WHERE token_id = 't-live'"), /CHECK/,
+      'a token can no longer be revoked without recording when');
+  });
+
+  it('refuses a v53 store whose rows the new check would not admit, and leaves the stamp at 53', () => {
+    freshStore('v53-bad-row');
+    rewindToV53((db) => {
+      // Revoked, with no time recorded: a state the v53 table allowed.
+      db.prepare("INSERT INTO bridge_helper_tokens (token_id, token_hash, status, created_by, created_at) VALUES ('t-bad', ?, 'revoked', 'operator', 'x')").run('e'.repeat(64));
+    });
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /CHECK/);
+    store.close();
+    const { DatabaseSync } = require('node:sqlite');
+    const check = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    assert.equal(check.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 53);
+    assert.equal(check.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%_superseded'").get().n, 0, 'nothing was left set aside');
+    assert.equal(check.prepare("SELECT status FROM bridge_helper_tokens WHERE token_id = 't-bad'").get().status, 'revoked', 'and its row is untouched');
+    check.close();
+  });
+
+  it('refuses a v53 store that is not sound, before touching it', () => {
+    freshStore('v53-unsound');
+    rewindToV53();
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    raw.exec('DROP INDEX idx_bridge_outbound_status');
+    raw.close();
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /not a sound v53 store.*idx_bridge_outbound_status/);
+    store.close();
+    const check = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    assert.equal(check.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 53);
+    check.close();
+  });
+
+  it('v54 is a superset of v53 and of v52: what each earlier server required still holds', () => {
+    freshStore('superset-54');
+    for (const version of [52, 53, 54]) assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, version), [], `v${version}`);
+    store.close();
+    freshStore('superset-54-upgraded');
+    rewindToV53();
+    reopen();
+    for (const version of [52, 53, 54]) assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, version), [], `v${version} after upgrade`);
+  });
+
+  it('a lease is fixed once issued, final once settled, one live per item, and goes with its item', () => {
+    freshStore('leases');
+    const db = store.getDb();
+    const at = '2026-10-04T00:00:00.000Z';
+    const later = '2026-10-04T00:02:00.000Z';
+    db.prepare(
+      "INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, created_at, updated_at) VALUES ('n:1', 'notification', 'fleet-idle', 'TangleClaw', 'x', ?, 'ready', ?, ?)"
+    ).run('a'.repeat(64), at, at);
+    const claim = 'claim-nonce-00000001';
+    const lease = db.prepare(
+      'INSERT INTO bridge_outbound_leases (lease_id, claim_nonce, outbound_id, item_digest, token_id, state, issued_at, expires_at) '
+      + `VALUES (?, '${claim}', ?, ?, 't1', 'live', ?, ?)`
+    );
+    assert.throws(() => lease.run('lease-0000000000000008', 1, 'a'.repeat(64), at, later), /needs the claim/);
+    db.prepare("INSERT INTO bridge_outbound_claims (claim_nonce, token_id, request_digest, claimed_at) VALUES (?, 't1', ?, ?)").run(claim, 'b'.repeat(64), at);
+    assert.throws(() => db.exec("UPDATE bridge_outbound_claims SET token_id = 't2'"), /fixed once recorded/);
+    assert.throws(() => lease.run('lease-0000000000000009', 99, 'a'.repeat(64), at, later), /needs its item/);
+    assert.throws(() => lease.run('lease-0000000000000000', 1, 'a'.repeat(64), later, at), /CHECK/, 'it lapses after it is issued');
+    lease.run('lease-0000000000000001', 1, 'a'.repeat(64), at, later);
+    assert.throws(() => lease.run('lease-0000000000000002', 1, 'a'.repeat(64), at, later), /UNIQUE/, 'one live lease per item');
+    assert.throws(() => db.exec("UPDATE bridge_outbound_leases SET token_id = 't2'"), /fixed once issued/);
+    assert.throws(() => db.exec("UPDATE bridge_outbound_leases SET expires_at = '2027-01-01T00:00:00.000Z'"), /fixed once issued/);
+    assert.throws(() => db.exec("UPDATE bridge_outbound_leases SET state = 'used'"), /CHECK/, 'settling records when');
+    db.exec(`UPDATE bridge_outbound_leases SET state = 'used', settled_at = '${later}'`);
+    assert.throws(() => db.exec(`UPDATE bridge_outbound_leases SET state = 'lapsed', settled_at = '${later}'`), /final once settled/);
+    lease.run('lease-0000000000000003', 1, 'a'.repeat(64), at, later);
+    db.exec('DELETE FROM bridge_outbound WHERE outbound_id = 1');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM bridge_outbound_leases').get().n, 0);
   });
 
   it('admits one fixed status item per route, and only for a route', () => {

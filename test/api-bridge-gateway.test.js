@@ -74,6 +74,25 @@ function asHelper(over = {}) {
 }
 
 /**
+ * Collect what waits, as the helper does: every item comes under a lease.
+ * @param {object} [headers] - Request headers; the helper's by default.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+function claim(headers = asHelper()) {
+  return call('POST', '/api/bridge/helper/outbound/claim', { headers, body: { limit: 20 } });
+}
+
+/**
+ * Acknowledge a claimed item under its lease.
+ * @param {{outboundId: number, leaseId: string}} item - A claimed item.
+ * @param {string} deliveredRef - The chat's id for the post.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+function ackItem(item, deliveredRef) {
+  return call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { leaseId: item.leaseId, deliveredRef } });
+}
+
+/**
  * Headers for a Master request.
  * @returns {object}
  */
@@ -206,7 +225,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal(hub.fromGateway()[0].to, alpha.workspaceId);
 
     await sessionReplies(alpha, hub.fromGateway()[0].hubId, 'yes, all green');
-    assert.deepEqual((await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items, [],
+    assert.deepEqual((await claim()).body.items, [],
       'a held reply is not handed to the helper');
 
     const read = await call('GET', `/api/bridge/master/routes/${routeId}`, { headers: asMaster() });
@@ -216,13 +235,13 @@ describe('bridge API: the round trip (#2031)', () => {
     const released = await masterWrites(routeId, 'release', { expectedVersion: read.body.route.version });
     assert.deepEqual([released.status, released.body.route.state], [200, 'released']);
 
-    const out = await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() });
+    const out = await claim();
     assert.equal(out.body.items.length, 1);
     const item = out.body.items[0];
     assert.deepEqual([item.kind, item.text, item.sourceLabel], ['reply', 'yes, all green', `Project Master, relaying ${alpha.project.name}`]);
     assert.equal(item.inReplyTo.channelId, ALLOWED.channelId);
 
-    const ack = await call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { deliveredRef: 'posted-1' } });
+    const ack = await ackItem(item, 'posted-1');
     assert.equal(ack.status, 200);
     const done = bridgeStore.routes.get(routeId);
     assert.deepEqual([done.state, done.closedBy], ['closed', 'gateway']);
@@ -238,7 +257,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const answered = await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'Two sessions are working.' });
     assert.equal(answered.body.route.state, 'released');
     assert.equal(hub.fromGateway().length, 0);
-    const item = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items[0];
+    const item = (await claim()).body.items[0];
     assert.deepEqual([item.kind, item.sourceLabel, item.text], ['reply', 'Project Master', 'Two sessions are working.']);
   });
 
@@ -270,7 +289,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'x'.repeat(8001) })).body.code, 'ANSWER_TOO_LONG');
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'fine' })).status, 200);
     assert.equal((await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'again' })).body.code, 'NOT_ANSWERABLE');
-    assert.equal((await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items.length >= 1, true);
+    assert.equal((await claim()).body.items.length >= 1, true);
   });
 
   it('lets the Master pin a conversation, and only a conversation', async () => {
@@ -337,7 +356,7 @@ describe('bridge API: the round trip (#2031)', () => {
     const answered = await masterWrites(routeId, 'answer', { expectedVersion: version(), text: 'I could not confirm that reached them. I will follow up.' });
     assert.deepEqual([answered.status, answered.body.route.state], [200, 'released']);
     const externalId = bridgeStore.routes.get(routeId).externalId;
-    const items = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items
+    const items = (await claim()).body.items
       .filter((i) => i.inReplyTo && i.inReplyTo.externalId === externalId);
     assert.deepEqual(items.map((i) => i.kind).sort(), ['failure', 'reply'], 'one notice that it is unconfirmed, and one answer');
 
@@ -352,14 +371,92 @@ describe('bridge API: the round trip (#2031)', () => {
     const routeId = accepted.body.routeId;
     await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
     const externalId = bridgeStore.routes.get(routeId).externalId;
-    const item = (await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.items
+    const item = (await claim()).body.items
       .find((i) => i.kind === 'reply' && i.inReplyTo.externalId === externalId);
-    const ack = () => call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { deliveredRef: 'posted-9' } });
+    const ack = () => ackItem(item, 'posted-9');
     assert.deepEqual([(await ack()).body.replayed, (await ack()).body.replayed], [false, true]);
     assert.equal(bridgeStore.routes.get(routeId).state, 'closed');
     assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'delivered').length, 1);
-    const other = await call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body: { deliveredRef: 'posted-10' } });
+    const other = await ackItem(item, 'posted-10');
     assert.equal(other.body.code, 'ACK_MISMATCH');
+  });
+
+  it('a claim is named by its nonce: asking again returns the same leases, and a changed request is refused', async () => {
+    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const routeId = accepted.body.routeId;
+    await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
+    const headers = asHelper();
+    const first = await call('POST', '/api/bridge/helper/outbound/claim', { headers, body: { limit: 20 } });
+    const again = await call('POST', '/api/bridge/helper/outbound/claim', { headers, body: { limit: 20 } });
+    assert.deepEqual([first.status, first.body.replayed, again.status, again.body.replayed], [200, false, 200, true]);
+    assert.ok(first.body.items.length >= 1);
+    assert.deepEqual(again.body.items, first.body.items);
+    for (const item of first.body.items) assert.match(item.leaseId, /^bol_[A-Za-z0-9_-]{22}$/);
+
+    const changed = await call('POST', '/api/bridge/helper/outbound/claim', { headers, body: { limit: 5 } });
+    assert.deepEqual([changed.status, changed.body.code], [409, 'NONCE_REUSED']);
+    const asInbound = await call('POST', '/api/bridge/helper/inbound', { headers, body: { externalId: `m${++seq}`, ...ALLOWED, text: 'x' } });
+    assert.equal(asInbound.body.code, 'NONCE_REUSED', 'a claim\'s nonce is spent for every other write');
+    const noNonce = await call('POST', '/api/bridge/helper/outbound/claim', { headers: { [bridgeApi.HELPER_TOKEN_HEADER]: helperToken }, body: {} });
+    assert.deepEqual([noNonce.status, noNonce.body.code], [400, 'NONCE_REQUIRED']);
+    const badLimit = await call('POST', '/api/bridge/helper/outbound/claim', { headers: asHelper(), body: { limit: 500 } });
+    assert.deepEqual([badLimit.status, badLimit.body.code], [400, 'BAD_CLAIM']);
+
+    const reading = await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() });
+    assert.equal(reading.status, 404, 'there is no way to read the mailbox without claiming from it');
+  });
+
+  it('an acknowledgement over the route needs its lease, from the token that holds it', async () => {
+    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const routeId = accepted.body.routeId;
+    await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
+    const externalId = bridgeStore.routes.get(routeId).externalId;
+    const item = (await claim()).body.items.find((i) => i.kind === 'reply' && i.inReplyTo.externalId === externalId);
+    const post = (body) => call('POST', `/api/bridge/helper/outbound/${item.outboundId}/ack`, { headers: asHelper(), body });
+
+    const bare = await post({ deliveredRef: 'posted-20' });
+    assert.deepEqual([bare.status, bare.body.code], [400, 'LEASE_REQUIRED']);
+    const wrong = await post({ deliveredRef: 'posted-20', leaseId: 'bol_nosuchlease00000000000' });
+    assert.deepEqual([wrong.status, wrong.body.code], [404, 'LEASE_NOT_FOUND']);
+    assert.equal(bridgeStore.routes.get(routeId).state, 'released', 'neither closed the route');
+
+    // The operator replaces the token: what the old one held is not the new one's to acknowledge.
+    helperToken = (await asOperator('POST', '/api/bridge/operator/helper-token')).body.token;
+    const stolen = await post({ deliveredRef: 'posted-20', leaseId: item.leaseId });
+    assert.deepEqual([stolen.status, stolen.body.code], [403, 'LEASE_NOT_YOURS']);
+    const mine = (await claim()).body.items.find((i) => i.outboundId === item.outboundId);
+    assert.equal((await ackItem(mine, 'posted-20')).status, 200);
+    assert.equal(bridgeStore.routes.get(routeId).state, 'closed');
+  });
+
+  it('answers 410 over the route, for good, to an acknowledgement of an item that was let go', async () => {
+    const realNow = gateway._deps.now;
+    const week = bridgeStore.EXPIRY_MS.notification['operator-needed'];
+    try {
+      // A notification one minute short of its limit when the helper claims it.
+      const created = new Date(Date.now() - week + 60000).toISOString();
+      const text = 'A session needs the operator.';
+      const id = bridgeStore.outbound.enqueue({
+        idemKey: `notify:operator-needed:late-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw',
+        text, digest: bridgeStore.digest(text), at: created
+      }).outboundId;
+      const held = (await claim()).body.items.find((i) => i.outboundId === id);
+      assert.equal(held.text, text);
+
+      // Its lease lapses, the limit passes, and the next claim lets it go.
+      const after = Date.now() + 60000 + bridgeStore.LEASE_MS + 1000;
+      gateway._deps.now = () => new Date(after).toISOString();
+      assert.equal((await claim()).body.items.some((i) => i.outboundId === id), false, 'it is not handed over again');
+      assert.equal(bridgeStore.outbound.get(id).state, 'dropped');
+
+      for (const attempt of [1, 2]) {
+        const late = await ackItem(held, 'posted-late');
+        assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED'], `attempt ${attempt}`);
+      }
+      assert.deepEqual([bridgeStore.outbound.get(id).state, bridgeStore.outbound.get(id).deliveredRef], ['dropped', null]);
+    } finally {
+      gateway._deps.now = realNow;
+    }
   });
 
   describe('who may call what', () => {
@@ -368,7 +465,7 @@ describe('bridge API: the round trip (#2031)', () => {
       for (const headers of [{}, asHelper({ [bridgeApi.HELPER_TOKEN_HEADER]: 'bht_wrong' }), asMaster(), operatorHeaders(server)]) {
         const r = await call('POST', '/api/bridge/helper/inbound', { headers, body });
         assert.deepEqual([r.status, r.body.code], [401, 'HELPER_TOKEN_REQUIRED']);
-        assert.equal((await call('GET', '/api/bridge/helper/outbound', { headers })).status, 401);
+        assert.equal((await claim(headers)).status, 401);
       }
       const noNonce = await call('POST', '/api/bridge/helper/inbound', { headers: { [bridgeApi.HELPER_TOKEN_HEADER]: helperToken }, body });
       assert.equal(noNonce.body.code, 'NONCE_REQUIRED');
@@ -388,7 +485,7 @@ describe('bridge API: the round trip (#2031)', () => {
     });
 
     it('the Master credential opens neither the helper routes nor the operator routes', async () => {
-      assert.equal((await call('GET', '/api/bridge/helper/outbound', { headers: asMaster() })).status, 401);
+      assert.equal((await claim(asMaster())).status, 401);
       assert.equal((await call('POST', '/api/bridge/operator/enable', { headers: asMaster() })).status, 403);
     });
 
@@ -490,7 +587,7 @@ describe('bridge API: the round trip (#2031)', () => {
       const routeId = accepted.body.routeId;
       await asOperator('POST', '/api/bridge/operator/disable');
       assert.equal((await operatorSays(`m${++seq}`, 'hello again')).body.code, 'BRIDGE_DISABLED');
-      assert.equal((await call('GET', '/api/bridge/helper/outbound', { headers: asHelper() })).body.code, 'BRIDGE_DISABLED');
+      assert.equal((await claim()).body.code, 'BRIDGE_DISABLED');
       for (const op of ['route', 'answer', 'release', 'pin']) {
         assert.equal((await masterWrites(routeId, op, { expectedVersion: 1, to: 'master', text: 'x' })).body.code, 'BRIDGE_DISABLED', op);
       }

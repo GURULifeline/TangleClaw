@@ -196,7 +196,8 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
   it('a delivered status notice is not raised again either', () => {
     route('rt_1');
     const id = bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: T0 }).item.outboundId;
-    bridgeStore.outbound.markDelivered(id, 'posted-1', { at: at(1000) });
+    const [lease] = bridgeStore.leases.claim({ nonce: 'claim-nonce-00000001', tokenId: 't1', at: at(500) }).leases;
+    assert.equal(bridgeStore.outbound.markDelivered(id, 'posted-1', { leaseId: lease.leaseId, tokenId: 't1', at: at(1000) }).outcome, 'delivered');
     bridgeStore.prune({ now: at(90 * DAY) });
     assert.equal(bridgeStore.outbound.enqueueStatus('rt_1', 'pending', { at: at(91 * DAY) }).created, false);
   });
@@ -267,20 +268,27 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
   it('an acknowledgement is taken up to the limit and refused for good once the item is let go', () => {
     const gateway = require('../lib/bridge-gateway');
     const realNow = gateway._deps.now;
+    const helper = { tokenId: 't1' };
+    const ack = (item, ref) => gateway.acknowledgeOutbound(item.outboundId, ref, { leaseId: item.leaseId, tokenId: 't1' });
     try {
-      const onTime = notification('work-blocked');
+      notification('work-blocked');
       gateway._deps.now = () => at(7 * DAY);
-      bridgeStore.expire({ now: at(7 * DAY) });
-      assert.equal(gateway.acknowledgeOutbound(onTime, 'posted-1').status, 200, 'at exactly the limit it is still waiting');
+      const [onTime] = gateway.claimOutbound(helper, 'claim-nonce-00000001').body.items;
+      assert.equal(ack(onTime, 'posted-1').status, 200, 'at exactly the limit it is still waiting');
 
       const late = bridgeStore.outbound.enqueue({
         idemKey: 'notify:operator-needed:y', kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw', text: 'x', digest, at: T0
       }).outboundId;
+      // Claimed well inside its limit; the lease lapses, and then the limit passes.
+      gateway._deps.now = () => at(DAY);
+      const [held] = gateway.claimOutbound(helper, 'claim-nonce-00000002').body.items;
+      assert.equal(held.outboundId, late);
       gateway._deps.now = () => at(7 * DAY + 1);
       bridgeStore.expire({ now: at(7 * DAY + 1) });
-      const refused = gateway.acknowledgeOutbound(late, 'posted-2');
+      const refused = ack(held, 'posted-2');
       assert.deepEqual([refused.status, refused.body.code], [410, 'OUTBOUND_EXPIRED']);
-      assert.deepEqual(gateway.acknowledgeOutbound(late, 'posted-2').body.code, 'OUTBOUND_EXPIRED', 'and again, whenever it is tried');
+      assert.deepEqual(ack(held, 'posted-2').body.code, 'OUTBOUND_EXPIRED', 'and again, whenever it is tried');
+      assert.deepEqual(gateway.claimOutbound(helper, 'claim-nonce-00000003').body.items, [], 'and it is never handed over again');
       const item = bridgeStore.outbound.get(late);
       assert.deepEqual([item.state, item.deliveredRef], ['dropped', null], 'it is not marked delivered');
     } finally {

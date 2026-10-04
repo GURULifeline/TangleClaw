@@ -12,6 +12,14 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **The chat helper collects under a lease, and acknowledges by naming it** (#2031, ADR 0023). Still off by default. `docs/operator-bridge.md` has the detail.
+  - **Claim, not read.** `GET /api/bridge/helper/outbound` is replaced by `POST /api/bridge/helper/outbound/claim`. Each item is handed over under a two-minute lease bound to the helper token that claimed it. An item holds one live lease at a time, and one whose lease lapses is handed over again.
+  - **A claim is named by its nonce.** Repeating it exactly returns the same leases and issues nothing. The same nonce with a different request or token is refused.
+  - **An acknowledgement names its lease.** It is taken only from the token the lease was issued to and inside its window. Replacing or revoking the helper token lapses what it held at once.
+  - **Across the retention limit.** An item with a live lease is not let go, so an acknowledgement can cross the limit by at most the lease window. Without one, being let go stays final: `410 OUTBOUND_EXPIRED`.
+  - **Schema v54.** Adds `bridge_outbound_claims` and `bridge_outbound_leases`, and a CHECK tying a revoked helper token to the time it was revoked. The migration first proves the store is a sound v53 store.
+  - `OUTBOUND_NOT_READY` is retired: no request could reach it.
+
 - **Sessions can offer the Master news for the operator, and the bridge has its three server notifications** (#2031, ADR 0023). Still off by default, with no Discord helper built. `docs/operator-bridge.md` has the detail.
   - **Candidates.** `tc candidate submit` lets any verified session offer the Project Master a milestone or an operator action, resting on its own workload receipts. A session cannot post: the Master approves, rejects or merges through `tc bridge`, and only an approval creates something for the operator. Each receipt is verified when the candidate is offered and again when it is approved, by a digest of the stored row.
   - **Notifications.** `work-blocked`, `operator-needed` and `fleet-idle` go straight to the helper's mailbox from fixed templates. Each is found from the record that caused it and made once; nothing from before the bridge was enabled, or while it was off, is notified. `fleet-idle` requires every live lane to be finished and clear, and is raised once when the fleet is seen to become idle. What nobody decides or collects is let go after a limit set by its kind: a milestone candidate after 7 days, an operator-action candidate after 30, `work-blocked` and `operator-needed` after 7 days, `fleet-idle` and a route's status notice after 24 hours. A delivery-failure notice is let go after 30 days; a reply never. A candidate's wait to be decided and its wait to be collected are separate clocks. Each thing let go is audited by its own id with a fixed reason, is never raised again, and cannot be acknowledged afterwards.

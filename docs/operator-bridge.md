@@ -12,7 +12,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 
 | Part | State |
 |---|---|
-| Storage (schema v52, reshaped by v53) | Built |
+| Storage (schema v52, reshaped by v53, extended by v54) | Built |
 | The Project Master's bridge credential | Built |
 | Gateway: accept, resolve, dispatch, hold the reply, release | Built |
 | `tc bridge` for the Project Master, routing and answering included | Built |
@@ -34,8 +34,8 @@ a chat application.
 ADR 0023 is accepted for architecture only. Its acceptance does not authorise merging an
 implementation, assigns no schema number and does not activate cutover.
 
-- **Schema numbers.** 52 and 53 were each the next free number on `main` when taken, under the
-  Architect's rulings of 2026-10-04.
+- **Schema numbers.** 52, 53 and 54 were each the next free number on `main` when taken, under
+  the Architect's rulings of 2026-10-04.
 - **Merge.** Each change merges only after an exact-head independent security review, and is
   never set to merge automatically.
 - **Cutover.** Not part of any change so far. It needs the security review, a live round trip
@@ -350,15 +350,46 @@ also carries `x-tangleclaw-bridge-nonce`, 16 to 128 URL-safe characters, never u
 | Route | Does |
 |---|---|
 | `POST /api/bridge/helper/inbound` | Hands over one operator message: `externalId`, `authorId`, `spaceId`, `channelId`, optional `threadId` and `replyToExternalId`, and `text` (at most 8000 characters). `202` when stored, `200` for a replay. |
-| `GET /api/bridge/helper/outbound` | What to post next, oldest first, each with the chat context to post it in. |
-| `POST /api/bridge/helper/outbound/:id/ack` | `{deliveredRef}`: the chat's id for the post. Exact: repeating it changes nothing, and a different id for the same item is refused. |
+| `POST /api/bridge/helper/outbound/claim` | Collects what to post next, oldest first: optional `{limit}`, 1 to 20, 10 by default. Each item comes with the chat context to post it in and a lease. |
+| `POST /api/bridge/helper/outbound/:id/ack` | `{leaseId, deliveredRef}`: the lease the item was claimed under and the chat's id for the post. Exact: repeating it changes nothing, and a different id for the same item is refused. |
 
 Refusals: `401 HELPER_TOKEN_REQUIRED`, `409 BRIDGE_DISABLED`, `400 NONCE_REQUIRED`,
 `409 NONCE_REUSED`, `409 ALLOWLIST_NOT_SET`, `403 NOT_ALLOWLISTED`, `400 BAD_INBOUND`,
-`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `400 BAD_ACK`, `404 OUTBOUND_NOT_FOUND`,
-`409 ACK_MISMATCH`, `409 OUTBOUND_NOT_READY`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`.
+`413 INBOUND_TOO_LONG`, `409 EXTERNAL_ID_MISMATCH`, `400 BAD_CLAIM`, `400 BAD_ACK`,
+`400 LEASE_REQUIRED`, `404 OUTBOUND_NOT_FOUND`, `404 LEASE_NOT_FOUND`, `403 LEASE_NOT_YOURS`,
+`409 ACK_MISMATCH`, `409 LEASE_LAPSED`, `410 OUTBOUND_EXPIRED`, `409 ACK_NOT_APPLIED`.
 
-Acknowledging an answer marks it delivered and closes and clears its route in one transaction.
+Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
+in one transaction.
+
+### Claims and leases
+
+There is no way to read the mailbox without claiming from it. A claim hands each waiting item
+over under a **lease**: an id, the item, the helper token it was issued to, when it was issued
+and when it lapses. The window is two minutes.
+
+| Field of a claimed item | Meaning |
+|---|---|
+| `outboundId`, `kind`, `sourceLabel`, `text`, `inReplyTo` | What to post and where. |
+| `digest` | SHA-256 of the text that was handed over. |
+| `leaseId`, `issuedAt`, `expiresAt` | The lease. |
+| `leaseState` | `live`, `used` or `lapsed`. Post an item only while its lease is `live`. |
+
+- **One live lease per item.** An item somebody holds is not handed over again.
+- **A lapsed lease returns its item.** If no acknowledgement arrives inside the window, the
+  lease lapses and the next claim hands the item over under a new one. The old lease then
+  acknowledges nothing: `409 LEASE_LAPSED`.
+- **Bound to the token.** A lease is good only from the helper token it was issued to:
+  `403 LEASE_NOT_YOURS`. Replacing or revoking the token lapses everything it held at once.
+- **A claim is named by its nonce.** Repeating a claim with the same nonce, token and request
+  returns the leases it issued the first time, each in its present state, and issues nothing.
+  A lease that is no longer live comes back without its text. The same nonce with a different
+  request or token, or one another helper write has used, is `409 NONCE_REUSED`. This is the
+  one helper write whose nonce may be seen twice.
+- **A live lease holds its item past its retention limit.** See Retention.
+
+`OUTBOUND_NOT_READY` is retired. An item is waiting, delivered or let go, and each of the last
+two has its own answer, so no request could ever have reached that refusal.
 
 ## The operator's routes
 
@@ -392,12 +423,20 @@ v52 store and refuses one with a bridge table missing or misshapen, before touch
 The v53 shape is a superset of v52's: a server from before v53 that meets a v53 store still
 accepts it.
 
+Schema v54 added `bridge_outbound_claims` and `bridge_outbound_leases`, and a CHECK on
+`bridge_helper_tokens` tying a revoked token to the time it was revoked. That one table is
+rebuilt with its rows carried over, after the store is proven a sound v53 store. A v53 store
+holding a token marked revoked with no time recorded is refused, and left at v53 untouched. The
+v54 shape is a superset of v53's.
+
 | Table | Holds |
 |---|---|
 | `bridge_settings` | The operator's switches. The bridge is off unless `enabled` is `true`. |
 | `bridge_master_credentials` | One row per Master generation: the hash, its status and why it was revoked. |
 | `bridge_helper_tokens` | The chat helper's scoped token, hash only. |
 | `bridge_nonces` | Request nonces already seen from the helper. |
+| `bridge_outbound_claims` | Each claim the helper made: its nonce, the token and a digest of what was asked. Never updated. |
+| `bridge_outbound_leases` | The lease each item was handed over under. What it was issued for never changes; its state settles once, to `used` or `lapsed`. At most one live lease per item. |
 | `bridge_routes` | One row per inbound operator message, unique on the chat's own message id. A replay of the same message returns the same route; the same id with a different body or chat context is refused. |
 | `bridge_route_bodies` | The text of a route, held apart so it can be cleared while the route stays. |
 | `bridge_route_proofs` | Which Hub message belongs to which route, under which proof, and for a sent message exactly who it went to. Never updated. |
@@ -410,18 +449,21 @@ accepts it.
 
 The database does not run with foreign keys, so triggers enforce the same integrity: a body, a
 proof or a route-bound outbound item needs its route; a candidate-bound item needs its
-candidate; a candidate needs its source project; a receipt needs its candidate. Removing a route
-removes its bodies, proofs and outbound items.
+candidate; a candidate needs its source project; a receipt needs its candidate; a lease needs
+its item and the claim it was issued under. Removing a route removes its bodies, proofs and
+outbound items, and removing an item removes its leases.
 
 ### Retention
 
 `lib/bridge-store.js#prune` removes what has outlived its retention. The gateway runs it once
-a day, whether or not the bridge is enabled. Revoked pins and helper tokens leave after 90 days.
+a day, whether or not the bridge is enabled, and on the gateway's first pass after the server
+starts, before any helper request is heard. Revoked pins and helper tokens leave after 90 days.
 
 | Record | Kept for |
 |---|---|
 | Message text | Until confirmed delivery or close. Not by age. |
 | Helper nonces | 24 hours |
+| A used or lapsed lease, and a claim with no lease left | 24 hours after settling |
 | Closed routes, with their bodies, proofs and outbound items | 30 days after closing |
 | Delivered or dropped outbound items | 30 days |
 | Decided candidates | 30 days |
@@ -434,8 +476,8 @@ a day, whether or not the bridge is enabled. Revoked pins and helper tokens leav
 | Revoked Master generations | 90 days; the newest generation is always kept, so a number is never reused |
 | Audit rows | 90 days, then compacted |
 
-An open route, an undelivered reply and the live credential are never removed, whatever their
-age.
+An open route, an undelivered reply, a live lease and the live credential are never removed,
+whatever their age.
 
 "Let go" means an undecided candidate is rejected as expired and an uncollected item is
 dropped. Something is let go when it has waited strictly longer than its limit. Each one is
@@ -446,9 +488,14 @@ A candidate has two clocks. Waiting to be decided runs from submission; waiting 
 runs from approval, which is a new fact about how fresh it is. A milestone can therefore live
 up to 7 days undecided and a further 7 approved; an operator action 30 and 30.
 
+An item with a live lease is not let go. The helper was handed it inside its limit and has the
+lease's window to say it was posted, so an acknowledgement can cross the limit by at most that
+window. A claim lets go of what is past its limit before it issues any lease, so no lease is
+ever issued for an item already past it. Once the lease lapses the item is judged like any
+other.
+
 Being let go is final. An acknowledgement for an item that was let go is refused with
-`410 OUTBOUND_EXPIRED`, even if the helper fetched it earlier: nothing records that fetch. A
-helper lease that would allow an acknowledgement to cross the limit is not built. Nothing let go is raised again:
+`410 OUTBOUND_EXPIRED`, every time, whatever lease it names. Nothing let go is raised again:
 its row and its idempotency key stay until retention removes them, so the event that caused it
 remains accounted for.
 

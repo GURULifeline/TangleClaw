@@ -60,6 +60,35 @@ function operatorSays(externalId, text, over = {}) {
 }
 
 /**
+ * The helper token in force, minting one when there is none.
+ * @returns {{tokenId: string}}
+ */
+function helper() {
+  return bridgeStore.helperTokens.active() || gateway.mintHelperToken();
+}
+
+let claimSeq = 0;
+
+/**
+ * Collect what waits, as the helper does.
+ * @param {object} [options] - `limit`, and `nonce` to repeat a claim.
+ * @returns {{status: number, body: object}}
+ */
+function helperClaims(options = {}) {
+  return gateway.claimOutbound(helper(), options.nonce || `claim-nonce-${String(++claimSeq).padStart(8, '0')}`, { limit: options.limit });
+}
+
+/**
+ * Acknowledge a claimed item under its lease.
+ * @param {{outboundId: number, leaseId: string}} item - A claimed item.
+ * @param {string} deliveredRef - The chat's id for the post.
+ * @returns {{status: number, body: object}}
+ */
+function helperAcks(item, deliveredRef) {
+  return gateway.acknowledgeOutbound(item.outboundId, deliveredRef, { leaseId: item.leaseId, tokenId: helper().tokenId });
+}
+
+/**
  * Advance the stand-in clock.
  * @param {number} ms - Milliseconds.
  * @returns {void}
@@ -871,7 +900,7 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual(gateway.outboundForHelper().map((i) => [i.kind, i.text, i.inReplyTo]),
         [['notification', 'Alpha reports its work is blocked.', null]]);
 
-      const [fetched] = gateway.outboundForHelper();
+      const [fetched] = helperClaims().body.items;
       later(bridgeStore.EXPIRY_MS.notification['work-blocked'] + 60000);
       await gateway.tick();
       assert.deepEqual(gateway.outboundForHelper(), [], 'a week-old notification is not handed to a helper that attaches late');
@@ -879,9 +908,9 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([expiry.actor, expiry.outcome, JSON.parse(expiry.detail_json).outboundId], ['gateway', 'uncollected-expired', fetched.outboundId],
         'what was let go is on the record, by its id');
       assert.equal((await gateway.tick()).notifications.workBlocked, 0, 'and it is not raised again');
-      // Being let go is final: a helper that fetched it earlier and posts it
-      // now cannot acknowledge it. Nothing recorded that fetch.
-      const late = gateway.acknowledgeOutbound(fetched.outboundId, 'posted-late');
+      // Being let go is final: a helper that claimed it earlier and posts it
+      // now cannot acknowledge it. Its lease lapsed long before the limit passed.
+      const late = helperAcks(fetched, 'posted-late');
       assert.deepEqual([late.status, late.body.code], [410, 'OUTBOUND_EXPIRED']);
       assert.equal(bridgeStore.outbound.get(fetched.outboundId).state, 'dropped');
     });
@@ -940,11 +969,11 @@ describe('bridge gateway (#2031)', () => {
     it('acknowledges an item exactly once, and refuses a different message id for it', async () => {
       const project = store.projects.create({ name: 'Offline', path: path.join(tmpDir, 'Offline') });
       await operatorSays('m1', '@offline hello');
-      const [item] = gateway.outboundForHelper();
-      assert.deepEqual([gateway.acknowledgeOutbound(item.outboundId, 'posted-1').body.replayed, gateway.acknowledgeOutbound(item.outboundId, 'posted-1').body.replayed], [false, true]);
-      assert.equal(gateway.acknowledgeOutbound(item.outboundId, 'posted-2').body.code, 'ACK_MISMATCH');
-      assert.equal(gateway.acknowledgeOutbound(9999, 'posted-1').body.code, 'OUTBOUND_NOT_FOUND');
-      assert.equal(gateway.acknowledgeOutbound(item.outboundId, 'bad ref!').body.code, 'BAD_ACK');
+      const [item] = helperClaims().body.items;
+      assert.deepEqual([helperAcks(item, 'posted-1').body.replayed, helperAcks(item, 'posted-1').body.replayed], [false, true]);
+      assert.equal(helperAcks(item, 'posted-2').body.code, 'ACK_MISMATCH');
+      assert.equal(helperAcks({ ...item, outboundId: 9999 }, 'posted-1').body.code, 'OUTBOUND_NOT_FOUND');
+      assert.equal(helperAcks(item, 'bad ref!').body.code, 'BAD_ACK');
       assert.deepEqual(gateway.outboundForHelper(), []);
       assert.equal(bridgeStore.outbound.get(item.outboundId).text, null, 'the text is dropped once the chat has it');
       assert.ok(project.id);
