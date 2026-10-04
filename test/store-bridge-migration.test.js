@@ -105,13 +105,15 @@ describe('store: operator bridge schema (v52 and v53, #2031)', () => {
     assert.ok(!/master-launch|sender_generation/.test(before));
   });
 
-  it('upgrades a v52 store in place: both changed tables are rebuilt and keep their rows', () => {
-    freshStore('v52');
-    const fresh = bridgeObjects();
+  /**
+   * Turn the open store into one as schema v52 left it: the two tables v53
+   * changed are put back in their v52 shape (no `status` kind, and a sent
+   * message that did not record who it was sent to), and the stamp is 52.
+   * @param {(db: object) => void} [populate] - Insert v52-era rows.
+   * @returns {void}
+   */
+  function rewindToV52(populate) {
     const db = store.getDb();
-    // The two tables as schema v52 created them: no `status` kind, and a
-    // sent message that did not record who it was sent to.
-    for (const trigger of bridgeSchema.BRIDGE_SCHEMA_OBJECTS.filter((o) => o.type === 'trigger')) db.exec(`DROP TRIGGER ${trigger.name}`);
     db.exec('DROP TABLE bridge_outbound');
     db.exec('DROP TABLE bridge_route_proofs');
     db.exec(`
@@ -128,26 +130,107 @@ describe('store: operator bridge schema (v52 and v53, #2031)', () => {
         released_generation INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, delivered_at TEXT
       );
     `);
-    const at = '2026-10-04T00:00:00.000Z';
-    db.prepare(
-      "INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, created_at, updated_at) VALUES ('notify:fleet-idle:1', 'notification', 'fleet-idle', 'TangleClaw', 'kept', ?, 'ready', ?, ?)"
-    ).run('a'.repeat(64), at, at);
-    db.prepare(
-      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, in_reply_to_hub_id, sender_proof, sender_project_id, sender_launch_id, recorded_at) VALUES ('r1', 'from-target', 'h9', 'h1', 'launch', 4, 'launch', ?)"
-    ).run(at);
+    // Dropping a table takes its own indexes and triggers with it; put them back.
+    db.exec(bridgeSchema.bridgeIndexDdl());
+    if (populate) populate(db);
     db.exec('DELETE FROM schema_version WHERE version >= 53');
     db.exec('INSERT INTO schema_version (version) VALUES (52)');
     store.close();
+  }
+
+  it('upgrades a v52 store in place: both changed tables are rebuilt and keep every row and id', () => {
+    freshStore('v52');
+    const fresh = bridgeObjects();
+    const at = '2026-10-04T00:00:00.000Z';
+    rewindToV52((db) => {
+      const item = db.prepare(
+        "INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, created_at, updated_at) VALUES (?, 'notification', 'fleet-idle', 'TangleClaw', ?, ?, 'ready', ?, ?)"
+      );
+      item.run('notify:fleet-idle:1', 'first', 'a'.repeat(64), at, at);
+      item.run('notify:fleet-idle:2', 'kept', 'a'.repeat(64), at, at);
+      // A row that existed and was removed: its id must never be issued again.
+      item.run('notify:fleet-idle:3', 'gone', 'a'.repeat(64), at, at);
+      db.exec("DELETE FROM bridge_outbound WHERE idem_key = 'notify:fleet-idle:3'");
+      db.prepare(
+        "INSERT INTO bridge_routes (route_id, external_id, author_id, space_id, channel_id, body_digest, state, created_at, updated_at) VALUES ('r1', 'ext-r1', 'a', 's', 'c', ?, 'accepted', ?, ?)"
+      ).run('a'.repeat(64), at, at);
+      db.prepare(
+        "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, in_reply_to_hub_id, sender_proof, sender_project_id, sender_launch_id, recorded_at) VALUES ('r1', 'from-target', 'h9', 'h1', 'launch', 4, 'launch', ?)"
+      ).run(at);
+    });
 
     reopen();
     assert.deepEqual([...bridgeObjects()], [...fresh], 'the upgraded store has exactly the shape of a fresh one');
     const after = store.getDb();
-    assert.deepEqual(after.prepare('SELECT idem_key, text FROM bridge_outbound').all().map((r) => [r.idem_key, r.text]),
-      [['notify:fleet-idle:1', 'kept']]);
+    assert.deepEqual(after.prepare('SELECT outbound_id, idem_key, text FROM bridge_outbound ORDER BY outbound_id').all().map((r) => [r.outbound_id, r.idem_key, r.text]),
+      [[1, 'notify:fleet-idle:1', 'first'], [2, 'notify:fleet-idle:2', 'kept']]);
     assert.deepEqual(after.prepare('SELECT hub_id, in_reply_to_hub_id FROM bridge_route_proofs').all().map((r) => [r.hub_id, r.in_reply_to_hub_id]),
       [['h9', 'h1']]);
+    const next = after.prepare(
+      "INSERT INTO bridge_outbound (idem_key, kind, notify_type, source_label, text, digest, state, created_at, updated_at) VALUES ('notify:fleet-idle:4', 'notification', 'fleet-idle', 'TangleClaw', 'new', ?, 'ready', ?, ?)"
+    ).run('a'.repeat(64), at, at);
+    assert.equal(Number(next.lastInsertRowid), 4, 'the id of a removed row is not reused');
     assert.equal(after.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%_superseded'").get().n, 0);
     assert.equal(after.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, store.CURRENT_SCHEMA_VERSION);
+  });
+
+  it('booting an upgraded store again changes nothing', () => {
+    freshStore('reboot');
+    rewindToV52();
+    reopen();
+    const once = [...bridgeObjects()];
+    const stamps = () => store.getDb().prepare('SELECT version FROM schema_version ORDER BY version').all().map((r) => r.version);
+    const stamped = stamps();
+    store.close();
+    reopen();
+    store.close();
+    reopen();
+    assert.deepEqual([...bridgeObjects()], once);
+    assert.deepEqual(stamps(), stamped);
+    assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_audit_anchor').get().n, 1);
+  });
+
+  it('refuses a v52 store with a bridge table missing, and does not advance the stamp', () => {
+    freshStore('half');
+    rewindToV52();
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    raw.exec('DROP TABLE bridge_nonces');
+    raw.close();
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /not a sound v52 store.*bridge_nonces/);
+    store.close();
+    const check = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    assert.equal(check.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 52);
+    assert.equal(check.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%_superseded'").get().n, 0, 'nothing was set aside');
+    check.close();
+  });
+
+  it('refuses a v52 store with a misshapen bridge table, and does not advance the stamp', () => {
+    freshStore('malformed');
+    rewindToV52();
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    raw.exec('DROP TABLE bridge_outbound');
+    raw.exec('CREATE TABLE bridge_outbound (outbound_id INTEGER PRIMARY KEY, hub_id TEXT UNIQUE, text TEXT)');
+    raw.close();
+    store._setBasePath(tmpDir);
+    assert.throws(() => store.init(), /not a sound v52 store.*bridge_outbound/);
+    store.close();
+    const check = new DatabaseSync(path.join(tmpDir, 'tangleclaw.db'));
+    assert.equal(check.prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 52);
+    check.close();
+  });
+
+  it('is a superset of v52: everything a server from before v53 required still holds', () => {
+    freshStore('superset');
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 52), []);
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 53), []);
+    store.close();
+    freshStore('superset-upgraded');
+    rewindToV52();
+    reopen();
+    assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 52), []);
   });
 
   it('admits one fixed status item per route, and only for a route', () => {
@@ -163,6 +246,10 @@ describe('store: operator bridge schema (v52 and v53, #2031)', () => {
     );
     assert.equal(item.run('route:r1:pending', 'r1', null, 'a'.repeat(64), at, at).changes, 1);
     assert.equal(item.run('route:r1:pending', 'r1', null, 'a'.repeat(64), at, at).changes, 0, 'one per route');
+    assert.throws(() => db.prepare(
+      'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
+      + "VALUES ('route:r1:another', 'status', 'r1', 'TangleClaw', 'x', ?, 'ready', ?, ?)"
+    ).run('a'.repeat(64), at, at), /UNIQUE/, 'a second status item under another key is still refused');
     assert.throws(() => item.run('route:none:pending', null, null, 'a'.repeat(64), at, at), /CHECK/);
     assert.throws(() => item.run('route:r1:pending2', 'r1', 3, 'a'.repeat(64), at, at), /CHECK/, 'nobody released it: the server wrote it');
   });
@@ -294,15 +381,20 @@ describe('store: operator bridge constraints (#2031)', () => {
       "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', ?)"
     ).run(at), /CHECK/);
     db.prepare(
-      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 3, 'ws', 5, 'launch', ?)"
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_project_id, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 3, 9, 'ws', 5, 'launch', ?)"
     ).run(at);
     // A message the bridge sent must say exactly who it went to.
     assert.throws(() => db.prepare(
       "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, recorded_at) VALUES ('r1', 'to-target', 'h3', 'gateway', ?)"
     ).run(at), /CHECK/);
+    assert.throws(() => db.prepare(
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r1', 'to-target', 'h4', 'gateway', 'ws', 5, 'launch', ?)"
+    ).run(at), /CHECK/, 'the project is part of who it went to');
+    // A proof is never changed afterwards.
+    assert.throws(() => db.exec("UPDATE bridge_route_proofs SET target_session_id = 6"), /immutable/);
     // One Hub message belongs to one route.
     assert.throws(() => db.prepare(
-      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r2', 'to-target', 'h1', 'master-launch', 3, 'ws', 5, 'launch', ?)"
+      "INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_project_id, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r2', 'to-target', 'h1', 'master-launch', 3, 9, 'ws', 5, 'launch', ?)"
     ).run(at), /UNIQUE/);
   });
 
@@ -349,7 +441,7 @@ describe('store: operator bridge constraints (#2031)', () => {
     const db = store.getDb();
     route('r1');
     db.prepare("INSERT INTO bridge_route_bodies (route_id, role, text, digest, created_at) VALUES ('r1', 'inbound', 'x', ?, ?)").run(digest, at);
-    db.prepare("INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 1, 'ws', 5, 'launch', ?)").run(at);
+    db.prepare("INSERT INTO bridge_route_proofs (route_id, direction, hub_id, sender_proof, master_generation, target_project_id, target_workspace_id, target_session_id, target_launch_id, recorded_at) VALUES ('r1', 'to-target', 'h1', 'master-launch', 1, 9, 'ws', 5, 'launch', ?)").run(at);
     db.prepare(
       'INSERT INTO bridge_outbound (idem_key, kind, route_id, source_label, text, digest, state, created_at, updated_at) '
       + "VALUES ('route:r1:failure', 'failure', 'r1', 'TangleClaw', 'x', ?, 'ready', ?, ?)"

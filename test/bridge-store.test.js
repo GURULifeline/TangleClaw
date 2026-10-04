@@ -235,6 +235,19 @@ describe('bridge store (#2031)', () => {
     assert.ok(g1 < g2);
   });
 
+  it('gives a route one status notice, with fixed text chosen by name', () => {
+    bridgeStore.routes.accept(inbound());
+    const first = bridgeStore.outbound.enqueueStatus('rt_1', 'master-unavailable');
+    const second = bridgeStore.outbound.enqueueStatus('rt_1', 'pending');
+    assert.deepEqual([first.created, second.created], [true, false]);
+    assert.equal(second.item.text, bridgeStore.STATUS_TEXT['master-unavailable'], 'the first notice stands');
+    assert.equal(first.item.kind, 'status');
+    assert.throws(() => bridgeStore.outbound.enqueueStatus('rt_1', 'anything else'), /unknown status notice/);
+    assert.throws(() => bridgeStore.outbound.enqueue({
+      idemKey: 'k', kind: 'status', routeId: 'rt_1', sourceLabel: 'x', text: 'my own words', digest
+    }), /fixed text/);
+  });
+
   it('lists open routes oldest first and leaves closed ones out', () => {
     bridgeStore.routes.accept(inbound({ at: '2026-10-04T00:00:02.000Z' }));
     bridgeStore.routes.accept(inbound({ routeId: 'rt_2', externalId: 'ext-2', at: '2026-10-04T00:00:01.000Z' }));
