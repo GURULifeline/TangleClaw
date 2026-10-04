@@ -185,6 +185,25 @@ describe('the Operator Bridge panel (#2031)', () => {
       assert.equal(bridgeStore.helperTokens.active(), null, 'and no token was made for it');
     });
 
+    it('stops showing the bridge the moment the server stops accepting the caller', async () => {
+      // Signed in, the panel holds the policy. Then the account session ends
+      // (signed out elsewhere, or expired) and the next read is refused.
+      let req = SIGNED_IN;
+      const wires = scripted((url, method, body) => real(req).apiMutate(url, method, body).then((answer) => (answer
+        ? { status: 200, body: answer }
+        : { status: 403, body: { code: 'OPERATOR_SESSION_REQUIRED', error: 'sign in' } })));
+      const { panel } = controller(wires);
+      await panel.load();
+      await panel.act('allowlist', IDS);
+      assert.match(panel.html(), new RegExp(IDS.authorId));
+      req = AMBIENT;
+      assert.equal(await panel.act('refresh'), 'done');
+      assert.equal(panel.state.status, null, 'what it held is let go');
+      const drawn = panel.html();
+      assert.match(drawn, /Sign in to see and change it/);
+      for (const id of Object.values(IDS)) assert.ok(!drawn.includes(id), 'and none of it stays on screen');
+    });
+
     it('calls the operator routes and no other', async () => {
       const wires = real(SIGNED_IN);
       const { panel } = controller(wires);
@@ -456,6 +475,10 @@ describe('the Operator Bridge panel (#2031)', () => {
       assert.equal(await panel.act('withdraw', { outboundId: again }), 'failed', 'already withdrawn: the server says so');
       const withdraws = wires.calls.filter((c) => /withdraw$/.test(c.url)).map((c) => c.body.requestId);
       assert.notEqual(withdraws[0], withdraws[1], 'a refusal settled the first, so the second is its own request');
+      // A refusal is an answer too: the refused request is settled, and pressing again is a third request.
+      assert.equal(await panel.act('withdraw', { outboundId: again }), 'failed');
+      const third = wires.calls.filter((c) => /withdraw$/.test(c.url)).map((c) => c.body.requestId);
+      assert.equal(new Set(third).size, 3, 'three presses, three requests');
       assert.match(panel.state.notice.text, /^Not done: /);
       assert.ok(!/retry the same request/.test(panel.state.notice.text));
     });
@@ -571,6 +594,8 @@ describe('the Operator Bridge panel (#2031)', () => {
       // A control that is switched off does nothing when pressed, and a press on anything else is ignored.
       const before = wires.calls.length;
       await press({ bridgeAction: 'revoke-token' }, true);
+      await press({ bridgeAction: 'disable' }, true);
+      assert.equal(bridgeStore.settings.isEnabled(), true, 'a control drawn switched off does nothing, whatever it is');
       await press({});
       await onClick({ target: null });
       assert.equal(wires.calls.length, before);

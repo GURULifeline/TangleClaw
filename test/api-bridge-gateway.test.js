@@ -400,6 +400,12 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal((await tc(['bridge', 'withdraw', String(notice)])).code, 0);
     assert.equal(bridgeStore.routes.get(three.routeId).state, 'released');
     assert.deepEqual(closures(three.routeId), []);
+    // Nor does withdrawing a notice that is about the route: only its answer going closes it.
+    bridgeStore.outbound.enqueueStatus(three.routeId, 'pending');
+    const about = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE route_id = ? AND kind <> 'reply' AND state = 'ready'").get(three.routeId).outbound_id;
+    assert.equal((await tc(['bridge', 'withdraw', String(about)])).code, 0);
+    assert.deepEqual([bridgeStore.outbound.get(about).state, bridgeStore.routes.get(three.routeId).state, closures(three.routeId).length], ['dropped', 'released', 0]);
+    assert.ok(bridgeStore.routes.body(three.routeId, 'answer').text, 'and its answer is still held to be posted');
 
     // A circuit reset that withdraws what it caught closes the routes of the answers among them.
     const claimed = (await claim()).body.items.find((i) => i.outboundId === three.itemId);
@@ -692,6 +698,9 @@ describe('bridge API: the round trip (#2031)', () => {
     // The acknowledgement was that Master's. One launched since sees the
     // episode as its own to take up, is told so, and acknowledges for itself.
     const firstGeneration = masterGeneration;
+    // The Master that acknowledged had been told. That telling was its own too.
+    bridgeStore.circuit.noteMasterTold(episodeId, firstGeneration, { at: '2026-10-04T08:00:00.000Z' });
+    assert.match((await tc(['bridge', 'status'])).stdout, /You were last told 2026-10-04T08:00:00\.000Z\. Acknowledged/);
     const relaunched = handoff.mintCredential();
     masterGeneration = bridgeStore.masterCredentials.mint(relaunched.hash);
     bridgeStore.masterCredentials.activate(masterGeneration, relaunched.hash);
