@@ -326,6 +326,7 @@ const ttydBind = require('./lib/ttyd-bind');
 const engineErrorMonitor = require('./lib/engine-error-monitor');
 const { WRAP_STREAM_EVENTS } = require('./public/wrap-stream-events');
 const medusaWake = require('./lib/medusa-wake');
+const deliveryDisposition = require('./lib/medusa-delivery-disposition');
 const launchUnready = require('./lib/launch-unready');
 const authIdentity = require('./lib/auth-identity');
 const authSession = require('./lib/auth-session');
@@ -5524,10 +5525,49 @@ route('GET', '/api/medusa/deliveries', (req, res) => {
     if (query.limit !== undefined) options.limit = Number(query.limit);
     return jsonResponse(res, 200, { deliveries: store.medusaDeliveries.listForSession(query.sessionId, options) });
   }
-  return jsonResponse(res, 200, {
-    undelivered: store.medusaDeliveries.sessionsWithUndeliveredMail().filter(_stillHasUnhandledMail)
-  });
+  // #2086: the same rows, in the same order, each one classified, and the same
+  // items again partitioned by class. `undelivered` is still the complete list.
+  const rows = store.medusaDeliveries.sessionsWithUndeliveredMail().filter(_stillHasUnhandledMail);
+  const view = deliveryDisposition.buildView(rows, { factsFor: _deliveryFacts, monitorRunning: medusaWake.isRunning(), now: Date.now() });
+  for (const code of view.summary.unknownReasons) {
+    if (_unknownDeliveryReasons.has(code)) continue;
+    _unknownDeliveryReasons.add(code);
+    log.warn('An undelivered Medusa wake carries a reason no class is declared for; shown as configuration, to be investigated', { reason: code });
+  }
+  return jsonResponse(res, 200, view);
 });
+
+/** Reason codes already reported as having no declared class, so each is logged once. */
+const _unknownDeliveryReasons = new Set();
+
+/**
+ * What is known about the session an undelivered row belongs to (#2086), for
+ * `deliveryDisposition.buildView`. Reads the store and the wake monitor's
+ * memory; it asks tmux nothing and writes nothing.
+ *
+ * `live` is false only when something positively says so: the store has no
+ * active session under that id, or the monitor's last tick found the Master
+ * not running. Anything that could not be established is null, never false.
+ *
+ * @param {{sessionId: (string|number)}} row - A `sessionsWithUndeliveredMail` row
+ * @returns {{live: (boolean|null), restartable?: boolean, lastAssessedAt: (string|null)}}
+ */
+function _deliveryFacts(row) {
+  const key = String(row.sessionId);
+  if (/^\d+$/.test(key)) {
+    const session = store.sessions.get(Number(key));
+    const live = Boolean(session) && session.status === store.SESSION_STATUS.ACTIVE;
+    const verdict = live ? medusaWake.verdictFor(Number(key)) : null;
+    return { live, lastAssessedAt: verdict ? verdict.observedAt : null };
+  }
+  if (key === master.MASTER_MEDUSA_KEY) {
+    // The Master is one identity that stops and starts. Stopped, its mail waits
+    // for it, so it is something to start and never a historical record.
+    const verdict = medusaWake.verdictFor(key);
+    return { live: medusaWake.masterIsLive(), restartable: true, lastAssessedAt: verdict ? verdict.observedAt : null };
+  }
+  return { live: null, lastAssessedAt: null };
+}
 
 // GET /api/medusa/escalations — every open Medusa exchange the delivery
 // watchdog has escalated (#1839), oldest first: priority, age, sender and
@@ -7769,22 +7809,39 @@ registerMedusaRoutes('/api/sessions/:project/medusa', resolveProjectMedusaTarget
 // the exchange its sender opened here, or as an untracked arrival. Keyed by the
 // Hub's message id; nothing is matched by order or body.
 medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
-  if (!message || typeof message.id !== 'string') return;
-  const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
-  medusaExchanges.recordArrival({
-    hubId: message.id,
-    recipientWorkspaceId: workspaceId,
-    recipientProjectId: session ? session.projectId : null,
-    recipientSessionId: session ? sessionKey : null,
-    senderWorkspaceId: typeof message.from === 'string' ? message.from : null
-  });
-  // The operator bridge's gateway is the one listener that is not a session:
-  // what arrives for it is a held reply or nothing (ADR 0023).
-  if (sessionKey === bridgeGateway.GATEWAY_KEY) {
+  try {
+    if (message && typeof message.id === 'string') {
+      const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
+      medusaExchanges.recordArrival({
+        hubId: message.id,
+        recipientWorkspaceId: workspaceId,
+        recipientProjectId: session ? session.projectId : null,
+        recipientSessionId: session ? sessionKey : null,
+        senderWorkspaceId: typeof message.from === 'string' ? message.from : null
+      });
+      // The operator bridge's gateway is the one listener that is not a session:
+      // what arrives for it is a held reply or nothing (ADR 0023).
+      if (sessionKey === bridgeGateway.GATEWAY_KEY) {
+        try {
+          bridgeGateway.drainInbox();
+        } catch (err) {
+          log.warn('Operator bridge could not process an arrival', { error: err.message });
+        }
+      }
+    }
+  } finally {
+    // #2086: mail has arrived, so the wake monitor looks at this session now
+    // and not up to an interval later. After the arrival is recorded, so the
+    // look's verdict lands on an exchange that exists; and whether or not the
+    // record could be written, because the listener holds the mail either way.
+    // The look runs on a later turn of the event loop and passes every wake
+    // gate. Asking cannot fail the arrival: the request is contained here.
+    // For the bridge gateway's key there is no session, so the look finds
+    // nothing to look at and does nothing.
     try {
-      bridgeGateway.drainInbox();
+      medusaWake.requestScan(sessionKey, 'mail-arrived');
     } catch (err) {
-      log.warn('Operator bridge could not process an arrival', { error: err.message });
+      log.warn('Could not ask the wake monitor for a scan', { sessionId: sessionKey, error: err.message });
     }
   }
 });

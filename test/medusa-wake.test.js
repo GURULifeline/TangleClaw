@@ -1183,8 +1183,14 @@ describe('medusa-wake — peer reachability verdicts (#918)', () => {
     installWorld({ pane: [SECRET, '  Do you want to proceed?', '❯ 1. Yes', '  2. No'] });
     tickAt(0);
     const v = wake.peerReachability(PEER);
-    assert.deepEqual(Object.keys(v).sort(), ['local', 'meaning', 'monitorRunning', 'observedAt', 'reason', 'since', 'workspaceId']);
+    // #2086 added `class`, `nextAction` and `nextActionMeaning`: three more
+    // fixed fields, each taken from a declared table by the reason code.
+    assert.deepEqual(Object.keys(v).sort(), ['class', 'local', 'meaning', 'monitorRunning', 'nextAction', 'nextActionMeaning', 'observedAt', 'reason', 'since', 'workspaceId']);
     assert.equal(v.meaning, wake.PEER_REASON_MEANINGS['pane-no-prompt'], 'the meaning is the declared text for the code, nothing captured');
+    const disposition = require('../lib/medusa-delivery-disposition');
+    assert.equal(v.nextActionMeaning, disposition.NEXT_ACTIONS[v.nextAction], 'the next action is the declared text for its code, nothing captured');
+    assert.ok(Object.prototype.hasOwnProperty.call(disposition.NEXT_ACTIONS, v.nextAction));
+    assert.ok([...disposition.CLASSES, 'none'].includes(v.class));
     assert.ok(!JSON.stringify(v).includes(SECRET));
   });
 

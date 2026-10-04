@@ -7,7 +7,7 @@
  *   rc-cert start  --sha <40> --worktree <abs> [--required-check <name>]... [--repo owner/name]
  *   rc-cert run    --sha <40> [--interval <ms>]   (the repository and checks come from the manifest)
  *   rc-cert status --sha <40> [--json]
- *   rc-cert accept --sha <40> --actor <id>
+ *   rc-cert accept --sha <40> --actor <id> [--soak-disposition-sha256 <64>]
  *   rc-cert cancel --sha <40> --actor <id>
  *   rc-cert publish --sha <40>   (publish the run's standing to the metrics branch now)
  *   rc-cert list
@@ -40,6 +40,7 @@ const publisherLib = require('../lib/release-certification/publisher');
 const publicationLib = require('../lib/release-certification/publication');
 const hostChecks = require('../lib/release-certification/host-checks');
 const hostPublish = require('../lib/release-certification/host-publish');
+const soakJudge = require('../lib/soak/judge');
 const isolationLib = require('../lib/release-certification/isolation');
 const { RUN_ID_RE } = require('../lib/release-certification/formats');
 const { REFUSAL, CertificationError } = require('../lib/release-certification/codes');
@@ -49,13 +50,13 @@ const USAGE = [
   '                      [--metrics-remote <abs>] [--checks-source host-attested --run-id <32 hex> --exchange <abs> --isolation-producer <abs>]   (host-attested needs --repo, --required-check and --metrics-remote)',
   '       rc-cert run    --sha <40> [--interval <ms 15000-120000>]',
   '       rc-cert status --sha <40> [--json]',
-  '       rc-cert accept --sha <40> --actor <id>',
+  '       rc-cert accept --sha <40> --actor <id> [--soak-disposition-sha256 <64>]',
   '       rc-cert cancel --sha <40> --actor <id>',
   '       rc-cert publish --sha <40>',
   '       rc-cert list',
   'host:  rc-cert host-mint     --sha <40> --repo owner/name --required-check <name>... --host-base <abs>',
   '       rc-cert host-checks   --sha <40> --exchange <abs> --host-base <abs> [--watch --interval <ms>]',
-  '       rc-cert host-finalize --sha <40> --host-base <abs> [--base <abs>]',
+  '       rc-cert host-finalize --sha <40> --host-base <abs> --soak-bundle <abs> [--soak-disposition <abs json>] [--base <abs>]',
   '       rc-cert host-publish  --sha <40> --guest-metrics <abs> --remote <url> --host-base <abs>',
   'common: [--base <abs>] [--api <url>] [--ca <file>]; a gated API reads its token from TANGLECLAW_SERVICE_TOKEN'
 ].join('\n');
@@ -314,15 +315,20 @@ async function cmdStatus(c) {
 }
 
 /**
- * `accept` / `cancel`: an operator decision, recorded with the actor.
+ * `accept` / `cancel`: an operator decision, recorded with the actor. An
+ * `accept` may name the soak disposition proposal it approves by its sha256
+ * (`--soak-disposition-sha256`); a `cancel` takes no such flag.
  * @param {object} c - Command context
- * @param {function(object, string, number): object} op - `sm.accept` or `sm.cancel`
+ * @param {function(object, string, number, object, string=): object} op - `sm.accept` or `sm.cancel`
  * @returns {Promise<number>} Exit code
  */
 async function cmdDecide(c, op) {
   const sha = _need(c.flags, 'sha');
   const actor = _need(c.flags, 'actor');
-  const state = store.updateRun(c.base, sha, (s, manifest) => op(s, actor, Date.now(), manifest), { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
+  const disposition = c.flags['soak-disposition-sha256'];
+  if (disposition !== undefined && op !== sm.accept) throw new UsageError('--soak-disposition-sha256 belongs to accept');
+  const state = store.updateRun(c.base, sha, (s, manifest) => (disposition === undefined ? op(s, actor, Date.now(), manifest) : op(s, actor, Date.now(), manifest, disposition)),
+    { onRecover: (f) => c.emit({ event: 'recovered', ...f }) });
   // The decision is committed; publishing it is best effort and a failure is
   // recorded for retry (`rc-cert publish`), never undoing the decision.
   const { manifest } = store.readRun(c.base, sha);
@@ -486,24 +492,68 @@ async function cmdHostChecks(c) {
 }
 
 /**
+ * Read a soak disposition proposal's bytes. They are handed to the judge as
+ * they are, because the judge binds the file by its sha256.
+ * @param {string|undefined} file - `--soak-disposition`, an absolute path
+ * @returns {Buffer|null} The file's bytes, or null when none was given
+ */
+function _soakDisposition(file) {
+  if (file === undefined) return null;
+  try {
+    return fs.readFileSync(_absolute(file, '--soak-disposition'));
+  } catch (err) {
+    if (err.code !== 'ENOENT' && err.code !== 'EISDIR') throw err;
+    throw new UsageError(`--soak-disposition ${file} is not a readable file`);
+  }
+}
+
+/**
+ * Judge the soak's evidence bundle for this run. A run with no host-minted
+ * run id has no identity to bind a judgement to, so it gets none, and its
+ * finalization fails for that as well as for not being host-attested.
+ * @param {object} c - Command context
+ * @param {object} manifest - The run's manifest
+ * @param {object} state - The run's committed state
+ * @returns {object|null} The judgement
+ */
+function _judgeSoak(c, manifest, state) {
+  const bundleDir = _absolute(_need(c.flags, 'soak-bundle'), '--soak-bundle');
+  const disposition = _soakDisposition(c.flags['soak-disposition']);
+  if (typeof manifest.runId !== 'string' || !RUN_ID_RE.test(manifest.runId)) return null;
+  const judgeBundle = c.deps.judgeSoak || soakJudge.judgeBundle;
+  return judgeBundle({
+    bundleDir,
+    run: { candidateSha: manifest.candidateSha, runId: manifest.runId, manifestDigest: state.manifestDigest, startedAt: state.startedAt, updatedAt: state.updatedAt },
+    disposition
+  });
+}
+
+/**
  * `host-finalize`: join a finished host-attested run's exported evidence
- * against the host's ledger and read the checks once more. Exit 0 when the
- * run's checks were vouched for throughout, 3 otherwise.
+ * against the host's ledger, read the checks once more, and judge the soak's
+ * evidence bundle for this exact run. Exit 0 when the run's checks were
+ * vouched for throughout and the soak either passed or has every reviewable
+ * finding covered by the disposition proposal given; 3 otherwise. Exit 0 with
+ * findings is not a certification: the operator's `accept` must name the
+ * proposal's sha256, which this prints as `soak.disposition.sha256`.
  * @param {object} c - Command context
  * @returns {Promise<number>} Exit code
  */
 async function cmdHostFinalize(c) {
   const sha = _need(c.flags, 'sha');
+  const hostBase = _absolute(_need(c.flags, 'host-base'), '--host-base');
   const { manifest, state } = store.readRun(c.base, sha);
+  const soakJudgement = _judgeSoak(c, manifest, state);
   const outcome = await hostChecks.finalize({
-    hostBase: _absolute(_need(c.flags, 'host-base'), '--host-base'),
+    hostBase,
     manifest,
     manifestDigest: state.manifestDigest,
     state,
     samples: store.readSamples(c.base, sha),
-    observe: c.deps.observeGithub || ((ctx) => probesLib.observeGithub(ctx))
+    observe: c.deps.observeGithub || ((ctx) => probesLib.observeGithub(ctx)),
+    soakJudgement
   });
-  c.out.write(`${JSON.stringify(outcome)}\n`);
+  c.out.write(`${JSON.stringify({ ...outcome, soak: soakJudgement })}\n`);
   return outcome.ok ? 0 : 3;
 }
 

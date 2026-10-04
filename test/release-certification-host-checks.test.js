@@ -256,7 +256,8 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     return out;
   }
   const finalize = (s, over = {}) => hc.finalize({
-    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: s.length, baseline: { bootId: fx.BOOT_ID } }, samples: s, observe: observer().observe, now: () => T0, ...over
+    hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: s.length, baseline: { bootId: fx.BOOT_ID } }, samples: s, observe: observer().observe, now: () => T0,
+    soakJudgement: fx.soakJudgement(manifest, DIGEST), ...over
   });
 
   it('passes a run whose admission and every earning sample the host vouched for, and records it', async () => {
@@ -265,6 +266,94 @@ describe('host checks: finalization trusts only the host\'s own ledger', () => {
     assert.deepEqual(out, { ok: true, reasons: [] });
     const rec = hc.readFinalization(hostBase, SHA, fx.RUN_ID);
     assert.deepEqual([rec.ok, rec.runId, rec.manifestDigest], [true, fx.RUN_ID, DIGEST]);
+  });
+
+  it('records the soak judgement it was given in the finalization', async () => {
+    mint();
+    await finalize(await samples(2));
+    assert.deepEqual(hc.readFinalization(hostBase, SHA, fx.RUN_ID).soak, fx.soakJudgement(manifest, DIGEST));
+  });
+
+  it('fails a run with no soak judgement, a failed one, or one bound elsewhere, and records what it was given', async () => {
+    mint();
+    const s = await samples(2);
+    const failed = fx.soakJudgement(manifest, DIGEST, { verdict: 'fail', reasons: [{ sampleSeq: 3, code: 'DATA_CORRUPTION', class: 'terminal' }] });
+    for (const [soakJudgement, code] of [
+      [undefined, 'SOAK_JUDGEMENT_MISSING'],
+      [null, 'SOAK_JUDGEMENT_MISSING'],
+      [failed, 'SOAK_JUDGEMENT_FAILED'],
+      [fx.soakJudgement(manifest, DIGEST, { schema: 'tc.soak-judgement/v0' }), 'SOAK_JUDGEMENT_FAILED'],
+      [fx.soakJudgement(manifest, DIGEST, { reasons: [{ code: 'X' }] }), 'SOAK_JUDGEMENT_FAILED'],
+      [fx.soakJudgement({ ...manifest, candidateSha: 'c'.repeat(40) }, DIGEST), 'SOAK_JUDGEMENT_UNBOUND'],
+      [fx.soakJudgement({ ...manifest, runId: 'c'.repeat(32) }, DIGEST), 'SOAK_JUDGEMENT_UNBOUND'],
+      [fx.soakJudgement(manifest, 'c'.repeat(64)), 'SOAK_JUDGEMENT_UNBOUND'],
+      [fx.soakJudgement(manifest, DIGEST, { binding: { ...fx.soakJudgement(manifest, DIGEST).binding, logSha256: null } }), 'SOAK_JUDGEMENT_UNBOUND']
+    ]) {
+      const out = await finalize(s, { soakJudgement });
+      assert.deepEqual(out, { ok: false, reasons: [{ code }] }, `${code} ${JSON.stringify(soakJudgement && soakJudgement.binding)}`);
+      assert.deepEqual(hc.readFinalization(hostBase, SHA, fx.RUN_ID).soak, soakJudgement === undefined ? null : soakJudgement);
+    }
+    assert.equal(hc.readFinalization(hostBase, SHA, fx.RUN_ID).ok, false, 'a failed soak finalizes as not ok');
+  });
+
+  it('fails a soak awaiting review until a disposition proposal covers every finding', async () => {
+    mint();
+    const s = await samples(2);
+    const covered = fx.soakWithFindings(manifest, DIGEST);
+    for (const [label, soakJudgement] of [
+      ['no proposal', { ...covered, disposition: null }],
+      ['a rejected proposal', { ...covered, disposition: { ...covered.disposition, state: 'rejected', findings: [] } }],
+      ['a proposal that covers fewer findings than there are', { ...covered, findings: [...covered.findings, { ...covered.findings[0], index: 8 }] }],
+      ['a proposal with no digest', { ...covered, disposition: { ...covered.disposition, sha256: null } }],
+      ['a reason the proposal could not cover', { ...covered, reasons: [...covered.reasons, { index: 7, code: 'DISPOSITION_EVIDENCE', class: 'disposition' }] }],
+      ['no findings to cover', { ...covered, findings: [], disposition: { ...covered.disposition, findings: [] } }]
+    ]) {
+      assert.deepEqual(await finalize(s, { soakJudgement }), { ok: false, reasons: [{ code: 'SOAK_JUDGEMENT_AWAITING_REVIEW' }] }, label);
+    }
+    assert.deepEqual(await finalize(s, { soakJudgement: fx.soakWithFindings(manifest, 'c'.repeat(64)) }), { ok: false, reasons: [{ code: 'SOAK_JUDGEMENT_UNBOUND' }] });
+    assert.deepEqual(await finalize(s, { soakJudgement: covered }), { ok: true, reasons: [] }, 'covered findings finalize, and the judgement is on record');
+    assert.deepEqual(hc.readFinalization(hostBase, SHA, fx.RUN_ID).soak, covered);
+  });
+
+  it('never reads a judgement that contradicts itself as certifiable', async () => {
+    mint();
+    const s = await samples(2);
+    for (const soakJudgement of [
+      fx.soakJudgement(manifest, DIGEST, { disposition: fx.soakWithFindings(manifest, DIGEST).disposition }),
+      fx.soakJudgement(manifest, DIGEST, { verdict: 'pass-with-findings' }),
+      fx.soakWithFindings(manifest, DIGEST, { verdict: 'fail' }),
+      fx.soakJudgement(manifest, DIGEST, { verdict: undefined })
+    ]) {
+      assert.deepEqual(await finalize(s, { soakJudgement }), { ok: false, reasons: [{ code: 'SOAK_JUDGEMENT_FAILED' }] }, JSON.stringify(soakJudgement.verdict));
+    }
+  });
+
+  it('certifies covered findings only on an acceptance that binds exactly that proposal, candidate and run', () => {
+    const run = { candidateSha: manifest.candidateSha, runId: manifest.runId, manifestDigest: DIGEST };
+    const bound = { sha256: fx.DISPOSITION_SHA, candidateSha: manifest.candidateSha, runId: manifest.runId };
+    const covered = fx.soakWithFindings(manifest, DIGEST);
+    const passed = fx.soakJudgement(manifest, DIGEST);
+    const at = { actor: 'operator', at: 5 };
+    for (const [label, judgement, acceptance, expected] of [
+      ['a passed soak, plain acceptance', passed, at, 'pass'],
+      ['a passed soak, actor withheld', passed, { at: 5 }, 'pass'],
+      ['a passed soak, an acceptance naming a proposal that does not exist', passed, { ...at, soakDisposition: bound }, null],
+      ['covered findings, acceptance binds the proposal', covered, { ...at, soakDisposition: bound }, 'pass-with-findings'],
+      ['covered findings, plain acceptance', covered, at, null],
+      ['covered findings, no acceptance', covered, null, null],
+      ['covered findings, another proposal', covered, { ...at, soakDisposition: { ...bound, sha256: '5'.repeat(64) } }, null],
+      ['covered findings, another candidate', covered, { ...at, soakDisposition: { ...bound, candidateSha: 'c'.repeat(40) } }, null],
+      ['covered findings, another run', covered, { ...at, soakDisposition: { ...bound, runId: 'c'.repeat(32) } }, null],
+      ['findings no proposal covers, even with a binding', { ...covered, disposition: null }, { ...at, soakDisposition: bound }, null],
+      ['a failed soak, even with a binding', fx.soakWithFindings(manifest, DIGEST, { verdict: 'fail' }), { ...at, soakDisposition: bound }, null],
+      ['no judgement', null, at, null]
+    ]) {
+      assert.equal(hc.soakCertification(judgement, run, acceptance), expected, label);
+    }
+  });
+
+  it('shares the soak judge\'s schema name without depending on the soak', () => {
+    assert.equal(hc.SOAK_JUDGEMENT_SCHEMA, require('../lib/soak/judge').JUDGEMENT_SCHEMA);
   });
 
   it('ignores a missing verdict on a sample that earned no time', async () => {
@@ -348,8 +437,10 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => A });
     hc.mintRun(hostBase, { candidateSha: SHA, repository: 'o/r', requiredChecks: ['test'] }, { random: () => B });
     const base = { hostBase, manifestDigest: DIGEST, samples: [], state: { state: 'awaiting-review', sampleCount: 0, baseline: { bootId: fx.BOOT_ID } }, now: () => T0 };
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' }), observe: observer().observe });
-    await hc.finalize({ ...base, manifest: fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' }), observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe });
+    const mA = fx.manifest({ runId: A, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' });
+    const mB = fx.manifest({ runId: B, checksSource: 'host-attested', checksExchange: '/x', publishRemote: '/x/metrics.git', isolationProducer: '/x/guest-setup.sh' });
+    await hc.finalize({ ...base, manifest: mA, observe: observer().observe, soakJudgement: fx.soakJudgement(mA, DIGEST) });
+    await hc.finalize({ ...base, manifest: mB, observe: observer({ state: 'ok', checks: { test: 'failure' } }).observe, soakJudgement: fx.soakJudgement(mB, DIGEST) });
     assert.equal(hc.readFinalization(hostBase, SHA, A).ok, true);
     assert.equal(hc.readFinalization(hostBase, SHA, B).ok, false);
     assert.equal(hc.readFinalization(hostBase, SHA, 'c'.repeat(32)), null);
@@ -363,7 +454,7 @@ describe('host checks: robustness and bookkeeping (B3 review)', () => {
       const r = await attestAnswered(guest(), { seq, manifestDigest: DIGEST });
       out.push({ seq, wallAt: T0 + 1000, isolation: { sampleSeq: seq, bootId: fx.BOOT_ID, adminDigest: 'a'.repeat(64), workloadDigest: 'b'.repeat(64) }, observations: { isolation: fx.ISOLATED }, checks: r.binding, interval: seq === 1 ? null : { qualifies: true } });
     }
-    const fin = (samples, sampleCount) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount, baseline: { bootId: fx.BOOT_ID } }, samples, observe: observer().observe });
+    const fin = (samples, sampleCount) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount, baseline: { bootId: fx.BOOT_ID } }, samples, observe: observer().observe, soakJudgement: fx.soakJudgement(manifest, DIGEST) });
     assert.deepEqual((await fin([out[0], out[2]], 3)).reasons, [{ code: 'SAMPLES_INCOMPLETE' }]);
     const late = [out[0], out[1], { ...out[2], wallAt: T0 + 150_001 }];
     assert.deepEqual((await fin(late, 3)).reasons, [{ code: 'VERDICT_NOT_FRESH', sampleSeq: 3 }]);
@@ -469,7 +560,8 @@ describe('host checks: finalization joins the guest\'s isolation too (A43, A44, 
     }
     return out;
   }
-  const fin = (samples, baseline = { bootId: fx.BOOT_ID }) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: samples.length, baseline }, samples, observe: observer().observe, now: () => T0 });
+  const fin = (samples, baseline = { bootId: fx.BOOT_ID }) => hc.finalize({ hostBase, manifest, manifestDigest: DIGEST, state: { state: 'awaiting-review', sampleCount: samples.length, baseline }, samples, observe: observer().observe, now: () => T0,
+    soakJudgement: fx.soakJudgement(manifest, DIGEST) });
 
   it('records the boot and a digest of the exact committed sample set', async () => {
     mint();
