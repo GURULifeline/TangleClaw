@@ -33,6 +33,9 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    Why: a route still waiting on a project keeps its message to that project open, and with the
    bridge off nothing will ever answer the operator for it. Closing the route ends that message
    at once and clears its text. Answering is refused while the bridge is disabled, so close.
+   → `409 OUTBOUND_IN_FLIGHT` on a close: the helper holds something of that route under a
+   lease, and may be posting it at this moment. Do step 2 now, or wait two minutes for the lease
+   to lapse; then close that route.
    → If the Master cannot be reached: go on. Close them when it can.
 
 2. Stop the helper and remove its job:

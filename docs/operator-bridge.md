@@ -268,7 +268,7 @@ Every write:
 |---|---|
 | `403 LOOPBACK_REQUIRED` | The request did not come directly from this machine: it arrived over the network or through a proxy. Judged before the credential is looked at. `tc bridge` does not send the credential to any other host in the first place. |
 | `401 BRIDGE_CREDENTIAL_REQUIRED` | The request did not carry the live Master generation's credential, or tmux says there is no Master: the credential is then revoked on the spot (`master-not-live`). When tmux does not answer, a live Master keeps its credential. |
-| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route that could lead to a post answers this. The Master's `status`, `close`, `blocked`, `withdraw`, and the circuit's `ack` and `reset` stay available, so that turning the bridge off never leaves message text held or an episode unanswerable; so does the helper's `preflight`. |
+| `409 BRIDGE_DISABLED` | The operator has not enabled the bridge. Every route that could lead to a post answers this. The Master's `status`, its two reads (`routes` and `read`), `close`, `blocked`, `withdraw`, and the circuit's `ack` and `reset` stay available. The reads are what let the Master see which routes are still open after a rollback, and Master status reports the true count of open routes whether the bridge is on or off. They stay available so that turning the bridge off never leaves message text held or an episode unanswerable; so does the helper's `preflight`. |
 | `404 ROUTE_NOT_FOUND` | No such route. |
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
 | `409 REQUEST_ID_REUSED` | The request id was already used for a different route. |

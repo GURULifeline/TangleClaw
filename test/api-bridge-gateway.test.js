@@ -343,6 +343,52 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([noTo.code, /needs --to/.test(noTo.stderr)], [1, true]);
   });
 
+  it('rollback, as the runbook has it: disable, then the Master lists the open routes and closes each, and no exchange is left open', async () => {
+    const exchanges = require('../lib/medusa-exchanges');
+    const alpha = liveProject(`Alpha${++seq}`);
+    const beta = liveProject(`Beta${++seq}`);
+    const routed = (await operatorSays(`m${++seq}`, `@${alpha.project.name} still waiting on a project`)).body.routeId;
+    const other = (await operatorSays(`m${++seq}`, `@${beta.project.name} and another`)).body.routeId;
+    const forMaster = (await operatorSays(`m${++seq}`, 'unaddressed, so it waits on the Master')).body.routeId;
+    const mine = [routed, other, forMaster];
+    /** @returns {string[]} The gateway's open sends for this test's routes. */
+    const openSends = () => exchanges.openSystemOwned(gateway.GATEWAY_KEY).map((x) => x.request_id).filter((id) => mine.some((r) => id.startsWith(`bridge:${r}:`))).sort();
+    assert.deepEqual(openSends(), [`bridge:${other}:send1`, `bridge:${routed}:send1`].sort());
+
+    // Step 1: the operator disables the bridge.
+    assert.equal((await asOperator('POST', '/api/bridge/operator/disable')).status, 200);
+    assert.deepEqual(openSends(), [`bridge:${other}:send1`, `bridge:${routed}:send1`].sort(), 'disabling alone closes nothing: those routes still wait');
+
+    // Step 1b: the Master lists what is open. Disabled, it can still see it, and how many.
+    const status = await tc(['bridge', 'status']);
+    assert.match(status.stdout, /Operator bridge: DISABLED/);
+    const count = (await call('GET', '/api/bridge/master/status', { headers: asMaster() })).body.openRoutes;
+    const listed = await call('GET', '/api/bridge/master/routes', { headers: asMaster() });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    assert.equal(listed.body.routes.length, count, 'status reports the true count');
+    for (const routeId of mine) assert.ok(listed.body.routes.some((r) => r.routeId === routeId), `${routeId} is listed`);
+    assert.match((await tc(['bridge', 'routes'])).stdout, new RegExp(`^${count} route\\(s\\), oldest first:`));
+    // It cannot answer or reroute one: only close.
+    const refused = await masterWrites(forMaster, 'answer', { expectedVersion: bridgeStore.routes.get(forMaster).version, text: 'too late' });
+    assert.deepEqual([refused.status, refused.body.code], [409, 'BRIDGE_DISABLED']);
+
+    // It closes each with the version the listing gave it.
+    for (const route of listed.body.routes) {
+      const closed = await tc(['bridge', 'close', route.routeId, '--version', String(route.version)]);
+      assert.equal(closed.code, 0, `${route.routeId}: ${closed.stderr}`);
+    }
+    // → Expected: the listing is empty, and nothing of the gateway's is left open.
+    assert.match((await tc(['bridge', 'routes'])).stdout, /^No routes in those states\./);
+    assert.equal((await call('GET', '/api/bridge/master/status', { headers: asMaster() })).body.openRoutes, 0);
+    assert.deepEqual(openSends(), []);
+    for (const routeId of [routed, other]) {
+      const send = store.medusaExchanges.getByRequestId(`bridge:${routeId}:send1`);
+      assert.deepEqual([send.state, send.terminal_code], ['closed', 'system-owner-closed'], routeId);
+      assert.equal(bridgeStore.routes.bodies(routeId).every((b) => b.text === null), true, 'and no message text is held');
+    }
+    assert.equal(exchanges.pendingWakeCount(alpha.workspaceId), 0, 'nothing nudges the project for a message nobody will answer');
+  });
+
   it('the Master moving a route ends the gateway\'s own exchange for it at once, and leaves none open that nothing waits on', async () => {
     const exchanges = require('../lib/medusa-exchanges');
     /** @returns {string[]} The gateway's open sends, by request id. */

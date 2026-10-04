@@ -137,15 +137,27 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.equal(res.status, 401);
   });
 
-  it('reports status while disabled, still lets a route be closed, and refuses everything else', async () => {
+  it('while disabled: status and the route reads answer, a route can still be closed, and everything that sends or resolves is refused', async () => {
     const routeId = acceptRoute('off');
+    const before = (await call('GET', '/api/bridge/master/status')).body.openRoutes;
     bridgeStore.settings.set('enabled', 'false');
     const status = await call('GET', '/api/bridge/master/status');
-    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: 0, configurationCircuit: null });
+    // The true count: a disabled bridge's open routes are what the Master is there to close.
+    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: before, configurationCircuit: null });
+    assert.ok(before >= 1);
+    // The Master can still see what is open, and read one, so that it can close it (Architect ruling, 2026-10-04).
+    const listed = await call('GET', '/api/bridge/master/routes');
+    assert.equal(listed.status, 200);
+    assert.ok(listed.body.routes.some((r) => r.routeId === routeId));
+    const read = await call('GET', `/api/bridge/master/routes/${routeId}`);
+    assert.deepEqual([read.status, read.body.route.routeId, read.body.authority], [200, routeId, 'conversation-only']);
+    // The reads are still the Master's alone.
+    assert.equal((await call('GET', '/api/bridge/master/routes', { as: 'not-the-masters-credential' })).status, 401);
+    assert.equal((await call('GET', `/api/bridge/master/routes/${routeId}`, { as: null })).status, 401);
     for (const [method, apiPath] of [
-      ['GET', '/api/bridge/master/routes'],
-      ['GET', `/api/bridge/master/routes/${routeId}`],
-      ['POST', `/api/bridge/master/routes/${routeId}/answer`]
+      ['POST', `/api/bridge/master/routes/${routeId}/answer`],
+      ['POST', `/api/bridge/master/routes/${routeId}/route`],
+      ['POST', `/api/bridge/master/routes/${routeId}/release`]
     ]) {
       const r = await call(method, apiPath, { body: method === 'POST' ? { requestId: 'req-off-00001', expectedVersion: 1, text: 'x' } : undefined });
       assert.deepEqual([r.status, r.body.code], [409, 'BRIDGE_DISABLED'], `${method} ${apiPath}`);

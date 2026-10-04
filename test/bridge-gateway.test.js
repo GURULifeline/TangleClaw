@@ -1373,6 +1373,13 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual(ladder(rows.normal.exchange_id), [], 'normal: no rung at all');
       assert.ok(ladder(rows.blocking.exchange_id).includes('aged') && ladder(rows.blocking.exchange_id).includes('operator_alerted'), `blocking climbs: ${ladder(rows.blocking.exchange_id)}`);
       assert.ok(ladder(rows.critical.exchange_id).includes('operator_alerted'), `critical climbs: ${ladder(rows.critical.exchange_id)}`);
+      // And the bridge relays those alerts: its own filter is for its normal mail, as the watchdog's is.
+      bridgeStore.settings.set(bridgeNotify.ENABLED_AT, new Date(Date.parse(clock) - 4 * 60 * 60 * 1000).toISOString());
+      exchanges.recordEscalationFact(rows.normal.exchange_id, 'operator_alerted', { code: 'prolonged-unread', at: clock });
+      bridgeNotify.reconcile();
+      assert.deepEqual(notices().filter((n) => n.notify_type === 'operator-needed').map((n) => n.idem_key).sort(),
+        [`notify:operator-needed:exchange:${rows.blocking.exchange_id}`, `notify:operator-needed:exchange:${rows.critical.exchange_id}`].sort(),
+        'the blocking and the critical one, and not the normal one');
     });
 
     it('a pass while the bridge is disabled still ends a send no route waits on, and keeps one a route does', async () => {
