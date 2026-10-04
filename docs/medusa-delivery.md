@@ -186,6 +186,23 @@ same time, and returns. Each answer is judged when it arrives:
 - **Judging an answer asks tmux nothing**, so a wedged tmux server cannot hold
   the server through it.
 
+**Something happening asks for a look (#2086).** The monitor does not wait
+for its timer when one of these is recorded for a session: mail arrives, its
+listener returns to `listening`, its project's wrap finishes, or its
+coordinator rotation closes.
+
+- **A request is not a command.** It runs the same scan, through every gate,
+  and one look never nudges. A look that was asked for and finds the pane at
+  rest books a single follow-up 4 seconds later, and the timer leaves the
+  session alone until then. Mail for a pane at rest is nudged about 4.4
+  seconds after it arrives, where the timer alone took 5 to 10.
+- **Requests are bounded.** They are coalesced per session, and dropped when
+  the monitor is stopped, when the pane is being read, has a follow-up booked,
+  is backed off, or was observed less than 4 seconds ago.
+- **A busy pane coming to rest is still found by the timer.** No engine pushes
+  a "turn finished" event the monitor could use.
+- **Requests are in memory.** A restart loses them and the timer covers.
+
 None of this types anything a tick would not have typed. The measurements are
 in [medusa-wake-measurements.md](medusa-wake-measurements.md).
 

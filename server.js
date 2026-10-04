@@ -7764,15 +7764,21 @@ registerMedusaRoutes('/api/sessions/:project/medusa', resolveProjectMedusaTarget
 // the exchange its sender opened here, or as an untracked arrival. Keyed by the
 // Hub's message id; nothing is matched by order or body.
 medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
-  if (!message || typeof message.id !== 'string') return;
-  const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
-  medusaExchanges.recordArrival({
-    hubId: message.id,
-    recipientWorkspaceId: workspaceId,
-    recipientProjectId: session ? session.projectId : null,
-    recipientSessionId: session ? sessionKey : null,
-    senderWorkspaceId: typeof message.from === 'string' ? message.from : null
-  });
+  if (message && typeof message.id === 'string') {
+    const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
+    medusaExchanges.recordArrival({
+      hubId: message.id,
+      recipientWorkspaceId: workspaceId,
+      recipientProjectId: session ? session.projectId : null,
+      recipientSessionId: session ? sessionKey : null,
+      senderWorkspaceId: typeof message.from === 'string' ? message.from : null
+    });
+  }
+  // #2086: mail has arrived, so the wake monitor looks at this session now
+  // and not up to an interval later. After the arrival is recorded, so the
+  // look's verdict lands on an exchange that exists. The look runs on a later
+  // turn of the event loop and passes every wake gate.
+  medusaWake.requestScan(sessionKey, 'mail-arrived');
 });
 
 // ── Control state (#1861): durable HOLD / RELEASE / STOP ──

@@ -159,6 +159,60 @@ async function asyncTables() {
 }
 
 /**
+ * How long a recipient at rest waits for its nudge when mail arrives `offsetMs`
+ * after a tick, with and without the arrival asking for a look.
+ * @param {number} size - Fleet size; every other session is quiet
+ * @param {number} offsetMs - When the mail arrives, measured from a tick
+ * @param {boolean} asked - Whether the arrival requests a scan
+ * @returns {Promise<number|null>} Milliseconds from arrival to the nudge
+ */
+async function arrivalToWake(size, offsetMs, asked) {
+  const fleet = matrix.buildFleet({ size, fillers: ['no-mail'] });
+  const eligible = fleet[fleet.length - 1];
+  // No mail yet: the monitor has ticked over an empty inbox.
+  eligible.status.unread = 0;
+  eligible.inbox = [];
+  const world = matrix.install(fleet, { started: true });
+  try {
+    await matrix.runTicksAsync(world, 1);
+    await matrix.advance(world, world.clockMs + offsetMs);
+    const arrivedAt = world.clockMs;
+    eligible.status.unread = 1;
+    eligible.inbox = [{ id: 'm-late', from: 'peer', message: 'hello' }];
+    if (asked) wake.requestScan(eligible.record.id, 'mail-arrived');
+    for (let i = 0; i < 6 && world.injected.length === 0; i++) {
+      // Whatever is due before the next tick, then the tick.
+      await matrix.runTicksAsync(world, 1);
+      await matrix.advance(world, world.clockMs + 1);
+    }
+    await matrix.advance(world, world.clockMs + matrix.READ_TIMEOUT_MS);
+    if (world.injected.length !== 1) broken += 1;
+    return world.injected.length ? world.injected[0].at - arrivedAt : null;
+  } finally {
+    world.restore();
+  }
+}
+
+/**
+ * The table of arrival-to-wake latencies.
+ * @returns {Promise<string[]>} Markdown blocks
+ */
+async function arrivalTables() {
+  const rows = [];
+  for (const size of [1, 30]) {
+    for (const offsetMs of [100, 2500, 4900]) {
+      rows.push([
+        String(size), sec(offsetMs),
+        sec(await arrivalToWake(size, offsetMs, false)),
+        sec(await arrivalToWake(size, offsetMs, true))
+      ]);
+    }
+  }
+  return ['## From mail arriving to the nudge, for a pane at rest\n',
+    table(['Sessions', 'Mail arrives after a tick by', 'Timer only', 'Arrival asks for a look'], rows), ''];
+}
+
+/**
  * One run under a real timer with costs that really block the thread, at a
  * tenth of their size.
  * @param {string} label - Row label
@@ -192,7 +246,7 @@ function realRun(label, fleetOpts) {
  * @returns {Promise<void>}
  */
 async function main() {
-  out.unshift(...await asyncTables(), '');
+  out.unshift(...await arrivalTables(), ...await asyncTables(), '');
   if (process.argv.includes('--real')) {
     const rows = [];
     rows.push(await realRun('mixed', { size: 30 }));

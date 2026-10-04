@@ -100,9 +100,10 @@ how long a tick held the thread.
 
 1. **Fleet size alone does not delay a recipient.** A quiet session costs well under a
    millisecond, and a session holding mail no longer holds the tick at all.
-2. **The floor is two ticks.** A recipient at rest is woken about 10.3 s after its mail arrives:
-   up to one interval before the first look, then the two-tick idle debounce. Nothing triggers a
-   look when the mail arrives or when a pane comes to rest. Unchanged.
+2. **Mail for a pane at rest is nudged about 4.4 s after it arrives.** The arrival asks the
+   monitor for a look, and a pane found at rest gets its second look one minimum gap (4 s) later.
+   On the timer alone the same nudge took between 5.4 and 10.2 s, depending on where in the
+   interval the mail landed. "From arrival to the nudge" below has the table.
 3. **Sessions holding mail are read at the same time.** Thirty of them add about a second to the
    wake, which is the tmux server answering thirty readers, and nothing to the tick.
 4. **The tick no longer stalls the server.** It runs the cheap gates and starts the reads. On
@@ -116,6 +117,36 @@ how long a tick held the thread.
 8. **A restart does not repeat a nudge while the durable attempt record is readable.** The
    in-memory watermark is lost, and `alreadyAttempted` restores it. If that read throws, the
    monitor falls back to memory, which is empty after a restart, and nudges a second time.
+
+## From arrival to the nudge
+
+A pane at rest, with no mail when the monitor last ticked. Mail then arrives.
+
+| Sessions | Mail arrives after a tick by | Timer only | Arrival asks for a look |
+|---|---|---|---|
+| 1 | 0.1 s | 10.2 s | 4.4 s |
+| 1 | 2.5 s | 7.8 s | 4.4 s |
+| 1 | 4.9 s | 5.4 s | 4.4 s |
+| 30 | 0.1 s | 10.2 s | 4.4 s |
+| 30 | 2.5 s | 7.8 s | 4.4 s |
+| 30 | 4.9 s | 5.4 s | 4.4 s |
+
+A request is not a command. It runs the scan the timer runs, through every gate, and a single
+look never nudges: the debounce is still two at-rest observations of an unchanged pane, at least
+4 s apart. A look that was asked for and finds the pane at rest books one follow-up for the
+earliest moment a second observation can count, and the timer leaves that session alone until it
+has run.
+
+Four recorded transitions ask for a look: mail arrives for a session, its listener returns to
+`listening`, its project's wrap finishes, its coordinator rotation closes. Requests are coalesced
+per session and dropped when the monitor is stopped, when the pane is being read, has a follow-up
+booked, is backed off, or was observed inside the minimum gap.
+
+What still waits for the timer: a busy pane coming to rest. No engine pushes a "turn finished"
+event to TangleClaw that the monitor could use. Claude Code has no Stop-hook endpoint here, and the
+Codex app-server's `turn/completed` is watched only for the one startup turn TangleClaw itself
+begins. So a recipient that is mid-turn when its mail arrives is found at rest by the next tick,
+and nudged one tick after that.
 
 ## Before and after non-blocking reads
 
@@ -185,7 +216,7 @@ with mail in every pane already overruns the interval at ordinary tmux latency.
 | Contention among sessions that do have mail can delay a wake | **Confirmed** on `main`: about 130 ms per such session, serially. Removed by non-blocking reads. |
 | A slow early-scanned session can starve a later one | **Confirmed as delay** on `main`. Removed by non-blocking reads. |
 | The tick has no overrun or queue-lag handling | **Confirmed** on `main`. A tick that starts reads and returns has nothing left to overrun with. |
-| Retry is interval polling, blind to state transitions | **Confirmed.** Finding 2. Unchanged. |
+| Retry is interval polling, blind to state transitions | **Confirmed** on `main` before #2086. Arrival, a listener returning, a wrap finishing and a rotation closing now ask for a look. A pane coming to rest is still found by the timer: no pushed event for it exists. |
 | An ended or listener-off session is reported as undelivered for ever | **Confirmed**, below. Unchanged. |
 
 ## What `/api/medusa/deliveries` returns today

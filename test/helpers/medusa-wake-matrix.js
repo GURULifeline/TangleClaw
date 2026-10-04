@@ -177,6 +177,8 @@ function buildFleet(opts) {
  * @param {object} [opts.master] - A `makeMaster` entry: the Project Master joins the scan
  * @param {boolean} [opts.forbidBlockingOnAnswer=false] - A blocking tmux seam throws when
  *   reached while an answer is being judged
+ * @param {boolean} [opts.started=false] - Start the monitor, on an interval too long ever to
+ *   fire, so it accepts scan requests while the test drives the ticks
  * @returns {object} The world: its clock, what was injected and recorded, and `restore()`
  */
 function install(fleet, opts = {}) {
@@ -200,6 +202,8 @@ function install(fleet, opts = {}) {
     scans: [],
     paneReads: [],
     pending: [],
+    // Deferred callbacks and timers the monitor has set, fired by `advance`.
+    timers: [],
     // Every blocking tmux call, with whether it came from a tick or from the
     // judging of a pane read's answer.
     blockingTmux: [],
@@ -231,6 +235,11 @@ function install(fleet, opts = {}) {
   const s = wake._internal;
 
   s.clock = opts.clock || (() => world.clockMs);
+  // The monitor's own scheduling, on the virtual clock: a deferred callback
+  // runs at the current time, a timer at its delay, both when `advance` gets there.
+  s.defer = (fn) => { world.timers.push({ at: world.clockMs, settle: fn }); };
+  s.setTimer = (fn, ms) => { const entry = { at: world.clockMs + ms, settle: fn }; world.timers.push(entry); return entry; };
+  s.clearTimer = (entry) => { world.timers = world.timers.filter((t) => t !== entry); };
   s.now = () => 1_700_000_000_000 + Math.round(world.clockMs);
   s.listLiveAll = () => { spend(costs.listLiveAll); return world.fleet.filter((x) => !x.gone).map((x) => x.record); };
   // The real one probes the Master's pane with a blocking tmux command unless
@@ -334,6 +343,7 @@ function install(fleet, opts = {}) {
   s.noteReadiness = () => { spend(costs.durable); };
   s.verifySubmission = () => Promise.resolve({ outcome: 'unknown', reason: 'synthetic' });
   s.declaresObserver = () => false;
+  if (opts.started) wake.start({ intervalMs: 2 ** 30 });
   return world;
 }
 
@@ -376,10 +386,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
  */
 async function advance(world, toMs) {
   for (;;) {
-    world.pending.sort((a, b) => a.at - b.at);
-    const next = world.pending[0];
+    // Reads and the monitor's own timers, whichever is due first.
+    const due = world.pending.concat(world.timers).sort((a, b) => a.at - b.at);
+    const next = due[0];
     if (!next || next.at > toMs) break;
-    world.pending.shift();
+    world.pending = world.pending.filter((e) => e !== next);
+    world.timers = world.timers.filter((e) => e !== next);
     if (world.clockMs < next.at) world.clockMs = next.at;
     world.phase = 'answer';
     next.settle();

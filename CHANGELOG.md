@@ -33,6 +33,11 @@ All notable changes to TangleClaw are documented in this file.
   - A read is given 4 seconds. A pane that does not answer is left alone for 10 seconds, then 30, then 60 (`pane-read-backoff`), and one ordinary read ends that.
   - A scan that got no look at a pane does not count towards the two at-rest observations a nudge needs.
   - `docs/medusa-wake-measurements.md` is corrected: the first measurement counted three tmux commands per session holding mail and there are seven. The report says which figures changed.
+- **Medusa mail for a session at rest is nudged about 4 seconds after it arrives, not 5 to 10** (#2086). The wake monitor only looked on its 5-second timer and needed two looks, and nothing told it when mail arrived.
+  - Mail arriving for a session now asks the monitor to look at once. So do its listener returning to `listening`, its project's wrap finishing and its coordinator rotation closing.
+  - A request is not a command: it runs the same scan through every wake gate, and one look never nudges. A look that was asked for and finds the pane at rest books a single second look 4 seconds later, so the nudge still follows two at-rest observations of an unchanged pane.
+  - Requests are coalesced per session and dropped when they could only waste a look. A restart loses pending requests and the timer covers them.
+  - A session that is mid-turn when its mail arrives is still found at rest by the timer. No engine pushes a "turn finished" event the monitor could use.
 
 ### Internal
 
