@@ -273,6 +273,7 @@ const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
 const coordinatorRotation = require('./lib/coordinator-rotation');
+const bridgeApi = require('./lib/bridge-api');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
 const sessionFinalize = require('./lib/session-finalize');
@@ -4793,6 +4794,28 @@ route('GET', '/api/tc/workload', (req, res) => {
   const lane = session ? _composedLane(session, project ? project.name : null) : null;
   return jsonResponse(res, 200, { ...result.body, ...(lane || {}) });
 });
+
+// The Project Master's structured surface on the operator bridge (ADR 0023
+// Decision 15, #2031). Authorised by the live Master generation's credential
+// and by nothing else; `lib/bridge-api.js` holds the handlers.
+
+/**
+ * Hand a request to a bridge handler and send what it answers.
+ * @param {(request: object) => {status: number, body: object}} handler - A `lib/bridge-api.js` handler.
+ * @returns {Function} A route handler.
+ */
+function _bridgeRoute(handler) {
+  return (req, res, params, body) => {
+    const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
+    const result = handler({ headers: req.headers, params, query, body });
+    return jsonResponse(res, result.status, result.body);
+  };
+}
+
+route('GET', '/api/bridge/master/status', _bridgeRoute(bridgeApi.status));
+route('GET', '/api/bridge/master/routes', _bridgeRoute(bridgeApi.listRoutes));
+route('GET', '/api/bridge/master/routes/:routeId', _bridgeRoute(bridgeApi.readRoute));
+route('POST', '/api/bridge/master/routes/:routeId/close', _bridgeRoute(bridgeApi.closeRoute));
 
 // Governed coordinator context rotation (#2032). A coordinator prepares its
 // own rotation with a structured checkpoint; the server fences its new

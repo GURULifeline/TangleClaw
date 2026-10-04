@@ -74,6 +74,12 @@ async function main() {
   // its bound replacement thread. Forwarded, never typed: no secret rides in
   // argv or in an environment the model manages.
   if (process.env.CODEX_THREAD_ID) headers['x-tangleclaw-engine-thread'] = process.env.CODEX_THREAD_ID;
+  // ADR 0023: the Project Master's bridge credential, forwarded for the one
+  // verb it authorises and no other, so no unrelated request ever carries it.
+  // Read from the pane's environment, never typed and never an argument.
+  if (verb === 'bridge' && process.env.TANGLECLAW_BRIDGE_CREDENTIAL) {
+    headers['x-tangleclaw-bridge-credential'] = process.env.TANGLECLAW_BRIDGE_CREDENTIAL;
+  }
 
   /**
    * Perform one JSON API request; failures throw with the server's own words.
