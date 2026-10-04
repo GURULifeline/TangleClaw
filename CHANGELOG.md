@@ -18,6 +18,7 @@ All notable changes to TangleClaw are documented in this file.
   - **The host gates on it.** `rc-cert host-finalize` now requires `--soak-bundle <dir>` and records the judgement in the finalization (`SOAK_JUDGEMENT_MISSING`, `SOAK_JUDGEMENT_FAILED`, `SOAK_JUDGEMENT_AWAITING_REVIEW`, `SOAK_JUDGEMENT_UNBOUND`).
   - **A soak run lasts its full duration.** `soak run` now waits after the last event until the schedule's horizon before writing `end`, so the log proves the whole 72 hours. A stop and a lost lock are still caught during that wait.
   - **The bundle names its candidate.** `soak bundle` now requires `--candidate-sha <40-hex>`, the SHA the operator pinned, and records it as the manifest's top-level `candidateSha`. Nothing infers it.
+  - **Two commands now need a flag they did not before.** `soak bundle` refuses without `--candidate-sha`, and `rc-cert host-finalize` refuses without `--soak-bundle`. A soak already in progress is bundled with the new flag when it ends. A run finalized before this change keeps its finalization, but that finalization holds no soak judgement, so `rc-cert host-publish` records it as not certified.
   - **v5.30.0 is unchanged.** It is recorded as hand-evaluated and is not re-judged. Its bundle predates both bundle changes above, so the judge applies from the next candidate.
   - **Reference:** `deploy/soak/README.md` ("Judging the bundle"), the bundle runbook's steps 7 and 8, and ADR 0021 point 14. Supersedes #2056.
 
