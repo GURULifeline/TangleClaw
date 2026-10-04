@@ -1011,20 +1011,28 @@ describe('bridge gateway (#2031)', () => {
       const again = bridgeStore.circuit.ack(episode, second, { at: clock });
       assert.deepEqual([again.outcome, again.episode.masterAckedAt, again.episode.masterAckedGeneration], ['acked', clock, second]);
       assert.deepEqual(audited(), [['master', first, episode], ['master', second, episode]]);
+      assert.equal(bridgeStore.circuit.ack(episode, first, { at: clock }).outcome, 'already-acked', 'nor take back the live one\'s');
+      assert.equal(bridgeStore.circuit.open().masterAckedGeneration, second);
       assert.throws(() => store.getDb().prepare('UPDATE bridge_config_circuit SET master_acked_generation = ?').run(first), /fixed once opened/,
         'an acknowledgement is replaced only by a later generation\'s');
       assert.throws(() => store.getDb().prepare("UPDATE bridge_config_circuit SET master_acked_at = '2020-01-01T00:00:00.000Z'").run(), /fixed once opened/);
+      // At once means at once: a third Master, launched the moment the second
+      // acknowledged, is told without waiting out what the second was told.
+      const third = masterLaunched('c');
+      assert.equal((await gateway.tick()).circuitTold, true);
+      assert.equal(aboutCircuit().length, 5);
+      assert.equal(bridgeStore.circuit.ack(episode, third, { at: clock }).outcome, 'acked');
       later(10 * gateway.CIRCUIT_RETELL_MS);
       assert.equal((await gateway.tick()).circuitTold, false);
-      assert.equal(aboutCircuit().length, 4);
+      assert.equal(aboutCircuit().length, 5);
 
       // With no Master live there is nobody whose acknowledgement stands.
       bridgeStore.masterCredentials.revoke('master-not-live', { at: clock });
       assert.equal((await gateway.tick()).circuitTold, true);
-      masterLaunched('c');
+      masterLaunched('d');
 
       // A later episode is a new thing to be told of.
-      bridgeStore.applyCircuitReset({ requestId: 'req-reset-told-0001', decision: 'withdraw', actor: 'master', proof: 'master-launch', masterGeneration: second, at: clock });
+      bridgeStore.applyCircuitReset({ requestId: 'req-reset-told-0001', decision: 'withdraw', actor: 'master', proof: 'master-launch', masterGeneration: third, at: clock });
       const next = chatCloses('second');
       assert.equal((await gateway.tick()).circuitTold, true);
       assert.match(aboutCircuit()[aboutCircuit().length - 1].message, new RegExp(`episode ${next},`));

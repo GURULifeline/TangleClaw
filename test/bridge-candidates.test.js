@@ -215,6 +215,27 @@ describe('bridge candidates (#2031)', () => {
     assert.deepEqual([over.status, over.body.code], [429, 'CANDIDATE_LIMIT']);
   });
 
+  it('takes no more than twelve submissions a minute from one launch, whatever becomes of them', async () => {
+    const api = require('../lib/bridge-api');
+    api._resetRateLimits();
+    try {
+      const session = liveSession();
+      reports(session);
+      // Replays of one request: none of them is a new candidate, and each is still a request.
+      const statuses = [];
+      for (let i = 0; i < 13; i++) statuses.push((await offers(session, { requestId: 'req-rate-0001' })).status);
+      assert.deepEqual(statuses, [201, ...Array(11).fill(200), 429]);
+      const over = await offers(session, { requestId: 'req-rate-0001' });
+      assert.deepEqual([over.status, over.body.code], [429, 'RATE_LIMITED']);
+      // The bound is each launch's own.
+      const other = liveSession();
+      reports(other);
+      assert.equal((await offers(other)).status, 201);
+    } finally {
+      api._resetRateLimits();
+    }
+  });
+
   it('the Master approves once: one item for the helper, in its words or the session\'s, with its generation', async () => {
     const session = liveSession();
     reports(session);

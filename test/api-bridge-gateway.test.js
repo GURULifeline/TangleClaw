@@ -846,7 +846,7 @@ describe('bridge API: the round trip (#2031)', () => {
         let t = Date.now();
         gateway._deps.now = () => new Date(t).toISOString();
         const claimOnce = () => call('POST', '/api/bridge/helper/outbound/claim', { headers: asHelper(), body: {} });
-        for (let i = 0; i < 600; i++) await claimOnce();
+        for (let i = 0; i < 600; i++) assert.equal((await claimOnce()).status, 200, `claim ${i + 1} of the minute's 600`);
         assert.equal((await claimOnce()).status, 429);
 
         // A request over the bound is refused before anything is written for
