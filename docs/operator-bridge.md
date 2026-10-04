@@ -21,7 +21,7 @@ is in [discord-operator-notifications.md](discord-operator-notifications.md).
 | The candidate lane: a session offers, the Master decides | Built |
 | The three typed server notifications | Built |
 | Discord helper (`bin/tc-bridge-helper`) | Built; not yet run against Discord. See [operator-bridge-helper.md](operator-bridge-helper.md) |
-| A dashboard page for the operator's policy | Not built; the routes exist |
+| The operator's dashboard panel (global settings, Operator bridge) | Built; not yet used by a person on a live install |
 | Cutover | Not started; Rule #145 is unchanged and in force |
 
 The bridge is **disabled by default**. Only the operator can enable it, signed in with an
@@ -213,7 +213,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge requeue <item-id>` | Puts a set-aside item back for the helper. |
 | `tc bridge withdraw <item-id>` | Withdraws an item that has not been posted. Final. When the item is a route's answer, the route is closed and its text cleared with it: nothing more is coming for that route. |
 | `tc bridge circuit ack <episode>` | Says the Master has taken up the open configuration episode. The gateway then stops telling it. The episode stays open. |
-| `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. |
+| `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. Withdrawing a route's answer this way closes that route and clears its text, as `withdraw` does. |
 
 `<dest>` is `master`, a project's exact name or a project's id.
 

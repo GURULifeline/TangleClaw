@@ -50,6 +50,7 @@ Do them in order. Each one alone makes things safer, so do not wait on one to st
    > 🚧 **UNVERIFIED** — restoring the store and returning to the previous build have not been
    > rehearsed on this install · confirm the previous build's commit and how it is checked out
    > with the Architect before doing this.
+   The previous build is given the restored store, never the v54 one: it does not know v54.
 
 ## Done when
 

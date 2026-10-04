@@ -309,8 +309,13 @@ describe('store: operator bridge schema (v52 to v54, #2031)', () => {
     store.getDb().exec(bridgeSchema.RETIRED_SCHEMA_OBJECTS[0].madeBy);
     assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb()), ['index idx_bridge_routes_conversation was retired in v54 and is still present']);
     assert.deepEqual(bridgeSchema.bridgeSchemaProblems(store.getDb(), null, 53), [], 'and it was no problem before v54');
+    assert.throws(() => bridgeSchema.verifyBridgeSchema(store.getDb()), /idx_bridge_routes_conversation was retired in v54 and is still present/);
+    // A build from before v54 re-creates it at every boot. If one has run against
+    // this store, the next boot of this build takes it away again and carries on.
     store.close();
-    assert.throws(() => reopen(), /idx_bridge_routes_conversation was retired in v54 and is still present/);
+    reopen();
+    assert.equal(hasConversationIndex(), false);
+    assert.deepEqual([...bridgeObjects()], fresh);
   });
 
   /**

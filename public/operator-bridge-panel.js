@@ -63,7 +63,7 @@
     'revoke-token': () => 'Revoke the helper token? The helper can then neither deliver messages nor collect what to post.',
     'primer-on': () => 'Tell every session of `tc candidate` at its next launch?',
     'circuit-reset': (f) => (f.decision === 'withdraw'
-      ? 'Reset the circuit and WITHDRAW what it set aside? Those items will never be posted.'
+      ? 'Reset the circuit and WITHDRAW what it set aside? Those items will never be posted, and a route whose answer is among them is closed.'
       : 'Reset the circuit and put what it set aside back in the queue to be posted?'),
     requeue: (f) => `Put item ${f.outboundId} back in the queue to be posted?`,
     withdraw: (f) => `Withdraw item ${f.outboundId}? It will never be posted. If it is a route's answer, that route is closed.`
@@ -90,7 +90,9 @@
       /** The last thing an action reported: `{ok, text}`. Never contains the token. */
       notice: null,
       /** Request ids of writes whose answer never arrived, by what they were for. */
-      pending: Object.create(null)
+      pending: Object.create(null),
+      /** Whether the panel has left the screen. Nothing is drawn or kept after that. */
+      gone: false
     };
 
     /**
@@ -160,7 +162,9 @@
       allowlist: (f) => send(ROUTES.allowlist, 'POST', { authorId: f.authorId, spaceId: f.spaceId, channelId: f.channelId }, 'The allowlist is set.'),
       'mint-token': async () => {
         const answer = await send(ROUTES.helperToken, 'POST', {}, 'A helper token was created. Its value is shown below, once.');
-        if (answer && typeof answer.token === 'string') state.token = answer.token;
+        // An answer that arrives after the panel left the screen is not kept:
+        // there is nobody to show it to, and it would sit in a hidden page.
+        if (answer && typeof answer.token === 'string' && !state.gone) state.token = answer.token;
         return answer;
       },
       'revoke-token': () => send(ROUTES.helperToken, 'DELETE', undefined, 'The helper token is revoked.'),
@@ -347,6 +351,7 @@
     function forget() {
       state.token = null;
       state.notice = null;
+      state.gone = true;
     }
 
     return { load, act, html, forget, state };
@@ -377,7 +382,7 @@
         : null,
       ...deps
     });
-    const draw = () => { container.innerHTML = panel.html(); };
+    const draw = () => { if (!panel.state.gone) container.innerHTML = panel.html(); };
     /**
      * What a pressed control carries: its own data, and the allowlist's three inputs.
      * @param {object} target - The pressed element.

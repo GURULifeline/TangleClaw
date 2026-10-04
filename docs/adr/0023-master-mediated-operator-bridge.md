@@ -191,6 +191,15 @@ send prose to Discord.
   - the Architect is out of the routine delivery path and keeps architectural and governance
     oversight;
   - no project session posts to Discord directly.
+- **A rollback edits no rule (Architect ruling, 2026-10-04).** The rule that replaces Rule #145
+  carries its own fallback: while the bridge is rolled back and disabled, and only until it is
+  enabled again, the Architect alone may post milestones and operator-needed notices by the
+  former direct route, with the token read from the Keychain through standard input and every
+  post verified by reading it back. No other session posts and nothing is sent both ways. This
+  is an emergency path, not the delivery design: the alternative rejected below, the Architect
+  as the standing fallback, stays rejected. It exists so that the operator can still be reached
+  without a rule being rewritten in the middle of an incident. Activation confirms the clause
+  is in the replacement text before the rule is replaced.
 - **Rule #128** is flagged as concurrently active though superseded. A future rule change
   reconciles it. Nothing here touches it.
 
@@ -594,3 +603,6 @@ Accepted for this release and not refactored in Phase 5. None changes behaviour.
 - `verifyHelperToken` spells the `bht_` prefix beside `HELPER_TOKEN_PREFIX` instead of using it.
 - The expression that makes a pin id appears twice in `lib/bridge-api.js`.
 - `acknowledgeOutbound` still takes a positional `deliveredRef` that only tests pass.
+- A route is closed in three places: the Master's close, the gateway's close on delivery, and
+  the close that follows a withdrawn answer (`_closeRoutesOfWithdrawnAnswers`). Each writes the
+  same columns; one shared function would say so.

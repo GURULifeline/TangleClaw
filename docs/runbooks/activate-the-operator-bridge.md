@@ -98,7 +98,11 @@ the Architect.
    → `tc bridge status` shows `CONFIGURATION CIRCUIT OPEN`: the bot cannot post there. Fix its
    permissions, then `tc bridge reset --requeue`.
 
-10. **Operator:** replace Rule #145 with the replacement text the Architect has approved. Then,
+10. Read the replacement text for Rule #145 that the Architect has approved.
+    → Expected: it has the clause that lets the Architect alone post by the direct route while
+    the bridge is rolled back. If it does not, stop: after this step a rollback would leave
+    nobody allowed to reach the Operator.
+    **Operator:** replace Rule #145 with that text. Then,
     under "Telling sessions of tc candidate", press **Switch it on** and confirm.
     → Expected: that line says `on`.
 

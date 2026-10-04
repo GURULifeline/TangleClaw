@@ -1,7 +1,8 @@
 # Discord operator notifications
 
-Status: **interim procedure in force.** The permanent transport's architecture is accepted and
-nothing of it is built. Accepting the architecture did not activate cutover.
+Status: **interim procedure in force.** The permanent transport is built and is disabled: it has
+not been run against Discord and cutover has not happened. See
+[operator-bridge.md](operator-bridge.md) for what is built.
 
 There are two ways an operational message reaches the operator's Discord. They are sequential,
 not parallel: the first is retired when the second goes live.

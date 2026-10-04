@@ -304,7 +304,7 @@ describe('the Operator Bridge panel (#2031)', () => {
         ['mint-token', {}, /stops working at once/],
         ['revoke-token', {}, /^Revoke the helper token\?/],
         ['primer-on', {}, /^Tell every session of `tc candidate`/],
-        ['circuit-reset', { episodeId: 1, decision: 'withdraw' }, /WITHDRAW what it set aside\? Those items will never be posted\./],
+        ['circuit-reset', { episodeId: 1, decision: 'withdraw' }, /WITHDRAW what it set aside\? Those items will never be posted, and a route whose answer is among them is closed\./],
         ['circuit-reset', { episodeId: 1, decision: 'requeue' }, /put what it set aside back in the queue/],
         ['requeue', { outboundId: item }, new RegExp(`^Put item ${item} back`)],
         ['withdraw', { outboundId: item }, new RegExp(`^Withdraw item ${item}\\? It will never be posted\\. If it is a route's answer, that route is closed\\.`)]
@@ -593,6 +593,10 @@ describe('the Operator Bridge panel (#2031)', () => {
       sandbox.tcForgetOperatorBridge(container);
       assert.deepEqual([container.innerHTML, panel.state.token, panel.state.notice], ['', null, null]);
       sandbox.tcForgetOperatorBridge(null);
+      // An answer that comes back after that is not kept and not drawn: a token
+      // created by a press made just before closing never reaches a hidden page.
+      await press({ bridgeAction: 'mint-token' });
+      assert.deepEqual([container.innerHTML, panel.state.token], ['', null]);
 
       // Mounting again binds nothing twice; no container, no panel.
       let bound = 0;

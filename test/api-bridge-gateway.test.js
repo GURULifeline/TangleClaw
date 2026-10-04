@@ -361,6 +361,11 @@ describe('bridge API: the round trip (#2031)', () => {
     // By the Master, with its command.
     const one = await answered('An answer the Master thinks better of.');
     assert.ok(bridgeStore.routes.body(one.routeId, 'answer').text, 'precondition: the answer\'s text is held');
+    // A notice about the same route is waiting too. It must not post for a route that is closed.
+    assert.equal(bridgeStore.outbound.enqueueStatus(one.routeId, 'pending').created, true);
+    const waitingNotices = () => store.getDb().prepare("SELECT state, drop_code FROM bridge_outbound WHERE route_id = ? AND kind <> 'reply'").all(one.routeId).map((r) => [r.state, r.drop_code]);
+    const queued = waitingNotices().filter(([state]) => state === 'ready').length;
+    assert.ok(queued >= 1, 'precondition: something besides the answer is queued for the route');
     const gone = await tc(['bridge', 'withdraw', String(one.itemId)]);
     assert.equal(gone.code, 0, gone.stderr);
     const route = bridgeStore.routes.get(one.routeId);
@@ -370,6 +375,9 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.ok(!body || body.text === null, `${role} text is cleared`);
     }
     assert.deepEqual(closures(one.routeId).map((a) => [a.actor, a.outcome, a.detail.outboundId, a.masterGeneration]), [['master', 'applied', one.itemId, masterGeneration]]);
+    assert.deepEqual(waitingNotices().filter(([state]) => state === 'ready'), [], 'what else was queued for the route went with it');
+    assert.ok(waitingNotices().some(([state, why]) => state === 'dropped' && why === 'withdrawn'));
+    assert.equal(closures(one.routeId)[0].detail.withdrawn, queued);
     assert.deepEqual([bridgeStore.outbound.get(one.itemId).state, bridgeStore.outbound.get(one.itemId).dropCode], ['dropped', 'withdrawn']);
     // The Master cannot answer it again: the operator writes again to be answered.
     const late = await masterWrites(one.routeId, 'answer', { expectedVersion: route.version, text: 'second thoughts' });
