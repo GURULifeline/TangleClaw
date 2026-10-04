@@ -31,6 +31,12 @@ All notable changes to TangleClaw are documented in this file.
   - A reason code with no declared class is shown as `configuration`, to be investigated, and logged once. A row is `historical` only when its session is positively not live.
   - Neither surface tells anyone to wait for a wake monitor that is not running. With it stopped, a held wake that would have been `actionable` is `configuration`, to be investigated.
   - Nothing is removed or expired. Old rows are classified, not deleted.
+- **A Medusa message nobody can act on no longer waits silently, and every escalation notice says whether waiting will help** (#2086). Normal-priority mail used to stop at one notice to its sender after 30 minutes. If the recipient had never opted in to wake-on-mail, the one person who could fix that, the operator, was never told.
+  - Every escalation notice now carries the class and next action of what is holding the message: a busy recipient will be retried, a recipient that never opted in needs someone to act. With the wake monitor stopped, no notice promises a retry.
+  - Normal mail reaches the operator once: at 30 minutes when nothing changes until someone acts, or when the engine's own channel has stalled; and at 60 minutes when the recipient is merely busy. The new `operatorNormalMs` setting moves that last threshold, from 5 minutes to 48 hours, and it is never sooner than the aged step.
+  - The operator alert is exactly one dashboard entry and one activity row, however many passes follow and across a restart. Before this, each later pass over an alerted message could write another activity row.
+  - The alert records what was true when it was raised and is not repeated or rewritten if the hold changes later. It sends no message and costs no agent turn.
+  - Blocking and critical mail keep their thresholds. Mail to a workspace this host cannot supervise is still not escalated from here.
 
 ### Fixed
 

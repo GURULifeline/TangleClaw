@@ -269,7 +269,7 @@ server time, before its notices go out:
 |---|---|---|---|
 | **Aged**: the sender is told | 30 min | 5 min | at once |
 | **Escalated**: the route is told | — | 15 min | at once |
-| **Operator**: dashboard and activity log | — | 60 min | 5 min |
+| **Operator**: dashboard and activity log | 60 min, or at 30 min for a reason below | 60 min | 5 min |
 
 - **Timing.** Unread is measured from the send. Acknowledged but unanswered
   (reply required) is measured from the ack. For blocking mail nothing
@@ -301,6 +301,35 @@ server time, before its notices go out:
   as `medusaEscalations`. `GET /api/medusa/escalations` lists every escalated
   exchange with names, age and blocker. Each operator alert also writes an
   activity row, `medusa-escalation`.
+- **A notice says whether waiting will fix it (#2086).** Every notice carries
+  `class`, `nextAction` and `nextActionMeaning` from the classifier under
+  "What a held wake means": a busy recipient is `actionable`, one that never
+  opted in is `configuration`, and a message that was nudged and not yet read
+  is `none`. With the wake monitor stopped, no notice promises a retry.
+- **Normal mail reaches the operator once.** It never reaches the escalation
+  route, and the sender is told once, at the aged step. It used to stop
+  there, which left the cases only an operator can resolve silent for ever.
+  After the aged step, each pass asks why the operator should be told, until
+  it has been:
+  - `configuration-hold`: nothing changes until someone acts. Told at the
+    aged step.
+  - `engine-thread-unknown-stalled`: the engine's own channel has not said
+    the session is idle for the whole aged window. Told at the aged step. The
+    monitor still retries, and the class stays `actionable`.
+  - `prolonged-actionable`, `prolonged-unread`: the recipient is merely busy,
+    or was nudged and has not read. Told at `operatorNormalMs`, and never
+    sooner than the aged step.
+- **The operator alert is one fact and one activity row.** The
+  `operator_alerted` fact is recorded once, and the activity row is written in
+  the same transaction, only by the pass that recorded it. Repeated passes, a
+  restart and competing passes add neither. A row that cannot be written
+  leaves no fact, and the next pass records both. The fact keeps the blocker,
+  its class and next action, and why the operator was told, as they were
+  then. A later change of class neither repeats the alert nor rewrites it.
+- **An operator alert is not a message.** It wakes nobody and costs no turn.
+- **Untracked mail is not on the ladder.** A message to a workspace no live
+  session on this host holds cannot be supervised from here. Its own host
+  owns that.
 - **Retracted and closed exchanges never escalate.**
 
 ## Undeliverable and retired recipients
@@ -330,6 +359,7 @@ never used.
 | `agedNormalMs`, `agedBlockingMs` | 30 min, 5 min | The aged step |
 | `escalateBlockingMs` | 15 min | The escalated step for blocking |
 | `operatorBlockingMs`, `operatorCriticalMs` | 60 min, 5 min | The operator step |
+| `operatorNormalMs` | 60 min | When normal mail that is merely waiting reaches the operator. From 5 minutes to 48 hours. Never sooner than `agedNormalMs` |
 | `replyBlockingMs`, `replyCriticalMs` | 30 min, 15 min | Acknowledged-but-unanswered thresholds |
 
 ## Limits
