@@ -289,8 +289,14 @@ message that then fails is reported exactly once: a stop at any moment cannot le
 changed with the operator untold, and no pass, retry or restart makes a second notice. The
 notice is a reply to the operator's own message, a fixed sentence the server wrote, and carries
 nothing of the message, the session or any credential. A send that has not ended reports
-nothing. This covers what the Hub did with a message. The notice for a consented launch that
-failed is written after the launch's own records, not with them.
+nothing.
+
+**A consented launch that fails is reported the same way.** Ending the launch, putting its
+closed failure code on the held message, and queuing the operator's notice are one transaction:
+all three or none. If it does not land, the launch is still unsettled, and the next pass comes
+back to it and does all three. So the operator who agreed to a launch is always told when it
+did not end in their message being sent on, once, in a fixed sentence that names a closed code
+and nothing else. The message stays held for the Master; nothing is decided by the notice.
 - **The Master is not running:** the gateway starts it, at most once per backoff window (15
   seconds, doubling to 10 minutes). If it cannot, the route is queued. Nothing falls back to
   the Architect.
