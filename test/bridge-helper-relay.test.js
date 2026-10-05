@@ -39,7 +39,7 @@ const IDS = { authorId: '100000000000000001', guildId: '200000000000000002', cha
 const BOT_ID = '900000000000000009';
 const BOT_TOKEN = `${'B'.repeat(24)}.${'c'.repeat(6)}.${'d'.repeat(27)}`;
 /** A signed-in operator, as `server.js` annotates the request. */
-const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {} };
+const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {}, socket: { remoteAddress: '127.0.0.1' } };
 
 let tmpDir;
 let server;

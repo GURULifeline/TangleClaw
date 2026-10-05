@@ -28,6 +28,7 @@ const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
 
 let tmpDir;
 let clock;
+let realNotifyNow;
 let hub;
 let masterState;
 let realDeps;
@@ -116,6 +117,11 @@ describe('bridge gateway (#2031)', () => {
     store._setBasePath(tmpDir);
     store.init();
     clock = '2026-10-04T00:00:00.000Z';
+    // The notifier judges "how long ago" by its own clock. Left on the real one it measured this
+    // file's fixed 2026-10-04 timeline against today, and every notification test here began to
+    // fail a day after that date. It gets the test's clock, like everything else in this file.
+    realNotifyNow = bridgeNotify._deps.now;
+    bridgeNotify._deps.now = () => clock;
     hub = install();
     masterState = { live: true, ensures: 0, ensureError: null, listening: true };
     realDeps = { ...gateway._deps };
@@ -147,6 +153,7 @@ describe('bridge gateway (#2031)', () => {
 
   afterEach(() => {
     Object.assign(gateway._deps, realDeps);
+    bridgeNotify._deps.now = realNotifyNow;
     exchanges._internal.now = realExchangeNow;
     hub.restore();
     store.close();
@@ -525,6 +532,103 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual(audit.filter((x) => x.outcome === 'applied').map((x) => x.op), ['resolve', 'dispatch']);
       assert.equal(waitingForHelper().length, 0, 'no failure notice for a send that worked');
       assert.ok(alpha.sessionId);
+    });
+
+    it('never adopts an exchange it did not send, even one sitting under the route\'s own request id', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      // A message a project session really sent, to the route's own destination,
+      // moved under the request id the gateway is about to use for this route.
+      const planted = await hub.sessionSends(beta, { to: alpha.workspaceId, text: 'planted', deliver: false });
+      assert.equal(planted.status, 200);
+      const db = store.getDb();
+      const before = db.prepare("SELECT exchange_id, hub_id FROM medusa_exchanges WHERE hub_id = ?").get(planted.body.id);
+      db.prepare('UPDATE medusa_exchanges SET request_id = ? WHERE exchange_id = ?').run('bridge:rt_planted:send1', before.exchange_id);
+      const sentBefore = hub.fromGateway().length;
+
+      bridgeStore.routes.accept({ routeId: 'rt_planted', externalId: 'm-planted', ...ALLOWED, text: '@alpha is this yours?', digest: bridgeStore.digest('@alpha is this yours?'), at: clock });
+      const route = await gateway.advance('rt_planted');
+
+      assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], 'back to the Master, not resting on somebody else\'s message');
+      assert.equal(bridgeStore.proofs.latestToTarget('rt_planted'), null, 'no proof was taken from it');
+      assert.equal(hub.fromGateway().length, sentBefore, 'and nothing was sent under an id already taken');
+      const after = db.prepare('SELECT state, terminal_at FROM medusa_exchanges WHERE exchange_id = ?').get(before.exchange_id);
+      assert.equal(after.terminal_at, null, 'the other exchange is not the gateway\'s to close');
+      // The session's "reply" to its own planted message is not an answer to the operator.
+      await hub.sessionSends(alpha, { inReplyTo: planted.body.id, text: 'forged answer' });
+      assert.equal(gateway.drainInbox().held, 0, 'nothing is held for release on that route');
+      // Routed again, the attempt has a new id and goes out as the gateway's own.
+      later(1000);
+      const rerouted = bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-planted-1', routeId: 'rt_planted', expectedVersion: bridgeStore.routes.get('rt_planted').version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      assert.equal(rerouted.outcome, 'applied');
+      const again = await gateway.advance('rt_planted');
+      assert.equal(again.state, 'routed');
+      const own = db.prepare("SELECT request_id, sender_session_id FROM medusa_exchanges WHERE hub_id = ?").get(bridgeStore.proofs.latestToTarget('rt_planted').hubId);
+      assert.deepEqual([own.request_id, own.sender_session_id], ['bridge:rt_planted:send2', gateway.GATEWAY_KEY]);
+    });
+
+    it('what counts as its own send is exact: not another component\'s, not a session\'s under its key, not one that appears while it sends', async () => {
+      const exchanges = require('../lib/medusa-exchanges');
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      const db = store.getDb();
+      const moveUnder = (exchangeId, requestId) => db.prepare('UPDATE medusa_exchanges SET request_id = ? WHERE exchange_id = ?').run(requestId, exchangeId);
+      const accept = (routeId) => bridgeStore.routes.accept({ routeId, externalId: `m-${routeId}`, ...ALLOWED, text: '@alpha yours?', digest: bridgeStore.digest('@alpha yours?'), at: clock });
+      const collided = async (routeId, why) => {
+        const before = hub.fromGateway().length;
+        const route = await gateway.advance(routeId);
+        assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], why);
+        assert.equal(bridgeStore.proofs.latestToTarget(routeId), null, `${why}: no proof`);
+        assert.equal(hub.fromGateway().length, before, `${why}: nothing sent`);
+      };
+
+      // TangleClaw itself sent it, but another component did: verified system provenance is not ownership.
+      const stray = exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: alpha.workspaceId, message: 'x', requestId: 'another-component-0001' }, { kind: 'system' }, null, {}),
+        sender: { projectId: null, sessionId: 'another-component', workspaceId: null },
+        recipient: { workspaceId: alpha.workspaceId, projectId: alpha.project.id, sessionId: alpha.sessionId }, tracking: 'tracked'
+      });
+      assert.equal(exchanges.isSystemOrigin(stray), true, 'precondition: it is a system send');
+      exchanges.bindHubId(stray.exchange_id, 'hub-stray-1', { hubStatus: 'received', deliveredTo: alpha.workspaceId });
+      moveUnder(stray.exchange_id, 'bridge:rt_stray:send1');
+      accept('rt_stray');
+      await collided('rt_stray', 'another component\'s send');
+
+      // A session's send carrying the gateway's listener key as its sender: the key alone is not ownership either.
+      const dressed = exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: alpha.workspaceId, message: 'x', requestId: 'dressed-as-gateway-0001' }, { kind: 'project', projectId: beta.project.id, launchId: beta.launchId }, beta.project.id, {}),
+        sender: { projectId: beta.project.id, sessionId: gateway.GATEWAY_KEY, workspaceId: beta.workspaceId },
+        recipient: { workspaceId: alpha.workspaceId, projectId: alpha.project.id, sessionId: alpha.sessionId }, tracking: 'tracked'
+      });
+      exchanges.bindHubId(dressed.exchange_id, 'hub-dressed-1', { hubStatus: 'received', deliveredTo: alpha.workspaceId });
+      moveUnder(dressed.exchange_id, 'bridge:rt_dressed2:send1');
+      accept('rt_dressed2');
+      await collided('rt_dressed2', 'a session\'s send under the gateway\'s key');
+
+      // Nothing is there when the gateway looks, and somebody else's exchange is there once its own send has failed.
+      const realSend = gateway._deps.medusaSend;
+      let sends = 0;
+      gateway._deps.medusaSend = () => ({
+        sendTracked: async () => {
+          sends += 1;
+          const planted = await hub.sessionSends(beta, { to: alpha.workspaceId, text: 'planted during the send', deliver: false });
+          moveUnder(db.prepare('SELECT exchange_id FROM medusa_exchanges WHERE hub_id = ?').get(planted.body.id).exchange_id, 'bridge:rt_race2:send1');
+          return { status: 409, body: { code: 'SEND_ALREADY_ATTEMPTED' } };
+        }
+      });
+      try {
+        accept('rt_race2');
+        const route = await gateway.advance('rt_race2');
+        assert.equal(sends, 1);
+        assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], 'found after the send, and still not adopted');
+        assert.equal(bridgeStore.proofs.latestToTarget('rt_race2'), null);
+      } finally {
+        gateway._deps.medusaSend = realSend;
+      }
     });
 
     it('adopts a send that completed before the server stopped, and does not send it again', async () => {
@@ -1567,12 +1671,18 @@ describe('bridge gateway (#2031)', () => {
       assert.deepEqual([exchanges.isSystemOrigin(theirsRow), exchanges.systemOwnerOf(theirsRow)], [false, null], 'a verified session is not the system');
       // A session's send dressed as the gateway's, with the gateway's key and a
       // gateway-shaped request id: it has a project and a launch's proof, so it is still the session's.
-      const dressed = exchanges.createSendIntent({
-        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId: 'bridge:rt_dressed:send1' },
+      // It cannot be made at all: the gateway's request id prefix is the gateway's.
+      const dress = (requestId) => exchanges.createSendIntent({
+        meta: exchanges.validateSendMeta({ to: beta.workspaceId, message: 'x', requestId },
           { kind: 'project', projectId: alpha.project.id, launchId: alpha.launchId }, alpha.project.id, {}),
         sender: { projectId: alpha.project.id, sessionId: gateway.GATEWAY_KEY, workspaceId: alpha.workspaceId },
         recipient: { workspaceId: beta.workspaceId, projectId: beta.project.id, sessionId: beta.sessionId }, tracking: 'tracked'
       });
+      assert.throws(() => dress('bridge:rt_dressed:send1'), (err) => err.code === 'REQUEST_ID_RESERVED');
+      // And a row that carried one anyway, from before the prefix was kept, is still the session's.
+      const made = dress('dressed-under-another-id-1');
+      store.getDb().prepare('UPDATE medusa_exchanges SET request_id = ? WHERE exchange_id = ?').run('bridge:rt_dressed:send1', made.exchange_id);
+      const dressed = store.medusaExchanges.get(made.exchange_id);
       assert.deepEqual([dressed.sender_verified ? 1 : 0, exchanges.isSystemOrigin(dressed), exchanges.systemOwnerOf(dressed)], [1, false, null]);
       refused(dressed.exchange_id, OWNER, 'NOT_SYSTEM_OWNER');
       // A system send that is not the gateway's is nobody's to close this way, and is watched like any other.

@@ -27,7 +27,7 @@
  */
 
 const path = require('node:path');
-const { VERB_ROSTER, renderUsage, receiptVerbLabel, renderBodyTooLarge, renderControlBanner } = require(path.join(__dirname, '..', 'lib', 'tc-verbs.js'));
+const { VERB_ROSTER, renderUsage, receiptVerbLabel, renderBodyTooLarge, renderControlBanner, bridgeCredentialHeader } = require(path.join(__dirname, '..', 'lib', 'tc-verbs.js'));
 
 async function main() {
   const verb = process.argv[2];
@@ -106,9 +106,9 @@ async function main() {
       const { 'x-tangleclaw-verb': _dropped, ...rest } = headers;
       reqHeaders = { ...rest, 'x-tangleclaw-aux': '1' };
     }
-    if (bridgeCredential && apiPath.startsWith('/api/bridge/')) {
-      reqHeaders = { ...reqHeaders, 'x-tangleclaw-bridge-credential': bridgeCredential };
-    }
+    // Throws, before anything is sent, for a bridge path that would not be
+    // sent as written: the credential is never attached to such a request.
+    reqHeaders = { ...reqHeaders, ...bridgeCredentialHeader(apiPath, bridgeCredential) };
     let res;
     try {
       res = await fetch(url, {

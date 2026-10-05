@@ -19,6 +19,7 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const handoff = require('../lib/bridge-handoff');
+const { pinMasterLiveness } = require('./_master-liveness');
 
 const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
 const HEADER = 'x-tangleclaw-bridge-credential';
@@ -29,6 +30,7 @@ let server;
 let origin;
 let credential;
 let generation;
+let liveness;
 
 /**
  * Make `credential` the live Master generation's, as a completed handoff would.
@@ -96,15 +98,19 @@ describe('bridge API: the Master surface (#2031)', () => {
     server = createServer();
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     origin = `http://127.0.0.1:${server.address().port}`;
+    // tmux's answer about the Master is the test's to give, never the machine's: see _master-liveness.js.
+    liveness = pinMasterLiveness();
   });
 
   after(async () => {
+    liveness.restore();
     await new Promise((resolve) => server.close(resolve));
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
+    liveness.set({ live: true, answered: true, cause: null });
     issueLiveCredential();
     bridgeStore.settings.set('enabled', 'true');
   });
@@ -128,6 +134,27 @@ describe('bridge API: the Master surface (#2031)', () => {
     }
     assert.equal(bridgeStore.routes.get(routeId).state, 'accepted', 'a refused close changed nothing');
     assert.deepEqual(bridgeStore.audit.forRoute(routeId), []);
+  });
+
+  it('the credential lasts exactly as long as tmux says there is a Master: gone revokes it, no answer changes nothing', async () => {
+    // tmux did not answer: that is not the Master being gone, and a valid credential is still served.
+    liveness.set({ live: false, answered: false, cause: 'read-timed-out' });
+    const unanswered = await call('GET', '/api/bridge/master/status');
+    assert.deepEqual([unanswered.status, unanswered.body.masterGeneration], [200, generation]);
+    assert.ok(bridgeStore.masterCredentials.live(), 'still the live credential');
+    // tmux answered that there is no Master: refused, and revoked on the spot.
+    liveness.set({ live: false, answered: true, cause: null });
+    const gone = await call('GET', '/api/bridge/master/status');
+    assert.deepEqual([gone.status, gone.body.code], [401, 'BRIDGE_CREDENTIAL_REQUIRED']);
+    assert.equal(bridgeStore.masterCredentials.live(), null, 'revoked');
+    // A Master seen again does not get the revoked credential back.
+    liveness.set({ live: true, answered: true, cause: null });
+    assert.equal((await call('GET', '/api/bridge/master/status')).status, 401);
+    // And without a valid credential, tmux is not asked at all: nothing is revoked by a stranger's request.
+    issueLiveCredential();
+    liveness.set({ live: false, answered: true, cause: null });
+    assert.equal((await call('GET', '/api/bridge/master/status', { as: 'not-the-credential' })).status, 401);
+    assert.ok(bridgeStore.masterCredentials.live(), 'a request that carried no valid credential revoked nothing');
   });
 
   it('a launch id and the master role do not stand in for the credential', async () => {

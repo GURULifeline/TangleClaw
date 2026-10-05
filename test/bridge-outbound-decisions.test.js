@@ -226,6 +226,84 @@ describe('bridge: what the helper may write about an item, and what becomes of o
     });
   });
 
+  describe('what counts as delivered', () => {
+    const db = () => store.getDb();
+    const ack = (item) => ({ leaseId: item.leaseId, tokenId: helper.tokenId, at: gateway._deps.now() });
+    const leaseState = (item) => db().prepare('SELECT state FROM bridge_outbound_leases WHERE lease_id = ?').get(item.leaseId).state;
+    const row = (id) => db().prepare('SELECT state, delivered_ref, delivered_at, drop_code, block_code, text FROM bridge_outbound WHERE outbound_id = ?').get(id);
+    const deliveredAudits = () => db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op IN ('delivered', 'helper-ack')").get().n;
+
+    it('an item that is not there to be delivered is never reported delivered, and nothing is recorded as if it were', () => {
+      // Each of these still has a live lease, so the acknowledgement itself is in order: only the item is wrong.
+      const CASES = [
+        ['withdrawn', "UPDATE bridge_outbound SET state = 'dropped', drop_code = 'withdrawn', text = NULL WHERE outbound_id = ?"],
+        ['set aside', "UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?"],
+        ['delivered already, under another message', "UPDATE bridge_outbound SET state = 'delivered', delivered_ref = 'd999', delivered_at = '2026-01-01T00:00:00.000Z', text = NULL WHERE outbound_id = ?"]
+      ];
+      let n = 0;
+      for (const [why, sql] of CASES) {
+        n += 1;
+        const id = waiting(`gone-${n}`);
+        const [item] = claim();
+        db().prepare(sql).run(id);
+        const before = JSON.stringify(row(id));
+        const audits = deliveredAudits();
+        assert.equal(bridgeStore.outbound.ackVerdict(id, [`d${n}00`], ack(item)), 'deliverable', `${why}: precondition, the lease and the message ids are in order`);
+
+        const marked = bridgeStore.transaction(() => bridgeStore.outbound.markDelivered(id, [`d${n}00`], ack(item)));
+        assert.equal(marked.outcome, 'item-not-ready', why);
+        assert.equal(JSON.stringify(row(id)), before, `${why}: the item is as it was`);
+        assert.deepEqual(bridgeStore.parts.forItem(id), [], `${why}: no posted message was recorded for it`);
+        assert.equal(leaseState(item), 'live', `${why}: the lease was not settled as used`);
+
+        const answered = seal(item, [`d${n}00`]);
+        assert.deepEqual([answered.status, answered.body.code], [409, 'ACK_NOT_APPLIED'], `${why}: and the helper is not told it was delivered`);
+        assert.ok(!JSON.stringify(answered.body).includes('"state":"delivered"'));
+        assert.equal(JSON.stringify(row(id)), before);
+        assert.equal(deliveredAudits(), audits, `${why}: nothing audited as a delivery`);
+      }
+    });
+
+    it('no row moving is a delivery only when the item is already exactly that delivery', () => {
+      const mark = (id, item, ids) => bridgeStore.transaction(() => bridgeStore.outbound.markDelivered(id, ids, ack(item)));
+      const setDelivered = (id, ref) => db().prepare("UPDATE bridge_outbound SET state = 'delivered', delivered_ref = ?, delivered_at = '2026-01-01T00:00:00.000Z', text = NULL WHERE outbound_id = ?").run(ref, id);
+
+      // Both messages on record, the item already delivered under the first of them, and the lease still open:
+      // the one state in which no row moves and the answer is still "delivered".
+      const id = waiting('twice');
+      const [item] = claim();
+      assert.equal(part(item, 0, 2, 'd500').status, 200);
+      assert.equal(part(item, 1, 2, 'd501').status, 200);
+      setDelivered(id, 'd500');
+      const sealed = JSON.stringify(row(id));
+      assert.equal(mark(id, item, ['d500', 'd501']).outcome, 'delivered', 'the identical delivery, again');
+      assert.equal(JSON.stringify(row(id)), sealed, 'and nothing about the item moved, its delivery time included');
+      assert.equal(leaseState(item), 'live', 'nor was anything else written');
+      // The same state and the same messages, but delivered under another first message: not this delivery.
+      setDelivered(id, 'd777');
+      assert.equal(mark(id, item, ['d500', 'd501']).outcome, 'item-not-ready');
+      // Clearly delivered, with the right reference, but the list on record is not the list named.
+      const short = waiting('short');
+      const [shortItem] = claim();
+      assert.equal(part(shortItem, 0, 2, 'd600').status, 200);
+      setDelivered(short, 'd600');
+      assert.equal(bridgeStore.outbound.ackVerdict(short, ['d600', 'd601'], ack(shortItem)), 'deliverable', 'precondition: nothing about the acknowledgement itself is wrong');
+      assert.equal(mark(short, shortItem, ['d600', 'd601']).outcome, 'item-not-ready', 'one message is on record, two are named');
+      assert.deepEqual(bridgeStore.parts.forItem(short), ['d600'], 'and the other was not quietly added to a delivery already sealed');
+      assert.deepEqual([seal(shortItem, ['d600', 'd601']).status, seal(shortItem, ['d600', 'd601']).body.code], [409, 'ACK_NOT_APPLIED']);
+      // An item that does not exist at all.
+      assert.notEqual(mark(987654, item, ['d900']).outcome, 'delivered');
+    });
+
+    it('the ordinary delivery still moves exactly one row, records its messages and settles its lease', () => {
+      const id = waiting('once');
+      const [item] = claim();
+      const marked = bridgeStore.transaction(() => bridgeStore.outbound.markDelivered(id, ['d800', 'd801'], ack(item)));
+      assert.deepEqual([marked.outcome, marked.item.state], ['delivered', 'delivered']);
+      assert.deepEqual([row(id).delivered_ref, row(id).text, bridgeStore.parts.forItem(id), leaseState(item)], ['d800', null, ['d800', 'd801'], 'used']);
+    });
+  });
+
   describe('the lease window', () => {
     it('is judged by the lease\'s own expiry, whether or not anything has yet marked the lease lapsed', () => {
       const id = waiting('a');
@@ -582,6 +660,116 @@ describe('bridge: what the helper may write about an item, and what becomes of o
       const audit = store.getDb().prepare("SELECT actor, proof, master_generation, outcome FROM bridge_audit WHERE op = 'outbound-withdraw' AND outcome = 'applied' ORDER BY audit_seq").all();
       assert.deepEqual(audit.map((r) => [r.actor, r.proof, r.master_generation]), [['master', 'master-launch', 1], ['operator', 'verified-session', null]]);
       assert.equal(decide('outbound-withdraw', 9999).outcome, 'outbound-not-found');
+    });
+
+    describe('a withdrawal that would take a route with it', () => {
+      /**
+       * A released route with its unposted answer and one waiting notice about it.
+       * @param {string} n - Distinguishes it.
+       * @returns {{routeId: string, answer: number, notice: number}}
+       */
+      const releasedRoute = (n) => {
+        const routeId = `rt_cascade_${n}`;
+        bridgeStore.routes.accept({ routeId, externalId: `ext-${n}`, authorId: 'author', spaceId: 'space', channelId: 'channel', text: 'q', digest: bridgeStore.digest('q'), at: T0 });
+        const released = bridgeStore.applyRouteWrite({
+          op: 'answer', requestId: `req-answer-${n}-0000`, routeId, expectedVersion: bridgeStore.routes.get(routeId).version, actor: 'master', proof: 'master-launch', masterGeneration: 1, at: T0,
+          change: () => ({
+            set: { state: 'released' }, body: { role: 'answer', text: 'the answer', digest: bridgeStore.digest('the answer') },
+            outbound: { idemKey: `route:${routeId}:answer`, kind: 'reply', sourceLabel: 'Project Master', text: 'the answer', digest: bridgeStore.digest('the answer'), releasedGeneration: 1 }
+          })
+        });
+        assert.equal(released.outcome, 'applied');
+        assert.equal(bridgeStore.outbound.enqueueStatus(routeId, 'pending', { at: T0 }).created, true);
+        const ids = store.getDb().prepare('SELECT outbound_id, kind FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(routeId);
+        return { routeId, answer: ids.find((r) => r.kind === 'reply').outbound_id, notice: ids.find((r) => r.kind !== 'reply').outbound_id };
+      };
+      const everything = (r) => JSON.stringify([
+        bridgeStore.routes.get(r.routeId), bridgeStore.routes.body(r.routeId, 'answer'),
+        store.getDb().prepare('SELECT outbound_id, state, drop_code, block_code, text FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(r.routeId),
+        store.getDb().prepare("SELECT outbound_id, state FROM bridge_outbound_leases ORDER BY lease_id").all()
+      ]);
+      const close = (r) => bridgeStore.applyRouteWrite({
+        op: 'close', requestId: `req-close-${++seq}-0000`, routeId: r.routeId, expectedVersion: bridgeStore.routes.get(r.routeId).version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1, at: gateway._deps.now(),
+        change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: gateway._deps.now() }, withdraw: true, clearBodies: true })
+      });
+      /** The helper takes exactly one item, by leaving only it ready for the pass. */
+      const claimOnly = (id, r) => {
+        const others = [r.answer, r.notice].filter((x) => x !== id);
+        const db = store.getDb();
+        for (const o of others) db.prepare("UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?").run(o);
+        const got = claim();
+        for (const o of others) db.prepare("UPDATE bridge_outbound SET state = 'ready', block_code = NULL WHERE outbound_id = ?").run(o);
+        assert.deepEqual(got.map((i) => i.outboundId), [id]);
+        return got[0];
+      };
+
+      it('closing a route is refused while the helper holds any item of it, whatever the caller checked, and nothing changes', () => {
+        const r = releasedRoute('close');
+        claimOnly(r.notice, r);
+        const before = everything(r);
+        // The store itself refuses: this write did not ask first, as the route's own handler does.
+        const refused = close(r);
+        assert.deepEqual([refused.outcome, refused.route.state], ['outbound-in-flight', 'released']);
+        assert.equal(everything(r), before, 'the route, its text, every item and every lease are as they were');
+        assert.equal(bridgeStore.audit.forRoute(r.routeId).filter((a) => a.op === 'close').map((a) => a.outcome).join(), 'outbound-in-flight');
+        // The token is revoked: every lease it held ends, and the close goes through.
+        bridgeStore.helperTokens.revoke({ at: gateway._deps.now() });
+        const closed = close(r);
+        assert.deepEqual([closed.outcome, closed.route.state], ['applied', 'closed']);
+        assert.deepEqual([r.answer, r.notice].map((id) => [bridgeStore.outbound.get(id).state, bridgeStore.outbound.get(id).dropCode]), [['dropped', 'withdrawn'], ['dropped', 'withdrawn']]);
+      });
+
+      it('and after the lease has genuinely run out, with nothing posted', () => {
+        const r = releasedRoute('expiry');
+        claimOnly(r.answer, r);
+        assert.equal(close(r).outcome, 'outbound-in-flight');
+        clockAt(LEASE);
+        assert.equal(close(r).outcome, 'outbound-in-flight', 'at exactly the end of the window it is still the helper\'s');
+        clockAt(LEASE + 1);
+        assert.equal(close(r).outcome, 'applied');
+      });
+
+      it('withdrawing a route\'s answer is refused while the helper holds another item of that route', () => {
+        const r = releasedRoute('answer');
+        const held = claimOnly(r.notice, r);
+        const before = everything(r);
+        for (const actor of ['master', 'operator']) {
+          const refused = decide('outbound-withdraw', r.answer, { actor });
+          assert.deepEqual([refused.outcome, refused.item.state], ['outbound-in-flight', 'ready'], actor);
+        }
+        assert.equal(everything(r), before, 'the answer is still to be posted, the route still released, the notice still the helper\'s');
+        const audited = store.getDb().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'outbound-withdraw' ORDER BY audit_seq").all();
+        assert.deepEqual(audited.map((a) => [a.outcome, JSON.parse(a.detail_json).routeId]), [['outbound-in-flight', r.routeId], ['outbound-in-flight', r.routeId]]);
+        // The post the helper was making is still good.
+        assert.equal(seal(held, ['d300']).status, 200);
+        // And with nothing of the route in anyone's hands, the answer is withdrawn and the route closes.
+        const done = decide('outbound-withdraw', r.answer);
+        assert.equal(done.outcome, 'applied');
+        assert.equal(bridgeStore.routes.get(r.routeId).state, 'closed');
+        // A notice that is about no released answer is unaffected by any of this.
+        const lone = releasedRoute('lone');
+        claimOnly(lone.answer, lone);
+        assert.equal(decide('outbound-withdraw', lone.notice).outcome, 'applied', 'withdrawing a notice closes no route, so the answer in flight is not its concern');
+        assert.equal(bridgeStore.routes.get(lone.routeId).state, 'released');
+      });
+
+      it('a circuit reset that withdraws is refused whole while the helper holds an item of a route it would close', () => {
+        const r = releasedRoute('reset');
+        // One pass hands the helper both. The answer cannot be posted and opens the circuit; the notice is still in its hands.
+        const got = claim();
+        assert.deepEqual(got.map((i) => i.outboundId).sort(), [r.answer, r.notice].sort());
+        assert.equal(fail(got.find((i) => i.outboundId === r.answer), 'chat-channel-missing').body.circuit.opened, true);
+        const before = everything(r);
+        const reset = (decision) => bridgeStore.applyCircuitReset({ requestId: `req-reset-${++seq}-0000`, decision, actor: 'master', proof: 'master-launch', masterGeneration: 1, at: gateway._deps.now() });
+        const refused = reset('withdraw');
+        assert.deepEqual([refused.outcome, refused.items], ['outbound-in-flight', 0]);
+        assert.equal(everything(r), before);
+        assert.ok(bridgeStore.circuit.open(), 'the episode is still open');
+        clockAt(LEASE + 1);
+        assert.equal(reset('withdraw').outcome, 'applied');
+        assert.equal(bridgeStore.routes.get(r.routeId).state, 'closed');
+      });
     });
 
     it('an item in the helper\'s hands is not withdrawn: the withdrawal waits for the lease to settle', () => {

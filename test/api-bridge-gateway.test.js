@@ -39,7 +39,7 @@ let helperToken;
 let seq = 0;
 
 /** A signed-in operator, as `server.js` annotates the request. */
-const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {} };
+const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {}, socket: { remoteAddress: '127.0.0.1' } };
 /** A dashboard-shaped request on an open gate: the operator in appearance only. */
 const AMBIENT = { tcGateActive: false, tcGateState: 'open', headers: { 'sec-fetch-site': 'same-origin' } };
 
@@ -541,8 +541,33 @@ describe('bridge API: the round trip (#2031)', () => {
     const claimed = (await claim()).body.items.find((i) => i.outboundId === three.itemId);
     const reported = await call('POST', `/api/bridge/helper/outbound/${three.itemId}/failure`, { headers: asHelper(), body: { leaseId: claimed.leaseId, reason: 'chat-channel-missing' } });
     assert.equal(reported.body.circuit.opened, true);
-    assert.equal((await tc(['bridge', 'reset', '--withdraw'])).code, 0);
+    // The helper claimed the route's waiting notice in the same pass and still holds it. Withdrawing the answer
+    // would close the route and pull that notice out of the helper's hands, so the reset is refused whole.
+    const heldNotice = store.getDb().prepare(
+      "SELECT o.outbound_id FROM bridge_outbound o JOIN bridge_outbound_leases l ON l.outbound_id = o.outbound_id AND l.state = 'live' WHERE o.route_id = ?"
+    ).get(three.routeId);
+    assert.ok(heldNotice, 'precondition: another item of the route is in the helper\'s hands');
+    const snapshot = () => JSON.stringify([
+      bridgeStore.routes.get(three.routeId), store.getDb().prepare('SELECT outbound_id, state, drop_code, block_code, text FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(three.routeId),
+      bridgeStore.circuit.open().episodeId
+    ]);
+    const untouched = snapshot();
+    const refusedReset = await tc(['bridge', 'reset', '--withdraw']);
+    assert.equal(refusedReset.code, 2);
+    assert.match(refusedReset.stderr, /refused \[OUTBOUND_IN_FLIGHT\]/);
+    assert.equal(snapshot(), untouched, 'the route, every item of it and the open episode are exactly as they were');
+    assert.equal(closures(three.routeId).length, 0);
+    // Once that lease has run out with nothing posted, the same reset goes through.
+    const realNow = gateway._deps.now;
+    try {
+      const later = Date.now() + bridgeStore.LEASE_MS + 1000;
+      gateway._deps.now = () => new Date(later).toISOString();
+      assert.equal((await tc(['bridge', 'reset', '--withdraw'])).code, 0);
+    } finally {
+      gateway._deps.now = realNow;
+    }
     assert.deepEqual([bridgeStore.routes.get(three.routeId).state, bridgeStore.routes.get(three.routeId).closedBy, closures(three.routeId).length], ['closed', 'master', 1]);
+    assert.deepEqual([bridgeStore.outbound.get(heldNotice.outbound_id).state, bridgeStore.outbound.get(heldNotice.outbound_id).dropCode], ['dropped', 'withdrawn'], 'and the notice goes with its route');
     // And one that puts them back leaves the route waiting for its answer to post.
     const four = await answered('An answer that is put back.');
     const again = (await claim()).body.items.find((i) => i.outboundId === four.itemId);
@@ -1195,6 +1220,57 @@ describe('bridge API: the round trip (#2031)', () => {
     it('the Master credential opens neither the helper routes nor the operator routes', async () => {
       assert.equal((await claim(asMaster())).status, 401);
       assert.equal((await call('POST', '/api/bridge/operator/enable', { headers: asMaster() })).status, 403);
+    });
+
+    it('the helper token is created only where its one showing cannot be read on the way: https, this machine, or this machine\'s own proxy saying https', async () => {
+      const mint = (req) => bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/helper-token'), { req: { ...SIGNED_IN, ...req }, headers: (req && req.headers) || {} });
+      const db = store.getDb();
+      const state = () => ({
+        active: db.prepare('SELECT token_id FROM bridge_helper_tokens WHERE revoked_at IS NULL').all().map((r) => r.token_id),
+        mints: db.prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'helper-token-mint'").get().n
+      });
+      await asOperator('POST', '/api/bridge/operator/disable');
+      await asOperator('DELETE', '/api/bridge/operator/helper-token');
+      const before = state();
+      assert.deepEqual(before.active, []);
+
+      // Refused, each of them the signed-in operator: nothing created, nothing audited as created, no secret in the answer.
+      const REFUSED = [
+        ['plain http from another machine', { socket: { remoteAddress: '100.64.0.9' } }],
+        ['plain http from another machine on the LAN', { socket: { remoteAddress: '192.168.1.20', encrypted: false } }],
+        ['a peer elsewhere that says it is forwarding https', { socket: { remoteAddress: '100.64.0.9' }, headers: { 'x-forwarded-proto': 'https' } }],
+        ['a peer elsewhere that says it is forwarding for this machine', { socket: { remoteAddress: '100.64.0.9' }, headers: { 'x-forwarded-proto': 'https', 'x-forwarded-for': '127.0.0.1' } }],
+        ['this machine\'s proxy forwarding plain http', { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': 'http', 'x-forwarded-for': '100.64.0.9' } }],
+        ['this machine\'s proxy saying nothing of the scheme', { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': '100.64.0.9' } }],
+        ['a scheme list whose first hop was plain http', { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': 'http, https' } }],
+        ['a request with no socket to judge', { socket: undefined }],
+        ['"encrypted" that is not true', { socket: { remoteAddress: '100.64.0.9', encrypted: 'yes' } }]
+      ];
+      for (const [why, req] of REFUSED) {
+        const r = await mint(req);
+        assert.deepEqual([r.status, r.body.code], [403, 'SECURE_TRANSPORT_REQUIRED'], why);
+        assert.deepEqual(Object.keys(r.body).sort(), ['code', 'error'], `${why}: the answer carries no token and no token id`);
+        assert.deepEqual(state(), before, `${why}: no token exists and no creation was recorded`);
+      }
+      // Allowed: each makes exactly one active token and returns it once.
+      const ALLOWED_TRANSPORTS = [
+        ['plain http on this machine itself', { socket: { remoteAddress: '127.0.0.1' } }],
+        ['plain http on this machine over IPv6', { socket: { remoteAddress: '::1' } }],
+        ['https this server terminated, from anywhere', { socket: { remoteAddress: '100.64.0.9', encrypted: true } }],
+        ['this machine\'s proxy saying the browser came over https', { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-proto': 'https', 'x-forwarded-for': '100.64.0.9' } }],
+        ['the same, as the first of a list', { socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: { 'x-forwarded-proto': 'HTTPS, http' } }]
+      ];
+      let mints = before.mints;
+      for (const [why, req] of ALLOWED_TRANSPORTS) {
+        const r = await mint(req);
+        assert.equal(r.status, 201, why);
+        assert.ok(r.body.token.startsWith(gateway.HELPER_TOKEN_PREFIX), why);
+        mints += 1;
+        assert.deepEqual(state(), { active: [r.body.tokenId], mints }, `${why}: one active token, one creation recorded`);
+      }
+      // A signature on the request is still required first: transport does not stand in for the operator.
+      const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/helper-token'), { req: { ...AMBIENT, socket: { remoteAddress: '127.0.0.1' } }, headers: {} });
+      assert.equal(ambient.body.code, 'OPERATOR_SESSION_REQUIRED');
     });
 
     it('operator policy needs a signed-in operator: an open gate and a dashboard-shaped request are refused', async () => {

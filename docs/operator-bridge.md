@@ -105,6 +105,7 @@ it finds decides what happens:
 | The Hub answered with a message id, but the exchange row could not take it | The id is kept in the audit and the gateway binds the row itself, on this pass and every later one. Until it binds, the route waits as unconfirmed; once it does, the route is `routed`. A route is never `routed` on an exchange without its Hub id, because the target's reply is found through that id. |
 | The Hub refused the message (`undeliverable`) | Proven undelivered. The route goes back to the Master. |
 | On the Hub, but for a session that can no longer be named | The route is marked `send-unconfirmed` and is not sent again. The operator's one notice says the message was handed over and that its reply could not be accepted, not that nothing is known. |
+| An exchange under the attempt's request id that the gateway did not send | It is not the gateway's, so it is not adopted: nothing is taken from it, no proof is recorded, and the route goes back to the Master with `request-id-collision`. The next attempt has a new request id. |
 | Anything else: still pending, or the outcome unknown | The route stays where it is. After two minutes it is marked `send-unconfirmed`, the operator gets one notice saying so, and the Master is told. |
 
 **An unconfirmed send is never sent again**, by a later pass, after a restart, or by the Master
@@ -112,6 +113,10 @@ routing it: the request id of an attempt changes only when the attempt is record
 proven undelivered, so the existing exchange is always found first. A recipient session that
 ends does not prove an unconfirmed send was undelivered, and does not reopen it. The Master can answer an
 unconfirmed route in its own words or close it. Only a proven failure reopens routing.
+
+The gateway finds its own sends by request id, so the ids it makes, which begin `bridge:`, are
+kept for it. A Medusa send from anything else under such an id is refused before it is recorded
+(`400 REQUEST_ID_RESERVED`).
 
 ### Addresses
 
@@ -285,7 +290,8 @@ Every write:
 | `400 UNKNOWN_DESTINATION` | The destination is not `master`, a project id or an exact project name. |
 | `400 ANSWER_REQUIRED`, `413 ANSWER_TOO_LONG`, `400 ANSWER_NOT_DISPLAY_SAFE` | The answer is empty, over 8000 characters, or contains control or text-direction characters. |
 | `409 ALREADY_CLOSED` | The route is already closed. |
-| `409 OUTBOUND_IN_FLIGHT` | `close` or `withdraw` while the helper holds the item under a live lease. It may be posting it at this moment, so a close that succeeded could be followed by the post it was meant to prevent. Ask again once the lease has settled: at most two minutes. |
+| `409 OUTBOUND_IN_FLIGHT` | `close`, `withdraw` or `reset --withdraw` while the helper holds, under a live lease, any item the write would withdraw: the item itself, or another item of a route the write would close. The helper may be posting it at this moment, so a write that succeeded could be followed by the post it was meant to prevent. Nothing is changed. Ask again once the lease has settled: at most two minutes, or at once after the helper token is revoked. |
+| `refused`, with "Nothing was sent" | `circuit ack`, `requeue` or `withdraw` given something that is not exactly an id. `tc bridge` makes no request for it. |
 | `409 NOT_BLOCKED`, `409 NOT_WAITING`, `404 OUTBOUND_NOT_FOUND` | `requeue` on an item that is not set aside; `withdraw` on one already delivered, let go or withdrawn; no such item. |
 
 ## Candidates: what a session may offer
@@ -418,6 +424,11 @@ writes nothing and spends no nonce, so it can be sent again as it is), `401 HELP
 `409 PART_ID_COLLISION`, `409 ACK_MISMATCH`, `409 LEASE_LAPSED`,
 `409 BRIDGE_CONFIGURATION_BLOCKED`, `409 ACK_NOT_APPLIED`, `404 OUTBOUND_NOT_FOUND`
 (an id that could not be an item's).
+
+`409 ACK_NOT_APPLIED` is also the answer to an acknowledgement, in order in every other way,
+for an item that is no longer waiting to be delivered: withdrawn or set aside in the meantime.
+An item is recorded as delivered only when its own row moved to delivered, or was already in
+exactly that state under the same messages. Nothing else is reported or audited as a delivery.
 
 Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
 in one transaction.
@@ -598,7 +609,7 @@ it has to sign in, and nothing of the bridge.
 |---|---|
 | Enable / Disable the bridge | Enabling asks first. Disabling asks nothing and acts at once: it is the kill switch. |
 | Set the allowlist | The exact author, server and channel, as Discord's numbers. It names all three back before it sends. |
-| Create or replace the helper token | Shows the value once. Copying is a button the operator presses; nothing is copied without it. The page keeps the value in no storage, no URL and no log, and it is gone when dismissed or when settings closes. It goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`, which reads it from standard input. |
+| Create or replace the helper token | Shows the value once. Copying is a button the operator presses; nothing is copied without it. The page keeps the value in no storage, no URL and no log, and it is gone when dismissed or when settings closes. It goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`, which reads it from standard input. Created only over https, from this machine itself, or through a proxy on this machine that says the browser came over https; from anywhere else it is refused with nothing created (`403 SECURE_TRANSPORT_REQUIRED`). |
 | Revoke the helper token | Only once the bridge is disabled: rolling back is disable first. |
 | Telling sessions of `tc candidate` | On asks first and needs the bridge enabled. Off is always available, including while the bridge is disabled, when the panel says the switch is set and not in effect. |
 | Reset the circuit | Two buttons, one for each decision: put back what was set aside, or withdraw it. There is no reset without one. |

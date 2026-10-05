@@ -32,7 +32,7 @@ const PUBLIC = path.join(__dirname, '..', 'public');
 const SRC = fs.readFileSync(path.join(PUBLIC, 'operator-bridge-panel.js'), 'utf8');
 
 /** A signed-in operator, as `server.js` annotates the request. */
-const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {} };
+const SIGNED_IN = { tcSession: { username: 'rosie' }, tcGateState: 'guarding', headers: {}, socket: { remoteAddress: '127.0.0.1' } };
 /** A dashboard-shaped request on an open gate: the operator in appearance only. */
 const AMBIENT = { tcGateActive: false, tcGateState: 'open', headers: { 'sec-fetch-site': 'same-origin' } };
 const IDS = { authorId: '100000000000000001', spaceId: '200000000000000002', channelId: '300000000000000003' };

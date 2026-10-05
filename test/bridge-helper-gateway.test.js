@@ -9,9 +9,11 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { createGateway, backoffDelay, INTENTS, OP, FATAL_CLOSES, RESUME_CLOSE } = require('../lib/bridge-helper/discord-gateway');
+const { createGateway, resumeAddress, backoffDelay, INTENTS, OP, FATAL_CLOSES, RESUME_CLOSE, DEFAULT_URL } = require('../lib/bridge-helper/discord-gateway');
 const { fakeWebSocket } = require('./_fake-discord');
 
+/** A resume address of the shape Discord really gives: a subdomain of discord.gg. */
+const RESUME_URL = 'wss://gateway-us-east1-b.discord.gg';
 const BOT_TOKEN = `${'B'.repeat(24)}.${'c'.repeat(6)}.${'d'.repeat(27)}`;
 
 let ws;
@@ -72,14 +74,15 @@ function settle() {
 /**
  * Bring a gateway to READY on its first socket.
  * @param {object} gw - The gateway.
+ * @param {string} [resumeUrl] - What READY names as the resume address.
  * @returns {Promise<object>} The socket.
  */
-async function ready(gw) {
+async function ready(gw, resumeUrl = RESUME_URL) {
   gw.start();
   await settle();
   const socket = ws.sockets[ws.sockets.length - 1];
   socket.receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
-  socket.receive({ op: OP.DISPATCH, t: 'READY', s: 1, d: { session_id: 'sess-1', resume_gateway_url: 'wss://resume.fake.invalid', user: { id: '900000000000000009' } } });
+  socket.receive({ op: OP.DISPATCH, t: 'READY', s: 1, d: { session_id: 'sess-1', resume_gateway_url: resumeUrl, user: { id: '900000000000000009' } } });
   return socket;
 }
 
@@ -155,7 +158,7 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     timers.fire('timeout');
     await settle();
     const second = ws.sockets[1];
-    assert.equal(second.url, 'wss://resume.fake.invalid/?v=10&encoding=json');
+    assert.equal(second.url, `${RESUME_URL}/?v=10&encoding=json`);
     second.receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
     assert.deepEqual(second.sent, [{ op: OP.RESUME, d: { token: BOT_TOKEN, session_id: 'sess-1', seq: 7 } }]);
     second.receive({ op: OP.DISPATCH, t: 'RESUMED', s: 8, d: {} });
@@ -187,6 +190,77 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
       assert.equal(ws.sockets.length, 1, 'and starting it again does not connect');
     }
     assert.ok(FATAL_CLOSES.has(4004) && FATAL_CLOSES.has(4014), 'a refused token and disallowed intents among them');
+  });
+
+  describe('where a session may be resumed', () => {
+    const REFUSED = [
+      ['a host that only starts with Discord\'s', 'wss://discord.gg.example.com'],
+      ['a host that only ends with its letters', 'wss://example-discord.gg'],
+      ['the bare domain, which is not the Gateway', 'wss://discord.gg'],
+      ['a lookalike subdomain of another domain', 'wss://gateway.discord.gg.evil.example'],
+      ['a trailing dot', 'wss://gateway.discord.gg.'],
+      ['an IPv4 address', 'wss://203.0.113.7'],
+      ['an IPv6 address', 'wss://[2001:db8::1]'],
+      ['plain ws', 'ws://gateway.discord.gg'],
+      ['https', 'https://gateway.discord.gg'],
+      ['a user in the address', 'wss://user@gateway.discord.gg'],
+      ['a user and password', 'wss://user:pw@gateway.discord.gg'],
+      ['Discord\'s host as the user of another', 'wss://gateway.discord.gg@evil.example'],
+      ['a port that is not 443', 'wss://gateway.discord.gg:8443'],
+      ['port 80', 'wss://gateway.discord.gg:80'],
+      ['an upper-case host', 'wss://Gateway.Discord.GG'],
+      ['an empty label', 'wss://a..discord.gg'],
+      ['whitespace', 'wss://gateway.discord.gg /']
+    ];
+
+    it('accepts the Gateway and its subdomains, with no port or 443, and uses nothing of the path Discord sent', () => {
+      assert.equal(resumeAddress('wss://gateway.discord.gg'), 'wss://gateway.discord.gg');
+      assert.equal(resumeAddress('wss://gateway.discord.gg/'), 'wss://gateway.discord.gg');
+      assert.equal(resumeAddress('wss://gateway.discord.gg:443'), 'wss://gateway.discord.gg');
+      assert.equal(resumeAddress('wss://gateway-us-east1-b.discord.gg'), 'wss://gateway-us-east1-b.discord.gg');
+      assert.equal(resumeAddress('wss://a.b.discord.gg/?v=9&encoding=etf#x'), 'wss://a.b.discord.gg');
+      for (const [why, address] of REFUSED) assert.equal(resumeAddress(address), null, why);
+      for (const notAString of [42, null, undefined, {}, ['wss://gateway.discord.gg']]) assert.equal(resumeAddress(notAString), null);
+    });
+
+    for (const [why, address] of REFUSED) {
+      it(`refuses ${why}: nothing is opened to it, no token and no resume is sent, and the helper identifies afresh at the default`, async () => {
+        const gw = gateway();
+        const first = await ready(gw, address);
+        first.receive({ op: OP.DISPATCH, t: 'MESSAGE_CREATE', s: 7, d: { id: '500000000000000003' } });
+        first.drop(1006);
+        timers.fire('timeout');
+        await settle();
+        assert.equal(ws.sockets.length, 2);
+        const second = ws.sockets[1];
+        assert.equal(second.url, DEFAULT_URL, 'the default Gateway, and no socket to the address READY named');
+        assert.ok(ws.sockets.every((sock) => sock.url === DEFAULT_URL));
+        assert.deepEqual(codes.at(-1), ['gateway-resume-refused', {}]);
+        assert.deepEqual(second.sent, [], 'nothing is sent before Discord says hello');
+        second.receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
+        assert.equal(second.sent.length, 1);
+        assert.equal(second.sent[0].op, OP.IDENTIFY, 'the session was dropped: this is a new one');
+        assert.ok(!second.sent.some((p) => p.op === OP.RESUME), 'no resume, anywhere');
+        assert.ok(!JSON.stringify(second.sent).includes('sess-1'), 'and the old session id goes nowhere');
+        // Dropped for good: a later reconnect has no session to resume either.
+        second.drop(1006);
+        timers.fire('timeout');
+        await settle();
+        ws.sockets[2].receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
+        assert.equal(ws.sockets[2].sent[0].op, OP.IDENTIFY);
+      });
+    }
+
+    it('still resumes at the default address when READY named none', async () => {
+      const gw = gateway();
+      const first = await ready(gw, null);
+      first.drop(1006);
+      timers.fire('timeout');
+      await settle();
+      ws.sockets[1].receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
+      assert.equal(ws.sockets[1].url, DEFAULT_URL);
+      assert.equal(ws.sockets[1].sent[0].op, OP.RESUME);
+    });
   });
 
   it('identifies afresh when Discord says the session cannot be resumed', async () => {

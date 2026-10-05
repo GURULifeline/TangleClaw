@@ -19,6 +19,7 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const handoff = require('../lib/bridge-handoff');
+const { pinMasterLiveness } = require('./_master-liveness');
 const { bindProject } = require('./_shared-docs-callers');
 
 const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
@@ -110,6 +111,8 @@ function candidateItems() {
   return store.getDb().prepare("SELECT * FROM bridge_outbound WHERE kind = 'candidate' ORDER BY outbound_id").all();
 }
 
+let liveness;
+
 describe('bridge candidates (#2031)', () => {
   before(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-bridge-candidates-'));
@@ -123,9 +126,12 @@ describe('bridge candidates (#2031)', () => {
     masterGeneration = bridgeStore.masterCredentials.mint(minted.hash);
     bridgeStore.masterCredentials.activate(masterGeneration, minted.hash);
     masterCredential = minted.credential;
+    // tmux's answer about the Master is the test's to give, never the machine's: see _master-liveness.js.
+    liveness = pinMasterLiveness();
   });
 
   after(async () => {
+    liveness.restore();
     await new Promise((resolve) => server.close(resolve));
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

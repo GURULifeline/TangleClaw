@@ -142,6 +142,30 @@ describe('medusa-exchanges (#1839)', () => {
       assertReplayMatches(bound.exchange_id);
     });
 
+    it('keeps a declared component\'s request id prefix for that component alone', () => {
+      mx.declareSystemOwner('test-component', { requestIdPrefix: 'testc:' });
+      const recipient = { workspaceId: 'builder-ws', projectId: 20 };
+      const count = () => store.getDb().prepare('SELECT COUNT(*) AS n FROM medusa_exchanges').get().n;
+      const reserved = (err) => err.code === 'REQUEST_ID_RESERVED' && err.status === 400;
+      // A project session, verified or not, cannot make an exchange under it.
+      assert.throws(() => mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testc:route-1:send1' }, PM, 10), sender: { projectId: 10, sessionId: 1 }, recipient }), reserved);
+      assert.throws(() => mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testc:' }, PM, 10), sender: { projectId: 10 }, recipient }), reserved);
+      // Nor can TangleClaw itself from another listener, nor a session whose number is written like the name.
+      const system = mx.validateSendMeta({ requestId: 'testc:route-1:send1' }, { kind: 'system' }, null);
+      assert.throws(() => mx.createSendIntent({ meta: system, sender: { projectId: null, sessionId: 'another-component' }, recipient }), reserved);
+      assert.throws(() => mx.createSendIntent({ meta: system, sender: { projectId: 10, sessionId: 'test-component' }, recipient }), reserved);
+      assert.equal(count(), 0, 'none of those was recorded');
+      // The component itself can, and what it makes is its own.
+      const own = mx.createSendIntent({ meta: system, sender: { projectId: null, sessionId: 'test-component' }, recipient });
+      assert.equal(mx.systemOwnerOf(own), 'test-component');
+      assert.equal(mx.reservedOwnerOf('testc:anything'), 'test-component');
+      // An id that merely contains the prefix, or shares its first letters, is anybody's.
+      assert.equal(mx.reservedOwnerOf('x-testc:1'), null);
+      assert.equal(mx.reservedOwnerOf('testcase-7'), null);
+      mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testcase-7' }, PM, 10), sender: { projectId: 10 }, recipient });
+      assert.equal(count(), 2);
+    });
+
     it('refuses to record a reused requestId, so a retry never reaches the Hub twice', () => {
       const meta = mx.validateSendMeta({ requestId: 'req-a' }, PM, 10);
       const args = { meta, sender: { projectId: 10 }, recipient: { workspaceId: 'builder-ws', projectId: 20 } };

@@ -274,6 +274,64 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     assert.match(rule, /permits no other mutating call/);
   });
 
+  it('an id typed at tc bridge becomes a path segment only when it has an id\'s exact shape, and nothing is sent otherwise', async () => {
+    const { bridgePathSegment, bridgeCredentialHeader, VERB_ROSTER } = require('../lib/tc-verbs');
+    const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
+    const calls = [];
+    const ctx = (argv) => ({
+      argv,
+      getJson: async (p) => { calls.push(`GET ${p}`); return {}; },
+      postJson: async (p, body) => { calls.push(`POST ${p}`); return { replayed: false, ...body }; }
+    });
+    // Everything that is not exactly an id: traversal, a slash, their encoded forms, a query, a fragment, whitespace, signs, too long.
+    const NOT_IDS = ['..', '../1', '1/..', '1/2', '..%2F1', '%2e%2e', '%2E%2E%2F7', '1%2F2', '7?x=1', '7#frag', ' 7', '7 ', '7\n', '7\t', '', '-7', '+7', '7.0', '0x7', '7e2', 'seven', '٧', '1'.repeat(13)];
+    for (const typed of NOT_IDS) {
+      for (const argv of [['requeue', typed], ['withdraw', typed], ['requeue', typed, '--request-id', 'req-12345678'], ['circuit', 'ack', typed]]) {
+        if (argv[0] === 'circuit' && typed === '1'.repeat(13)) continue;
+        const out = await bridge.run(ctx(argv));
+        assert.equal(out.code, 1, JSON.stringify(argv));
+        assert.match(out.stderr, /Nothing was sent\.\n$/, JSON.stringify(argv));
+      }
+    }
+    assert.equal((await bridge.run(ctx(['circuit', 'ack', '1'.repeat(10)]))).code, 1, 'an episode number is at most nine digits');
+    assert.deepEqual(calls, [], 'no request was made for any of them, so no header went anywhere');
+
+    // A real id goes out as itself, in exactly one place.
+    await bridge.run(ctx(['requeue', '7']));
+    await bridge.run(ctx(['withdraw', '123456789012']));
+    await bridge.run(ctx(['circuit', 'ack', '3']));
+    assert.deepEqual(calls, ['POST /api/bridge/master/outbound/7/requeue', 'POST /api/bridge/master/outbound/123456789012/withdraw', 'POST /api/bridge/master/circuit/3/ack']);
+
+    // The segment is encoded whatever shape it was allowed under: the shape and the encoding are two guards, not one.
+    assert.equal(bridgePathSegment('7', /^\d{1,12}$/), '7');
+    assert.equal(bridgePathSegment('a/b?c#d e', /^.*$/), 'a%2Fb%3Fc%23d%20e');
+    assert.equal(bridgePathSegment('..%2F', /^.*$/), '..%252F');
+    assert.equal(bridgePathSegment('7/', /^\d{1,12}$/), null);
+    for (const notAString of [7, null, undefined, ['7'], { toString: () => '7' }]) assert.equal(bridgePathSegment(notAString, /^\d{1,12}$/), null);
+
+    // The credential is attached only to a bridge path that will be sent exactly as written.
+    const header = { 'x-tangleclaw-bridge-credential': 'the-credential' };
+    for (const plain of ['/api/bridge/master/status', '/api/bridge/master/outbound/7/requeue', '/api/bridge/master/routes?states=accepted%2Crouted', '/api/bridge/master/routes/rt_1']) {
+      assert.deepEqual(bridgeCredentialHeader(plain, 'the-credential'), header, plain);
+    }
+    for (const notPlain of [
+      '/api/bridge/master/routes/..', '/api/bridge/master/routes/../../control/assignments', '/api/bridge/master/routes/.', '/api/bridge/../auth/login',
+      '/api/bridge/master/routes/%2e%2e', '/api/bridge/master/routes/%2E%2e/x', '/api/bridge//master/status', '/api/bridge/master/status#x',
+      '/api/bridge/master/routes/a b', '/api/bridge/master\\status', '/api/bridge/master/routes/a\tb'
+    ]) {
+      assert.throws(() => bridgeCredentialHeader(notPlain, 'the-credential'), (err) => err.code === 'BRIDGE_PATH_NOT_PLAIN' && !err.message.includes('the-credential'), notPlain);
+    }
+    // Not a bridge path, or no credential: no header, and no objection, because nothing secret is at stake.
+    assert.deepEqual(bridgeCredentialHeader('/api/control/assignments/mine', 'the-credential'), {});
+    assert.deepEqual(bridgeCredentialHeader('/api/bridgeish/x', 'the-credential'), {});
+    assert.deepEqual(bridgeCredentialHeader('/api/bridge/master/status', null), {});
+    assert.deepEqual(bridgeCredentialHeader('/api/bridge/master/routes/..', ''), {});
+    // And the real tc asks this function for the header: it does not attach one by itself.
+    const tcSource = fs.readFileSync(path.join(__dirname, '..', 'bin', 'tc'), 'utf8');
+    assert.ok(tcSource.includes('...bridgeCredentialHeader(apiPath, bridgeCredential)'));
+    assert.equal(tcSource.split("'x-tangleclaw-bridge-credential'").length - 1, 0, 'the header name appears nowhere else in the executable');
+  });
+
   it('the Master is told the whole of `tc bridge`: every subverb it implements, and none it does not', async () => {
     const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');

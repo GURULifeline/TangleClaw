@@ -154,6 +154,15 @@ This writes `~/Library/LaunchAgents/com.tangleclaw.bridge-helper.plist` from
 only. launchd starts the helper at login and restarts it if it exits, at most once every 30
 seconds. `--no-load` writes the job without loading it.
 
+## Where it connects
+
+The helper connects to Discord's Gateway at the address Discord gives it, and resumes a dropped
+session at the address Discord named when the session began. A resume carries the bot token, so
+that address is held to a fixed rule first: `wss`, no user or password, no port but 443, and a
+host that is `gateway.discord.gg` or a subdomain of `discord.gg`. Anything else is never
+opened. The session is dropped, the log records `gateway-resume-refused`, and the helper
+identifies afresh at the default address.
+
 ## Operating it
 
 - **`bin/tc-bridge-helper status`** shows whether the config is set, whether each secret is
