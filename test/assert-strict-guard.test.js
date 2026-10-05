@@ -56,20 +56,23 @@ describe('assert-strict-guard (#1377)', () => {
       'single.test.js': bare("'"),
       'double.test.js': bare('"'),
       'spaced.test.js': bare("'", ' '),
+      'unprefixed.test.js': bare().replace('node:', ''),
       'deep/er/nested.test.js': `const fs = require('node:fs');\n\n${bare('"', '\t')}`,
       'fine.test.js': STRICT
     });
     const result = guard.scan(dir);
-    assert.equal(result.scanned, 5);
+    assert.equal(result.scanned, 6);
     assert.deepEqual(result.offenders, [
       { file: 'test/deep/er/nested.test.js', line: 4 },
       { file: 'test/double.test.js', line: 2 },
       { file: 'test/single.test.js', line: 2 },
-      { file: 'test/spaced.test.js', line: 2 }
+      { file: 'test/spaced.test.js', line: 2 },
+      { file: 'test/unprefixed.test.js', line: 2 }
     ]);
+    assert.ok(!bare().replace('node:', '').includes('node:'), 'the same module by its other name');
     const said = guard.report(result);
     for (const o of result.offenders) assert.ok(said.includes(`${o.file}:${o.line}  requires bare ${BARE}; use ${guard.REMEDY}`), o.file);
-    assert.match(said, /4 of 5 test file\(s\) checked/);
+    assert.match(said, /5 of 6 test file\(s\) checked/);
     assert.equal(guard.REMEDY, `require('${BARE}/strict')`);
   });
 
@@ -101,12 +104,20 @@ describe('assert-strict-guard (#1377)', () => {
   it('does not take the strict module, a longer name, or a comment for the bare one', () => {
     assert.deepEqual(offendersIn({
       'strict.test.js': STRICT,
-      'other.test.js': `const a = require('${BARE}ions');\nconst b = require('${BARE}/strict');`,
+      'other.test.js': `const a = require('${BARE}ions');\nconst b = require('${BARE}/strict');\nconst c = require('assert/strict');\nconst d = require('assertion');`,
       'line-comment.test.js': `${STRICT}\n// was: ${bare()}`,
       'block-comment.test.js': `/**\n * Once: ${bare()}\n */\n${STRICT}\n/* ${bare()} */`
     }), []);
-    // Code before a comment on the same line is still code.
-    assert.deepEqual(offendersIn({ 'trailing.test.js': `${bare()} // the old way` }), [{ file: 'test/trailing.test.js', line: 2 }]);
+    // Code before a comment on the same line is still code, and so is code after a block comment that has closed.
+    assert.deepEqual(offendersIn({
+      'trailing.test.js': `${bare()} // the old way`,
+      'after-closed-block.test.js': `/* loose on purpose */ ${bare()}`,
+      'after-closed-body.test.js': `/*\n * why\n */ ${bare()}`
+    }), [
+      { file: 'test/after-closed-block.test.js', line: 2 },
+      { file: 'test/after-closed-body.test.js', line: 4 },
+      { file: 'test/trailing.test.js', line: 2 }
+    ]);
   });
 
   it('an exception is written on the line or the one above it, with a reason, and is reported as waived', () => {

@@ -76,7 +76,7 @@ node scripts/test-skip-audit.js test-results.xml
 
 ### Strict assertions
 
-Tests use `node:assert/strict`. A test in the suite fails when any `*.test.js` file under `test/`, at any depth, requires bare `node:assert`, and names each file and line. To ask outside the suite:
+Tests use `node:assert/strict`. A test in the suite fails when any `*.test.js` file under `test/`, at any depth, requires bare `node:assert` (or `assert`, the same module), and names each file and line. To ask outside the suite:
 
 ```bash
 node scripts/assert-strict-guard.js

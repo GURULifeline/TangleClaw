@@ -36,10 +36,11 @@ const REMEDY = "require('node:assert/strict')";
 /**
  * A real bare require of the assertion module: either quote style (or a
  * template literal), with whatever whitespace a formatter leaves around the
- * parentheses and the string. `node:assert/strict` does not match, because the
- * closing quote must follow `assert` directly.
+ * parentheses and the string. The module answers to `assert` as well as to
+ * `node:assert`, and both are the same loose one. `node:assert/strict` does
+ * not match, because the closing quote must follow `assert` directly.
  */
-const BARE_REQUIRE = /\brequire\s*\(\s*(['"`])node:assert\1\s*\)/;
+const BARE_REQUIRE = /\brequire\s*\(\s*(['"`])(?:node:)?assert\1\s*\)/;
 
 /** A waiver for this check, and whatever follows it as the reason. */
 const WAIVER = new RegExp(`prawduct:allow\\s+(?:[\\w/-]+\\s*,\\s*)*${WAIVER_REF}(?:\\s*,\\s*[\\w/-]+)*\\s+--(.*)$`);
@@ -66,13 +67,18 @@ function testFiles(dir) {
 /**
  * Whether a match sits in a comment rather than in code: after `//` on its
  * line, or on a line of a block comment. A commented-out require is prose.
+ * A block comment that has closed before the match no longer covers it.
+ * Read from the line alone, so it is a judgement about ordinary code and not
+ * a parser's.
  * @param {string} line - The source line.
  * @param {number} index - Where the match starts on it.
  * @returns {boolean}
  */
 function inComment(line, index) {
+  const before = line.slice(0, index);
   const lead = line.trimStart();
-  return lead.startsWith('*') || lead.startsWith('/*') || line.slice(0, index).includes('//');
+  if (before.includes('//')) return true;
+  return (lead.startsWith('*') || lead.startsWith('/*')) && !before.includes('*/');
 }
 
 /**
@@ -102,7 +108,7 @@ function scan(dir, relativeTo = path.dirname(path.resolve(dir))) {
     lines.forEach((text, i) => {
       const hit = BARE_REQUIRE.exec(text);
       if (!hit || inComment(text, hit.index)) return;
-      // On the line itself, or alone on the line above it.
+      // On the line itself, or on the line above it.
       const reason = waiverReason(text) || waiverReason(lines[i - 1]);
       if (reason) waived.push({ file, line: i + 1, reason });
       else offenders.push({ file, line: i + 1 });
