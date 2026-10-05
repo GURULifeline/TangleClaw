@@ -253,13 +253,25 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     // The exception, word for word (Architect ruling, 2026-10-04). It names no
     // verb's fields: every write uses what its own verb requires, from state
     // just read. Enabled, it lists what the Master may do. Disabled, nothing is
-    // sent, and what is left is only what winds the bridge down.
+    // sent, and what is left is only what winds the bridge down. The three
+    // sentences on questions are the Architect's approved wording of
+    // 2026-10-05, in the rule's own second person and otherwise as written.
     const EXCEPTION = 'The one exception is the operator bridge: you may record decisions with tc bridge, and with nothing else,'
       + ' when you hold the live bridge credential. Every write uses exactly the identifiers, version and proof required by that tc bridge verb,'
       + ' taken from the state you just read. While the operator has the bridge enabled, that is routing, answering, releasing, pinning and'
       + ' closing routes, deciding candidates, and requeueing or withdrawing items. While it is disabled nothing is sent: you may only close'
-      + ' routes, withdraw queued items, and acknowledge or reset the circuit. That is routing, not authority: it permits no other mutating'
+      + ' routes, withdraw queued items, and acknowledge or reset the circuit.'
+      + ' You may emit a correlated clarification or launch-authorization question for a held inbound Discord route. You must preserve the'
+      + ' original inbound message, must not dispatch it or launch a stopped session until a verified reply from the allowlisted Operator is'
+      + ' explicitly adopted for that exact question, and must audit the question, decision, and resulting action. A denial, cancellation,'
+      + ' timeout, unrelated reply, or ambiguous reply grants no authority.'
+      + ' That is routing, not authority: it permits no other mutating'
       + ' call and gives you none of the operator powers.';
+    // As approved, but for "The Master may" and "It must", which the rule says to the Master as "You".
+    const APPROVED = 'The Master may emit a correlated clarification or launch-authorization question for a held inbound Discord route. It must preserve the original inbound message,'
+      + ' must not dispatch it or launch a stopped session until a verified reply from the allowlisted Operator is explicitly adopted for that exact question, and must audit the'
+      + ' question, decision, and resulting action. A denial, cancellation, timeout, unrelated reply, or ambiguous reply grants no authority.';
+    assert.ok(EXCEPTION.includes(APPROVED.replace('The Master may', 'You may').replace('It must', 'You must')), 'the approved wording, whole');
     assert.equal(master.MASTER_BRIDGE_EXCEPTION, EXCEPTION);
     assert.ok(rule.endsWith(` ${EXCEPTION}`), rule);
     assert.equal(rule.split(EXCEPTION).length - 1, 1, 'said once');
@@ -365,7 +377,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
     const identity = master.buildMasterClaudeMd(store.config.load());
-    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'answer', 'release', 'pin', 'close',
+    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'ask', 'answer', 'release', 'pin', 'close',
       'candidates', 'candidate', 'approve', 'reject', 'merge', 'blocked', 'requeue', 'withdraw', 'circuit ack', 'reset']);
     /**
      * Whether a usage text names a subverb as a word of its own.
@@ -390,7 +402,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       postJson: async (p) => { asked.push(`POST ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); }
     });
     const args = {
-      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], answer: ['rt_1', '--version', '1', '--text', 'x'],
+      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], answer: ['rt_1', '--version', '1', '--text', 'x'],
       release: ['rt_1', '--version', '1'], pin: ['rt_1', '--version', '1', '--to', 'master'], close: ['rt_1', '--version', '1'],
       candidates: [], candidate: ['cand_1'], approve: ['cand_1', '--version', '1'], reject: ['cand_1', '--version', '1'],
       merge: ['cand_1', '--version', '1', '--into', 'cand_2'], blocked: [], requeue: ['7'], withdraw: ['7'], 'circuit ack': ['3'], reset: ['--requeue']

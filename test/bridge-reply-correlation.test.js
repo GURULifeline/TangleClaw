@@ -193,7 +193,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       assert.deepEqual(bridgeStore.parts.forItem(id), ['d100', 'd101', 'd102']);
       assert.deepEqual(bridgeStore.parts.find('d101'), {
         externalId: 'd101', canonicalExternalId: 'd100', outboundId: id, partIndex: 1, partCount: 3,
-        kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone'
+        kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone', questionId: null
       });
       assert.equal(bridgeStore.parts.find('d999'), null);
     });
@@ -287,7 +287,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
         assert.deepEqual([suggestedBy(route), route.destination.kind, route.destination.projectId], ['outbound-correlation', 'master', null], part);
         assert.deepEqual(route.replyContext, {
           repliedExternalId: part, canonicalExternalId: 'd100', outboundId: id, partIndex: index, partCount: 3,
-          kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone'
+          kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone', questionId: null
         });
         assert.equal(bridgeStore.routes.body(route.routeId, 'inbound').text, 'good, what is next?', 'the Master can read what was said');
       }

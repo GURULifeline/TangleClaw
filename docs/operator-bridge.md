@@ -165,7 +165,9 @@ default does not rewrite it, and a destination the Master has fixed on a route d
 A route gets at most one `status` item in its life: that the Master is unavailable, or, after
 five minutes without a final answer, that the message is still waiting. Whichever comes first
 is the only one. Its text is one of two fixed sentences the server wrote; a status item cannot
-carry anything anybody typed.
+carry anything anybody typed. A message the Master has asked the operator about gets no
+"still waiting" notice: while the question is open the wait is the operator's, and once it has
+run out its own notice says the message is still held.
 
 The Medusa message the gateway sends to the project gets no notice of its own. The gateway
 declares the exchanges it sends as its own (`lib/medusa-exchanges.js#declareSystemOwner`), and
@@ -184,6 +186,47 @@ closed or let go while it is off does not leave its exchange open. A route that 
 `routed` when the bridge is disabled keeps its exchange until the Master closes the route, which
 the rollback runbook has it do. Closing changes nothing about what it was: a later reply
 that names the message still finds it, and is then refused for where the route is, by name.
+
+### Asking the operator about a held message
+
+When the Master cannot tell where a message should go, it asks, with
+`tc bridge ask <route-id> --version <n> --text "<question>"`.
+
+- **The message stays held.** Its route stays `awaiting-master`, its text stays stored, and
+  nothing is sent to any session. The question is posted to the operator as a reply to their
+  own message.
+- **One question at a time.** A second `ask` on the same message is refused
+  `409 QUESTION_OPEN`. A message that is no longer waiting for the Master cannot be asked about
+  (`409 NOT_AWAITING_MASTER`).
+- **The operator answers by replying to the question in the chat.** That reply is an inbound
+  like any other: it gets its own route, waits for the Master, and routes nothing by arriving.
+  The bridge records, when it arrives, which posted message it replies to.
+- **The Master adopts the answer when it routes the original:**
+  `tc bridge route <route-id> --version <n> --to <dest> --answered-by <the reply's route-id>`.
+  In one transaction the question is settled, the reply's route is closed and its text cleared,
+  and the original is routed. What is sent on is the original message, as the operator wrote it.
+
+Only a recorded reply to that very question can be adopted. The check is mechanical and looks at
+nothing the reply says:
+
+| The route named by `--answered-by` is | Answer |
+|---|---|
+| Not a reply to anything, a reply to something else, a reply to another message's question, or no route at all | `409 NOT_AN_ANSWER` |
+| A reply to this question, which has already been answered, cancelled or has run out | `409 QUESTION_SETTLED` |
+| A reply to this question, past its time, before the gateway's pass has marked it | `409 QUESTION_EXPIRED` |
+| A reply whose own route is no longer waiting | `409 REPLY_NOT_HELD` |
+| A reply with an item of its own in the helper's hands | `409 OUTBOUND_IN_FLIGHT`; ask again once the lease has settled |
+| Not shaped like a route id | `400 BAD_ANSWERED_BY` |
+
+A refusal changes nothing. Whether the reply's words mean what the Master takes them to mean is
+the Master's judgement, and the audit records both route ids and none of the text.
+
+A question can be answered for 24 hours. After that the gateway marks it expired, withdraws it
+if it was never posted, and sends the operator one fixed sentence saying the message is still
+held and nothing was sent on. The message itself is not closed and not routed: the Master is
+told, and may ask again, route it on its own reading, or close it. Routing or closing the
+message without `--answered-by` ends an open question; an answer that arrives afterwards
+answers nothing.
 
 ## The Project Master's credential
 
@@ -240,7 +283,8 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge status` | Says whether the bridge is enabled and which generation is asking. Answers while disabled. |
 | `tc bridge routes [--state <state>]...` | Lists routes, oldest first, without bodies. Open states by default. |
 | `tc bridge read <route-id>` | Shows one route with the text still held for it. |
-| `tc bridge route <route-id> --version <n> --to <dest>` | Names the destination of a route that is waiting for the Master. The gateway then sends it. |
+| `tc bridge route <route-id> --version <n> --to <dest>` | Names the destination of a route that is waiting for the Master. The gateway then sends it. With `--answered-by <route-id>`, also adopts that operator reply as the answer to the question asked about it. |
+| `tc bridge ask <route-id> --version <n> --text "<question>"` | Asks the operator one question about a message that is waiting for the Master. The message stays held. `--text-file <file>` reads the question from a file. |
 | `tc bridge answer <route-id> --version <n> --text "<text>"` | Answers the operator in the Master's own words. `--text-file <file>` reads the answer from a file. |
 | `tc bridge release <route-id> --version <n>` | Sends on, unchanged, the reply the gateway is holding. |
 | `tc bridge pin <route-id> --version <n> --to <dest>` | Pins the route's conversation to a destination. Conversation-scoped only. |
@@ -256,7 +300,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 The Master is read-only everywhere else. Its first baseline rule carries one exception, and this is
 the sentence, word for word:
 
-> The one exception is the operator bridge: you may record decisions with tc bridge, and with nothing else, when you hold the live bridge credential. Every write uses exactly the identifiers, version and proof required by that tc bridge verb, taken from the state you just read. While the operator has the bridge enabled, that is routing, answering, releasing, pinning and closing routes, deciding candidates, and requeueing or withdrawing items. While it is disabled nothing is sent: you may only close routes, withdraw queued items, and acknowledge or reset the circuit. That is routing, not authority: it permits no other mutating call and gives you none of the operator powers.
+> The one exception is the operator bridge: you may record decisions with tc bridge, and with nothing else, when you hold the live bridge credential. Every write uses exactly the identifiers, version and proof required by that tc bridge verb, taken from the state you just read. While the operator has the bridge enabled, that is routing, answering, releasing, pinning and closing routes, deciding candidates, and requeueing or withdrawing items. While it is disabled nothing is sent: you may only close routes, withdraw queued items, and acknowledge or reset the circuit. You may emit a correlated clarification or launch-authorization question for a held inbound Discord route. You must preserve the original inbound message, must not dispatch it or launch a stopped session until a verified reply from the allowlisted Operator is explicitly adopted for that exact question, and must audit the question, decision, and resulting action. A denial, cancellation, timeout, unrelated reply, or ambiguous reply grants no authority. That is routing, not authority: it permits no other mutating call and gives you none of the operator powers.
 
 It names no verb's fields: each `tc bridge` verb says what it needs, and the rule requires exactly
 that, from state the Master has just read.
@@ -677,6 +721,14 @@ Schema v54 added `bridge_outbound_claims`, `bridge_outbound_leases`, `bridge_out
 rebuilt with their rows and row ids carried over, after the store is proven a sound v53 store. A v53 store
 holding a token marked revoked with no time recorded is refused, and left at v53 untouched. The
 v54 shape is a superset of v53's.
+
+v54 also carries what the Master's questions rest on. `bridge_questions` holds each question's
+standing; `bridge_outbound`, `bridge_outbound_parts` and `bridge_route_reply_context` gain the
+`question` kind and the id of the question an item asks. `bridge_aliases` records who last
+changed a nickname, when, and on which operator message, and its rows from an earlier store
+come through with those fields empty. `bridge_launches` and `bridge_project_optouts` exist and
+are not yet used. The store itself holds the rules that must not depend on a caller: one open
+question per message, one use of an operator's reply, and a settled question never reopened.
 
 "Superset" is a statement about shape: every object an earlier version required is still there
 in the form it required. It is not a way to run an earlier build.

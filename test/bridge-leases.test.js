@@ -253,7 +253,7 @@ describe('bridge leases: what the helper holds, and until when (#2031)', () => {
     assert.equal(lease.outboundId, held);
 
     clockAt(WEEK + 1000);
-    assert.deepEqual(bridgeStore.expire({ now: at(WEEK + 1000) }), { outbound: 1, candidates: 0 });
+    assert.deepEqual(bridgeStore.expire({ now: at(WEEK + 1000) }), { outbound: 1, candidates: 0, questions: 0 });
     assert.deepEqual([bridgeStore.outbound.get(held).state, bridgeStore.outbound.get(unheld).state], ['ready', 'dropped'],
       'the item somebody is holding is not let go; the one nobody collected is');
     const taken = ack(lease, 'posted-held');

@@ -200,6 +200,11 @@ no Master judgement in between. The operator has ruled that out.
   accepts, for v5.31, that the helper's secrets are readable by any process of the same user,
   with the Master in the loop for every inbound, the advisory fence disclosed, and a bot role
   limited to the one allowlisted private channel. Separate-user isolation is future work.
+- **The Master may ask before it decides** (operator ruling, 2026-10-05). A question about a
+  held message is posted to the operator and changes nothing else: the message stays held and
+  nothing is dispatched. Only an operator reply recorded as a reply to that very question can
+  be adopted as its answer, once, with the route decision it supports. A denial, a timeout, an
+  unrelated or a second reply grants nothing. A question that runs out closes nothing.
 
 ### 10. The interim path, and what cutover requires (D4)
 

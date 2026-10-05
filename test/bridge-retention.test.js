@@ -118,16 +118,19 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       failure: 30 * DAY
     });
     assert.deepEqual(bridgeStore.EXPIRY_REASONS, {
-      undecided: 'undecided-expired', approvedUncollected: 'approved-uncollected-expired', uncollected: 'uncollected-expired'
+      undecided: 'undecided-expired', approvedUncollected: 'approved-uncollected-expired', uncollected: 'uncollected-expired',
+      unanswered: 'unanswered-expired'
     });
+    // A question is answerable for as long as what it asks about stays true (operator ruling, 2026-10-05).
+    assert.deepEqual(bridgeStore.QUESTION_TTL_MS, { clarify: DAY, launch: 60 * 60 * 1000 });
   });
 
   for (const [type, limit] of [['work-blocked', 7 * DAY], ['operator-needed', 7 * DAY], ['fleet-idle', DAY]]) {
     it(`keeps a ${type} notification at exactly its limit and lets it go one millisecond later`, () => {
       const id = notification(type);
-      assert.deepEqual(bridgeStore.expire({ now: at(limit) }), { outbound: 0, candidates: 0 });
+      assert.deepEqual(bridgeStore.expire({ now: at(limit) }), { outbound: 0, candidates: 0, questions: 0 });
       assert.equal(itemState(id), 'ready');
-      assert.deepEqual(bridgeStore.expire({ now: at(limit + 1) }), { outbound: 1, candidates: 0 });
+      assert.deepEqual(bridgeStore.expire({ now: at(limit + 1) }), { outbound: 1, candidates: 0, questions: 0 });
       const item = bridgeStore.outbound.get(id);
       assert.deepEqual([item.state, item.dropCode, item.text], ['dropped', 'uncollected-expired', null]);
     });
@@ -260,7 +263,7 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       op: 'answer', requestId: 'req-answer-0001', routeId: 'rt_1', expectedVersion: 1, actor: 'master', proof: 'master-launch', masterGeneration: 1, at: T0,
       change: () => ({ set: { state: 'released' }, outbound: { idemKey: 'route:rt_1:answer', kind: 'reply', sourceLabel: 'Project Master', text: 'the answer', digest, releasedGeneration: 1 } })
     });
-    assert.deepEqual(bridgeStore.expire({ now: at(3650 * DAY) }), { outbound: 0, candidates: 0 });
+    assert.deepEqual(bridgeStore.expire({ now: at(3650 * DAY) }), { outbound: 0, candidates: 0, questions: 0 });
     const reply = store.getDb().prepare("SELECT * FROM bridge_outbound WHERE kind = 'reply'").get();
     assert.deepEqual([reply.state, reply.text], ['ready', 'the answer']);
   });
@@ -315,7 +318,7 @@ describe('bridge retention: what is let go, and exactly when (#2031)', () => {
       { what: 'outbound', outboundId: idle, kind: 'notification', type: 'fleet-idle' },
       { what: 'outbound', outboundId: item, kind: 'candidate', type: 'milestone' }
     ].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
-    assert.deepEqual(bridgeStore.expire({ now: at(31 * DAY) }), { outbound: 0, candidates: 0 }, 'nothing is let go twice');
+    assert.deepEqual(bridgeStore.expire({ now: at(31 * DAY) }), { outbound: 0, candidates: 0, questions: 0 }, 'nothing is let go twice');
     assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'expire'").get().n, 4);
   });
 
