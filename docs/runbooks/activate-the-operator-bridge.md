@@ -26,6 +26,9 @@ snapshot in step 1. Stop and tell the Architect. Until step 16 replaces it, Rule
 - The Discord bot token in the Keychain: service `tangleclaw-discord-helper`, account
   `discord-bot-token`. Never type it into a command line.
 - A second Discord account that is not the Operator's, for step 13.
+- Somewhere to keep cutover notes that are not for a machine to read: the Master's rule list
+  before it is changed, and anything a step tells you to note. The cutover receipt is a file the
+  steps write for themselves.
 - The bridge's controls are in the dashboard's global settings, section **Operator bridge
   (Discord)**. Rule controls are named in the steps that use them. No route is called by hand:
   nothing here is done with curl or the browser's developer tools.
@@ -36,45 +39,65 @@ If any step's expected result does not appear, stop and go to
 [Roll the operator bridge back](roll-back-the-operator-bridge.md).
 
 1. <a id="snapshot"></a>**Release executor:** while the old build is still running, take a
-   snapshot of the store. In a terminal, set `TC_CHECKOUT=<the checkout the service runs from>`,
-   then paste this as it is. The parentheses matter: a failure stops the block, not your
-   terminal. With `TC_CHECKOUT` unset, empty, or not the directory the server's launchd job
-   runs from, the block stops before it runs anything. Keep this terminal: every later command
-   of the release executor uses `TC_CHECKOUT`, and refuses to run without it.
+   snapshot of the store and write the cutover receipt. In a terminal, set
+   `TC_CHECKOUT=<the checkout the service runs from>`, then paste this as it is. The
+   parentheses matter: a failure stops the block, not your terminal.
 
    ```sh
    (
    set -eu
-   : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
-   grep -Fq "<string>$TC_CHECKOUT</string>" "$HOME/Library/LaunchAgents/com.tangleclaw.server.plist" || { echo "TC_CHECKOUT is not the checkout the server job runs from" >&2; exit 1; }
    umask 077
+   : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
+   SERVER="${TC_SERVER_LABEL:-com.tangleclaw.server}"
+   HELPER="${TC_HELPER_LABEL:-com.tangleclaw.bridge-helper}"
    STORE="${TC_STORE:-$HOME/.tangleclaw/tangleclaw.db}"
-   FROM="$(git -C "$TC_CHECKOUT" describe --tags --always)-$(git -C "$TC_CHECKOUT" rev-parse --short=12 HEAD)"
+   CUTOVERS="$HOME/.tangleclaw/cutovers"
+   grep -Fq "<string>$TC_CHECKOUT</string>" "$HOME/Library/LaunchAgents/$SERVER.plist" || { echo "TC_CHECKOUT is not the checkout the server job runs from" >&2; exit 1; }
+   [ -s "$STORE" ] || { echo "no store at $STORE" >&2; exit 1; }
+   FROM_COMMIT=$(git -C "$TC_CHECKOUT" rev-parse HEAD)
+   FROM_TAG=$(git -C "$TC_CHECKOUT" describe --tags --always)
    STAMP="${TC_SNAPSHOT_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-   SNAP="${TC_SNAPSHOT_DIR:-$HOME/.tangleclaw}/tangleclaw.pre-v5.31.$FROM.$STAMP.db"
+   SNAP="$CUTOVERS/tangleclaw.pre-v5.31.$STAMP.db"
+   RECEIPT="$CUTOVERS/cutover.$STAMP.receipt"
+   mkdir -p "$CUTOVERS"
    [ ! -e "$SNAP" ] || { echo "refusing to overwrite $SNAP" >&2; exit 1; }
+   [ ! -e "$RECEIPT" ] || { echo "refusing to overwrite $RECEIPT" >&2; exit 1; }
    sqlite3 "$STORE" ".backup '$SNAP'"
    [ -s "$SNAP" ] || { echo "snapshot is empty: $SNAP" >&2; exit 1; }
-   [ "$(sqlite3 "$SNAP" 'PRAGMA integrity_check')" = "ok" ] || { echo "integrity check failed: $SNAP" >&2; exit 1; }
    chmod 600 "$SNAP"
-   echo "snapshot: $SNAP"
-   echo "from:     $FROM"
-   echo "commit:   $(git -C "$TC_CHECKOUT" rev-parse HEAD)"
-   echo "schema:   $(sqlite3 "$SNAP" 'SELECT MAX(version) FROM schema_version')"
-   echo "sha256:   $(shasum -a 256 "$SNAP" | cut -d' ' -f1)"
+   [ "$(sqlite3 -readonly "$SNAP" 'PRAGMA integrity_check')" = "ok" ] || { echo "integrity check failed: $SNAP" >&2; exit 1; }
+   SCHEMA=$(sqlite3 -readonly "$SNAP" 'SELECT MAX(version) FROM schema_version')
+   case "$SCHEMA" in ""|*[!0-9]*) echo "could not read the snapshot's schema: $SNAP" >&2; exit 1 ;; esac
+   [ "$SCHEMA" -lt 54 ] || { echo "schema $SCHEMA: the new build has already opened this store, so this is not a pre-update snapshot: $SNAP" >&2; exit 1; }
+   SUM=$(shasum -a 256 "$SNAP")
+   SUM="${SUM%% *}"
+   case "$SUM" in *[!0-9a-f]*) echo "could not read the snapshot's sha256: $SNAP" >&2; exit 1 ;; esac
+   [ "${#SUM}" -eq 64 ] || { echo "could not read the snapshot's sha256: $SNAP" >&2; exit 1; }
+   [ "${#FROM_COMMIT}" -eq 40 ] || { echo "could not read the checkout's commit: $TC_CHECKOUT" >&2; exit 1; }
+   DRAFT="$RECEIPT.draft.$$"
+   printf '%s\n' "receipt=1" "written=$STAMP" "checkout=$TC_CHECKOUT" "store=$STORE" "server_label=$SERVER" "helper_label=$HELPER" "from_tag=$FROM_TAG" "from_commit=$FROM_COMMIT" "snapshot=$SNAP" "snapshot_sha256=$SUM" "snapshot_schema=$SCHEMA" > "$DRAFT"
+   ln "$DRAFT" "$RECEIPT"
+   rm "$DRAFT"
+   echo "receipt: $RECEIPT"
+   cat "$RECEIPT"
    )
    ```
 
-   → Expected: five lines, `snapshot:`, `from:`, `commit:`, `schema:` and `sha256:`. Copy all
-   five into the cutover receipt. `schema` is below 54.
-   → `schema: 54`: the new build has already opened this store. This is not a pre-update
-   snapshot. Stop.
+   → Expected: a line beginning `receipt:`, then the receipt itself, eleven lines from
+   `receipt=1` to `snapshot_schema=`. Set `TC_RECEIPT` to the path on the `receipt:` line, in
+   this terminal and in any other you use: every later command reads it.
+   → "TC_CHECKOUT is not the checkout the server job runs from": it is not the directory the
+   server's launchd job names. Nothing was written.
+   → "the new build has already opened this store": this is not a pre-update snapshot. Stop.
+   → "refusing to overwrite": a snapshot of this second exists. Paste it again.
+   The receipt and the snapshot are in `~/.tangleclaw/cutovers`, readable by you alone. The
+   receipt is written once and never replaced: later steps only add lines to it.
    Why first: the migration runs the moment v5.31.0 opens the store. A copy taken after that is
    a v54 store, which the previous build cannot use.
 
 2. **Operator:** in the dashboard's update notice, read what it offers.
    → Expected: `v5.31.0 or newer — update available`. Any other version number: stop.
-   The notice names a floor. What is actually installed is proved in step 5.
+   The notice names a floor. What is actually installed is proved in step 3a.
 
 3. **Operator:** press **Update now**, and confirm "Update TangleClaw to v5.31.0 or newer and
    restart?"
@@ -86,23 +109,87 @@ If any step's expected result does not appear, stop and go to
    note beginning "Your edits were kept and merged into the new release": read it to the
    release executor, then accept.
 
-4. **Release executor**, if step 3's alert said "Deploy assets changed": from the service
-   checkout, run `./deploy/install.sh`.
+3a. <a id="checked-commands"></a>**Release executor:** prove what was installed, and get the
+   commands every later step uses. Paste this first. It defines five commands in this terminal
+   and runs nothing:
+
+   ```sh
+   tc_receipt() (
+     set -eu
+     : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
+     [ -f "$TC_RECEIPT" ] || { echo "no such receipt: $TC_RECEIPT" >&2; exit 1; }
+     VALUE=$(sed -n "s/^$1=//p" "$TC_RECEIPT")
+     [ -n "$VALUE" ] || { echo "the receipt has no $1 line: $TC_RECEIPT" >&2; exit 1; }
+     printf '%s\n' "$VALUE"
+   )
+   tc_record() (
+     set -eu
+     : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
+     [ -f "$TC_RECEIPT" ] || { echo "no such receipt: $TC_RECEIPT" >&2; exit 1; }
+     case "$1" in ""|*[!a-z_]*) echo "not a receipt key: $1" >&2; exit 1 ;; esac
+     case "$2" in "") echo "nothing to record for $1" >&2; exit 1 ;; esac
+     HAD=$(sed -n "s/^$1=//p" "$TC_RECEIPT")
+     [ -z "$HAD" ] || { echo "the receipt already has $1=$HAD" >&2; exit 1; }
+     printf '%s\n' "$1=$2" >> "$TC_RECEIPT"
+     echo "recorded: $1=$2"
+   )
+   tc_checked() (
+     set -eu
+     CHECKOUT=$(tc_receipt checkout)
+     COMMIT=$(tc_receipt to_commit)
+     SERVER=$(tc_receipt server_label)
+     grep -Fq "<string>$CHECKOUT</string>" "$HOME/Library/LaunchAgents/$SERVER.plist" || { echo "the receipt's checkout is not the one the server job runs from: $CHECKOUT" >&2; exit 1; }
+     HEAD_NOW=$(git -C "$CHECKOUT" rev-parse HEAD)
+     [ "$HEAD_NOW" = "$COMMIT" ] || { echo "the checkout is not at the commit the receipt records: $CHECKOUT" >&2; exit 1; }
+     PROGRAM="$CHECKOUT/$1"
+     shift
+     [ -x "$PROGRAM" ] || { echo "not there, or not executable: $PROGRAM" >&2; exit 1; }
+     "$PROGRAM" "$@"
+   )
+   tc_helper() { tc_checked bin/tc-bridge-helper "$@"; }
+   tc_install() { tc_checked deploy/install.sh "$@"; }
+   ```
+
+   Then paste this:
+
+   ```sh
+   (
+   set -eu
+   CHECKOUT=$(tc_receipt checkout)
+   SERVER=$(tc_receipt server_label)
+   grep -Fq "<string>$CHECKOUT</string>" "$HOME/Library/LaunchAgents/$SERVER.plist" || { echo "the receipt's checkout is not the one the server job runs from: $CHECKOUT" >&2; exit 1; }
+   TAG=$(git -C "$CHECKOUT" describe --tags --exact-match)
+   [ "$TAG" = "v5.31.0" ] || { echo "the checkout is at $TAG, not v5.31.0: $CHECKOUT" >&2; exit 1; }
+   COMMIT=$(git -C "$CHECKOUT" rev-parse HEAD)
+   [ "${#COMMIT}" -eq 40 ] || { echo "could not read the checkout's commit: $CHECKOUT" >&2; exit 1; }
+   tc_record to_tag "$TAG"
+   tc_record to_commit "$COMMIT"
+   )
+   ```
+
+   → Expected: `recorded: to_tag=v5.31.0` and `recorded: to_commit=<40 characters>`.
+   → "the checkout is at … not v5.31.0", or git saying no tag matches exactly: the update did
+   not install v5.31.0. Stop, and roll back.
+   From here `tc_helper` and `tc_install` run the helper and the installer of the receipt's
+   checkout by their whole path, and only while that checkout is at the recorded commit and is
+   the one the server's job runs from. In a terminal where the first block was not pasted they
+   are not commands at all, and nothing runs.
+
+4. **Release executor**, if step 3's alert said "Deploy assets changed": `tc_install`
    → Expected: it finishes and the dashboard loads.
 
-5. **Release executor:** confirm what is running.
-   `git -C "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}" describe --tags`
-   → Expected: `v5.31.0`, exactly. Anything else: stop. An answer naming `TC_CHECKOUT` means it
-   is not set in this terminal: nothing ran. Set it and run the line again.
-   `sqlite3 ~/.tangleclaw/tangleclaw.db 'SELECT MAX(version) FROM schema_version'` → Expected: `54`.
-   The dashboard loads.
+5. **Release executor:** confirm the store was migrated, and record it.
+   `tc_record to_schema "$(sqlite3 -readonly "$(tc_receipt store)" 'SELECT MAX(version) FROM schema_version')"`
+   → Expected: `recorded: to_schema=54`, and the dashboard loads.
+   → "database is locked": the server was writing at that moment. Run it again.
+   → Any other number, or "nothing to record": stop, and roll back.
    → If the server does not come up: `~/.tangleclaw/logs/server.err.log` names each bridge object
    that failed its shape check. Roll back.
 
 ## Phase B: prepare
 
 6. <a id="master-rule"></a>**Operator:** bring the Master's first hard rule to the shipped text. Open the Master panel,
-   its settings, **Hard rules**. First write the current rule list into the cutover receipt.
+   its settings, **Hard rules**. First copy the current rule list into the cutover notes.
    This is the Master's first hard rule as shipped, whole, word for word. The asterisks are
    part of it:
 
@@ -148,6 +235,9 @@ If any step's expected result does not appear, stop and go to
    appears once, headed "The helper token, shown once."
    → The panel says "Sign in to see and change it": the browser has no account session. Sign in.
    → If a token is still active the button reads **Replace the helper token**.
+   → "Not done: The helper token is shown once, in this answer, so it is created only over https
+   or from this machine itself.": the dashboard is open over plain http from another machine.
+   Nothing was created. Open it over https, or on the machine TangleClaw runs on, and press again.
    > 🚧 **UNVERIFIED** — the panel is proven by tests against the real operator routes. No person
    > has yet used it in a browser on this install · the first activation is that check; if a
    > control does not do what a step says, stop and roll back.
@@ -155,13 +245,13 @@ If any step's expected result does not appear, stop and go to
 10. **Release executor:** store the helper token, then configure the helper. Run the first
     command, have the Operator press **Copy**, paste at the command's prompt, then have the
     Operator press **I have stored it**:
-    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" set-secret helper`
-    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" configure --base-url <loopback address> --author <id> --guild <id> --channel <id>`
+    `tc_helper set-secret helper`
+    `tc_helper configure --base-url <loopback address> --author <id> --guild <id> --channel <id>`
     The address is the one TangleClaw answers on from this machine itself, `http://127.0.0.1:3102`
     on a default install. The helper refuses any other host.
     → Expected: `Stored the helper token in the Keychain.` and `Config written.`
 
-11. **Release executor:** `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" preflight`
+11. **Release executor:** `tc_helper preflight`
     → Expected: exit 0; every check `ok` except `bridge-enabled` and `discord-post`, which say
     `unproven`; and a last line beginning `No check failed.`
     → If any line says `FAIL`: fix what it names and run it again. Do not go on.
@@ -169,9 +259,9 @@ If any step's expected result does not appear, stop and go to
 ## Phase C: switch on and prove
 
 12. **Operator:** press **Enable the bridge** and confirm. Then the release executor runs
-    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" install-launchd`
-    `grep -c "<string>${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper</string>" "$HOME/Library/LaunchAgents/com.tangleclaw.bridge-helper.plist"`
-    `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" status`
+    `tc_helper install-launchd`
+    `grep -c "<string>$(tc_receipt checkout)/bin/tc-bridge-helper</string>" "$HOME/Library/LaunchAgents/$(tc_receipt helper_label).plist"`
+    `tc_helper status`
     → Expected of the second command: `1`. The helper's launchd job runs the helper of this exact
     checkout. Anything else: roll back.
     → Expected: the panel's Bridge line says **enabled** and Project Master shows `listener
@@ -219,7 +309,8 @@ If any step's expected result does not appear, stop and go to
 
 16. **Operator:** make that the live rule. In the settings of the Architect's project, which
     holds Rule #145, put the text of step 15 into "Add a startup rule…" and press **Add**. The
-    new row is active at once. Write its number, Rule #N, into the cutover receipt. Only then
+    new row is active at once. The release executor records its number: `tc_record discord_rule <N>`.
+    Only then
     untick **Rule #145** and **Rule #128** to disable them. Do not delete either. Rule #128 is
     the older Discord rule that #145 superseded and that was left active beside it. Then, in **Operator bridge (Discord)** under
     "Telling sessions of tc candidate", press **Switch it on** and confirm.
@@ -239,7 +330,7 @@ If any step's expected result does not appear, stop and go to
     the launch steps, which do not carry that section, so it cannot show this.
     → The session says no and the line says only `on`: the verb did not reach this one session.
     That is degraded delivery, not a failed activation. Tell that session the command, as in
-    step 14, write its project and the time into the cutover receipt, and go on.
+    step 14, write its project and the time into the cutover notes, and go on.
     → Roll back only if the line says `off`, the session was launched before the switch was
     turned on, or the bridge itself fails one of the checks in this runbook.
     → If the line adds "a session of project <id> was not told", with this session's project and
@@ -258,10 +349,10 @@ If any step's expected result does not appear, stop and go to
 ## Done when
 
 Step 18's answer is in Discord. `tc bridge status`, run by the Master in its own pane, shows the
-bridge enabled with no circuit open. `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" status`
-shows `held: nothing` and a
-`last pass:` line ending `ok`. The cutover receipt holds: the five snapshot lines, the Master's
-rule list before step 6, and the number of the new Discord rule.
+bridge enabled with no circuit open. `tc_helper status` shows `held: nothing` and a
+`last pass:` line ending `ok`. The cutover receipt holds the snapshot, both builds, the schema
+and the number of the new Discord rule; the cutover notes hold the Master's rule list before
+step 6.
 
 ## If this doesn't work
 

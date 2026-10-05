@@ -47,7 +47,7 @@ because this page exists.
   the helper's Gateway connection.** That the bridge is operational takes three things
   together: the bridge enabled (`GET /api/bridge/operator/status`), a verified Master
   (`tc bridge status` answers with its generation), and the Gateway `ready`
-  (`bin/tc-bridge-helper status`). The helper connects whenever it runs, and launchd starts it
+  (the helper's `status` command). The helper connects whenever it runs, and launchd starts it
   at every login, so the bot can be online while the bridge is disabled. `tc bridge status`
   answers in the Project Master's pane only.
 - **Messages sent while the helper is down are not caught up.** The Gateway does not replay
@@ -76,10 +76,22 @@ In the Discord Developer Portal, for the application:
    ids: your own user id, the server id and the channel id. They are the same three the
    bridge's allowlist holds.
 
+### Which helper you are running
+
+Run the helper by its whole path, under the checkout the TangleClaw service runs from, and never
+as `bin/tc-bridge-helper` from wherever the terminal happens to be. `install-launchd` writes the
+location of the script it was run as into the launchd job, so a helper started from another
+worktree installs a job that runs that worktree's code, with both secrets, from then on.
+
+Set `TC_CHECKOUT` to the service's checkout once. Every command below refuses to run without it.
+During a cutover, use the `tc_helper` command of
+[the activation runbook](runbooks/activate-the-operator-bridge.md#checked-commands) instead: it
+also proves the checkout is the one the server's job names and is at the recorded commit.
+
 ### 2. The helper's config
 
 ```sh
-bin/tc-bridge-helper configure --base-url http://127.0.0.1:3102 \
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" configure --base-url http://127.0.0.1:3102 \
   --author <your user id> --guild <server id> --channel <channel id>
 ```
 
@@ -96,7 +108,7 @@ is outside the repository, so no Discord id is in a tracked file.
 ### 3. The two secrets, in the Keychain
 
 ```sh
-bin/tc-bridge-helper set-secret helper    # paste the bridge's bht_ helper token
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" set-secret helper    # paste the bridge's bht_ helper token
 ```
 
 The helper token comes from the dashboard: global settings, **Operator bridge (Discord)**,
@@ -120,7 +132,7 @@ job or a shell command. `set-secret` takes no token as an argument.
 ### 4. Check it, without posting anything
 
 ```sh
-bin/tc-bridge-helper preflight
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" preflight
 ```
 
 Preflight proves everything it can without posting, claiming or changing anything. One line a
@@ -146,7 +158,7 @@ finds every claim refused, backs off to five minutes, and answers each operator 
 "Not delivered: the TangleClaw operator bridge is turned off."
 
 ```sh
-bin/tc-bridge-helper install-launchd
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" install-launchd
 ```
 
 This writes `~/Library/LaunchAgents/com.tangleclaw.bridge-helper.plist` from
@@ -165,7 +177,7 @@ identifies afresh at the default address.
 
 ## Operating it
 
-- **`bin/tc-bridge-helper status`** shows whether the config is set, whether each secret is
+- **`"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" status`** shows whether the config is set, whether each secret is
   present (never its value), whether the helper is running, the Gateway's state, the last pass,
   how many items are in progress, and any item held for you. It shows no secret, no message text and no Discord id.
 - **The log** is `~/.tangleclaw/logs/bridge-helper.log`: one JSON line per event, with a
@@ -175,7 +187,8 @@ identifies afresh at the default address.
   slowly; truncate it or add a `newsyslog` rule if it matters.
 - **Stopping:** `launchctl bootout gui/$(id -u)/com.tangleclaw.bridge-helper`. The job file
   stays, and launchd loads it again at your next login.
-- **Starting again:** `bin/tc-bridge-helper install-launchd`.
+- **Starting again:** `"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" install-launchd`, by that whole path: it rewrites the job to run the
+  helper it was started as.
 - **Only one helper runs.** A second refuses to start, because two would post every item twice.
   The lock names a process id and counts only if that process is a helper, so a lock left by a
   helper that died is taken over even when something else now has its id.
@@ -183,7 +196,7 @@ identifies afresh at the default address.
 ## Removing it
 
 ```sh
-bin/tc-bridge-helper uninstall-launchd
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" uninstall-launchd
 security delete-generic-password -s tangleclaw-bridge-helper -a bridge-helper-token
 rm -r ~/.tangleclaw/bridge-helper
 ```
