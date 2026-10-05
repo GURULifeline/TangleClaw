@@ -566,6 +566,96 @@ describe('the Operator Bridge panel (#2031)', () => {
     });
   });
 
+  describe('what the bridge may reach', () => {
+    const bridgeReach = require('../lib/bridge-reach');
+
+    it('lists every reachable project, takes one out of reach without asking, and asks before putting it back', async () => {
+      const db = store.getDb();
+      db.exec('DELETE FROM bridge_project_optouts');
+      const alpha = store.projects.create({ name: `Reach Alpha ${Date.now()}`, path: path.join(tmpDir, `reach-a-${Date.now()}`) });
+      const wires = real(SIGNED_IN);
+      const { panel, asked } = controller(wires, { confirm: (text) => !/back within reach/.test(text) });
+      await panel.load();
+      let html = panel.html();
+      assert.match(html, /What the bridge may reach/);
+      assert.match(html, /Scope<\/span> <span class="ob-value">every project on this install/);
+      assert.match(html, /Taking one out of reach is done here and nowhere else:\s+the Project Master cannot do it, and nothing said in the chat can\./);
+      assert.ok(html.includes(`data-bridge-reachable="${alpha.id}">project ${alpha.id}: ${alpha.name} `), 'drawn from the server\'s answer');
+      assert.ok(html.includes(`data-bridge-action="opt-out" data-bridge-project="${alpha.id}">Take out of reach</button>`));
+
+      // Narrowing asks nothing.
+      assert.equal(await panel.act('opt-out', { projectId: String(alpha.id) }), 'done');
+      assert.deepEqual(asked, []);
+      assert.equal(bridgeStore.optouts.has(alpha.id), true);
+      assert.equal(panel.state.notice.text, `Project ${alpha.id} is out of reach of the bridge. Nothing is routed to it and no session is launched for it.`);
+      html = panel.html();
+      assert.ok(!html.includes(`data-bridge-reachable="${alpha.id}"`), 'no longer listed as reachable');
+      assert.ok(html.includes(`data-bridge-optout="${alpha.id}">project ${alpha.id}: ${alpha.name}, since `), 'and listed as out of reach by the operator\'s choice');
+      assert.ok(html.includes(`data-bridge-action="opt-in" data-bridge-project="${alpha.id}">Put back within reach</button>`));
+      assert.equal(bridgeReach.outOfReach(store.projects.get(alpha.id)), 'opted-out');
+
+      // Widening asks, and a no sends nothing.
+      const writes = () => wires.calls.filter((c) => c.method !== 'GET').length;
+      const before = writes();
+      assert.equal(await panel.act('opt-in', { projectId: String(alpha.id) }), 'declined');
+      assert.match(asked[0], new RegExp(`^Put project ${alpha.id} back within reach of the bridge\\? Messages may then be routed to it, and a session launched for it when you say yes in the chat\\.`));
+      assert.deepEqual([writes(), bridgeStore.optouts.has(alpha.id)], [before, true]);
+      const yes = controller(wires);
+      await yes.panel.load();
+      assert.equal(await yes.panel.act('opt-in', { projectId: String(alpha.id) }), 'done');
+      assert.equal(bridgeStore.optouts.has(alpha.id), false);
+      assert.ok(yes.panel.html().includes(`data-bridge-reachable="${alpha.id}"`));
+
+      // A control with no project behind it does nothing at all.
+      for (const projectId of [undefined, '', 'abc', '0', '-3', '1.5']) {
+        assert.equal(await yes.panel.act('opt-out', { projectId }), 'blocked', String(projectId));
+        assert.equal(await yes.panel.act('opt-in', { projectId }), 'blocked', String(projectId));
+      }
+      assert.equal(yes.panel.state.notice.text, 'No such project.');
+    });
+
+    it('draws whatever the server names, escaped', async () => {
+      const status = {
+        enabled: false, allowlist: null, helperToken: null, masterCredential: null, openRoutes: 0, waitingForHelper: 0, setAside: 0,
+        reach: {
+          scope: { kind: 'group', groupName: '<img src=x onerror=1>' },
+          reachable: [{ projectId: 7, name: '<script>a</script>' }],
+          optouts: [{ projectId: 9, name: '"><b>gone</b>', setAt: '<2026>' }, { projectId: 11, name: null, setAt: '2026-10-05T00:00:00.000Z' }]
+        }
+      };
+      const { panel } = controller(scripted(() => ({ status: 200, body: status })));
+      await panel.load();
+      const html = panel.html();
+      for (const raw of ['<img src=x', '<script>a', '"><b>gone', '<2026>']) assert.ok(!html.includes(raw), raw);
+      assert.ok(html.includes('the &lt;img src=x onerror=1&gt; group'));
+      assert.ok(html.includes('project 7: &lt;script&gt;a&lt;/script&gt;'));
+      assert.ok(html.includes('project 11 (no longer in the registry), since 2026-10-05T00:00:00.000Z'), 'an opt-out whose project is gone can still be seen and put back');
+    });
+
+    it('says when the scope cannot be resolved, and does not show that as an empty fleet', async () => {
+      const real_ = bridgeReach._deps.masterScope;
+      bridgeReach._deps.masterScope = () => ({ type: 'group', groupId: 'no-such-group' });
+      try {
+        const { panel } = controller(real(SIGNED_IN));
+        await panel.load();
+        const html = panel.html();
+        assert.match(html, /<strong>UNRESOLVED<\/strong>: the Project Master's scope names a project group that cannot be found, so the bridge reaches <strong>no project<\/strong>\. Put the scope right in the Master settings\./);
+        assert.match(html, /No project is within reach\./);
+        assert.ok(!/data-bridge-reachable=/.test(html));
+      } finally { bridgeReach._deps.masterScope = real_; }
+    });
+
+    it('a caller who is not the signed-in operator is shown none of it and can change none of it', async () => {
+      const project = store.projects.create({ name: `Reach Beta ${Date.now()}`, path: path.join(tmpDir, `reach-b-${Date.now()}`) });
+      const wires = real(AMBIENT);
+      const { panel } = controller(wires);
+      await panel.load();
+      assert.ok(!/What the bridge may reach|data-bridge-reachable|opt-out/.test(panel.html()));
+      assert.equal(await panel.act('opt-out', { projectId: String(project.id) }), 'failed');
+      assert.equal(bridgeStore.optouts.has(project.id), false);
+    });
+  });
+
   describe('rolling back', () => {
     it('is disable first: the token cannot be revoked from the panel while the bridge is enabled', async () => {
       const wires = real(SIGNED_IN);

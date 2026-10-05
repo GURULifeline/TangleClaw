@@ -131,12 +131,53 @@ kept for it. A Medusa send from anything else under such an id is refused before
 
 ### Addresses
 
-An address is a leading `@name` that names **exactly one** destination:
+An address is a leading `@name` that names **exactly one** destination the bridge may reach:
 
 - `@master`, which always means the Project Master and cannot be an alias;
 - an operator alias;
 - a project's exact name, without regard to case;
+- a project's slug: its name in lower case, with each run of anything but a letter or a digit
+  made one dash. It counts only while exactly one reachable project has it;
 - a project's id.
+
+### What the bridge may reach
+
+No project is connected to the bridge by hand. A project is reachable when it is in the
+registry, is not archived, is inside the Project Master's scope, and has not been opted out by
+the operator. That is worked out from the registry each time it is asked, and remembered
+nowhere: a project created a moment ago is reachable now, and one archived, deleted, opted out
+or moved out of the scope a moment ago is not. One resolver (`lib/bridge-reach.js`) answers for
+what the gateway suggests, what the Master may route to, pin to or ask to have launched, and
+what a launch re-checks. A nickname is an overlay on a project id: one whose project is out of
+reach names nothing.
+
+- **The Master's scope bounds it, and fails closed.** A scope that names a project group which
+  no longer exists, or that cannot be read or understood, reaches no project at all. The
+  Master's own identity text falls back to every project in that case; the bridge does not.
+  It is said, not left as an empty list: `tc bridge status` and `tc bridge destinations` say
+  `SCOPE UNRESOLVED`, the operator's panel says so, and the gateway audits the change once
+  when it happens (`scope-unresolved`) and once when it is put right (`scope-resolved`).
+- **Opting a project out is the operator's alone,** from the signed-in panel
+  (`POST` and `DELETE /api/bridge/operator/optouts`). The Master has no way to do it, and
+  nothing said in the chat does it. It takes effect at once and is audited.
+- **`tc bridge destinations`** lists each reachable project with every name it answers to and
+  how it stands: running; not running; running but unreachable over Medusa; or with more than
+  one live session.
+- **More than one live session of a project is an anomaly, and is never guessed at.** Launch
+  policy allows one. Nothing is sent to either: a route write is refused
+  `409 TARGET_AMBIGUOUS`, and a message whose project gains a second session before it is sent
+  goes back to the Master as `target-ambiguous`. The Master asks the operator.
+
+A destination the Master names that the bridge may not reach is refused, with the message left
+held as it was:
+
+| What was named | Answer |
+|---|---|
+| Nothing known, or an archived project | `400 UNKNOWN_DESTINATION` |
+| More than one thing | `409 DESTINATION_AMBIGUOUS` |
+| A project outside the Master's scope | `409 DESTINATION_OUT_OF_SCOPE` |
+| A project the operator opted out | `409 DESTINATION_OPTED_OUT` |
+| Any project, while the scope is unresolved | `409 SCOPE_UNRESOLVED` |
 
 An address is a suggestion to the Master, like every other way a destination is found: it
 names where the operator meant the message to go, and the Master's route write is what sends
@@ -288,7 +329,7 @@ nothing more:
 
 | Code | Why |
 |---|---|
-| `project-gone`, `project-archived`, `project-opted-out` | The project is no longer one the bridge may reach. |
+| `project-gone`, `project-archived`, `project-opted-out`, `project-out-of-scope`, `scope-unresolved` | The project is no longer one the bridge may reach. |
 | `held`, `stopped`, `control-unavailable` | The project's control lane is held or stopped, or could not be read. The launch route itself refuses only a stopped lane; the bridge refuses both. |
 | `wrap-running` | A wrap is running for the project. |
 | `launch-refused:<CODE>` | The launch function refused. Only its own closed code is passed on, never its prose. |
@@ -364,6 +405,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | Command | Does |
 |---|---|
 | `tc bridge status` | Says whether the bridge is enabled and which generation is asking. Answers while disabled. |
+| `tc bridge destinations` | Lists every project the bridge may reach, with each name it answers to and whether it is running. Worked out as it is asked. Answers while disabled. |
 | `tc bridge routes [--state <state>]...` | Lists routes, oldest first, without bodies. Open states by default. |
 | `tc bridge read <route-id>` | Shows one route with the text still held for it. |
 | `tc bridge route <route-id> --version <n> --to <dest>` | Names the destination of a route that is waiting for the Master. The gateway then sends it. With `--answered-by <route-id>`, also adopts that operator reply as the answer to the question asked about it. |
@@ -381,7 +423,7 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge circuit ack <episode>` | Says the Master has taken up the open configuration episode. The gateway then stops telling it. The episode stays open. |
 | `tc bridge reset (--requeue \| --withdraw)` | Closes the open configuration episode and puts back, or withdraws, the items it set aside. Withdrawing a route's answer this way closes that route and clears its text, as `withdraw` does. |
 
-`<dest>` is `master`, a project's exact name or a project's id.
+`<dest>` is `master`, or a reachable project's id, exact name, slug or nickname.
 
 The Master is read-only everywhere else. Its first baseline rule carries one exception, and this is
 the sentence, word for word:
@@ -760,6 +802,7 @@ it has to sign in, and nothing of the bridge.
 | Control | What it does |
 |---|---|
 | Enable / Disable the bridge | Enabling asks first. Disabling asks nothing and acts at once: it is the kill switch. |
+| Take a project out of reach / Put it back | Lists every reachable project and every one opted out, and says how the Master's scope reads. Taking one out of reach asks nothing and acts at once. Putting one back asks first. |
 | Set the allowlist | The exact author, server and channel, as Discord's numbers. It names all three back before it sends. |
 | Create or replace the helper token | Shows the value once. Copying is a button the operator presses; nothing is copied without it. The page keeps the value in no storage, no URL and no log, and it is gone when dismissed or when settings closes. It goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`, which reads it from standard input. Created only over https, from this machine itself, or through a proxy on this machine that says the browser came over https; from anywhere else it is refused with nothing created (`403 SECURE_TRANSPORT_REQUIRED`). |
 | Revoke the helper token | Only once the bridge is disabled: rolling back is disable first. |
@@ -814,8 +857,8 @@ standing; `bridge_outbound`, `bridge_outbound_parts` and `bridge_route_reply_con
 `question` kind and the id of the question an item asks. `bridge_aliases` has columns for who
 last changed a nickname, when, and on which operator message; nothing writes them yet, and
 rows from an earlier store come through with them empty. `bridge_launches` holds each
-consented launch and how it stands. `bridge_project_optouts` is read before a launch is asked
-about or made; nothing writes it yet. The store itself holds the rules that must not depend on a caller: one open
+consented launch and how it stands. `bridge_project_optouts` holds the projects the operator has
+taken out of reach, written only by the operator's routes. The store itself holds the rules that must not depend on a caller: one open
 question per message, one use of an operator's reply, and a settled question never reopened.
 
 "Superset" is a statement about shape: every object an earlier version required is still there

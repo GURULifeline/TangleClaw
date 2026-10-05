@@ -240,7 +240,7 @@ describe('#991 the launch route warms the cache before the synchronous launch re
     assert.match(warmup, /checkoutFreshness\.refreshForLaunch\(project, store\.config\.load\(\)\)/, 'with the checkout facts measured beside it (#1678)');
   });
 
-  it('the warm-up waits for both probes and never rejects, so a failed probe is an unknown in the prime and not a failed launch', async () => {
+  it('the warm-up starts both probes and returns only once the CI probe has', async () => {
     const warmup = require('../lib/launch-warmup');
     const ciStatus = require('../lib/ci-status');
     const checkoutFreshness = require('../lib/checkout-freshness');

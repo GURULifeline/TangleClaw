@@ -213,6 +213,13 @@ no Master judgement in between. The operator has ruled that out.
   READY and to be the session that was launched, with the server's own listener for it; then
   the original is sent on unchanged. A failure is told and never retried, no other target is
   tried, and the bridge never ends a session.
+- **Reachability is automatic and bounded** (operator ruling, 2026-10-05). No project is
+  connected by hand: every project in the registry that is not archived, is inside the
+  Master's scope and is not opted out is reachable, worked out as it is asked and cached
+  nowhere. Nicknames are overlays on project ids, never the source of reachability. The scope
+  fails closed: an unresolvable one reaches nothing, and is said and audited. Opt-out is the
+  signed-in operator's alone. Two live sessions of one project are never guessed between. No
+  session is designated primary in v5.31.
 
 ### 10. The interim path, and what cutover requires (D4)
 

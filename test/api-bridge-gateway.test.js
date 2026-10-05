@@ -21,6 +21,7 @@ const bridgeStore = require('../lib/bridge-store');
 const bridgeApi = require('../lib/bridge-api');
 const gateway = require('../lib/bridge-gateway');
 const handoff = require('../lib/bridge-handoff');
+const bridgeReach = require('../lib/bridge-reach');
 const { operatorHeaders } = require('./_shared-docs-callers');
 const { install } = require('./_bridge-hub');
 const { execFile } = require('node:child_process');
@@ -403,6 +404,7 @@ describe('bridge API: the round trip (#2031)', () => {
     // The whole list, from the route table itself: adding to it, or taking from it, is a decision.
     const answered = bridgeApi.ROUTES.filter((r) => r.whileDisabled).map((r) => `${r.method} ${r.path}`).sort();
     assert.deepEqual(answered, [
+      'GET /api/bridge/master/destinations',
       'GET /api/bridge/master/outbound/blocked',
       'GET /api/bridge/master/routes',
       'GET /api/bridge/master/routes/:routeId',
@@ -1733,6 +1735,7 @@ describe('bridge API: the round trip (#2031)', () => {
         const swapped = await consented();
         await gateway.tick();
         const first = store.sessions.getActive(swapped.project.id);
+        store.sessions.kill(first.id, 'replaced');
         const usurper = hub.anotherSession(swapped.project);
         db().prepare("UPDATE launch_sequences SET applicability = 'applicable' WHERE session_id = ?").run(usurper.sessionId);
         becomesReady(usurper.sessionId);
@@ -1781,6 +1784,7 @@ describe('bridge API: the round trip (#2031)', () => {
           })
         });
         assert.equal(sentOn.outcome, 'applied');
+        store.sessions.kill(original.id, 'replaced');
         const newcomer = hub.anotherSession(raced.project);
         await gateway.advance(raced.routeId);
         const bounced = bridgeStore.routes.get(raced.routeId);
@@ -1853,8 +1857,11 @@ describe('bridge API: the round trip (#2031)', () => {
     it('every condition is asked again immediately before launching, and while waiting', async () => {
       try {
         const lane = (blocked, stopped) => () => ({ ...realControl(), blockingOf: () => ({ blocked, stopped, code: stopped ? 'CONTROL_STOPPED' : 'CONTROL_HELD' }) });
+        const realScope = bridgeReach._deps.masterScope;
         const BEFORE = [
           ['project-archived', (c) => store.projects.archive(c.project.id), () => {}],
+          ['scope-unresolved', () => { bridgeReach._deps.masterScope = () => ({ type: 'group', groupId: 'no-such-group' }); }, () => { bridgeReach._deps.masterScope = realScope; }],
+          ['project-out-of-scope', () => { const g = store.projectGroups.create({ name: `Elsewhere${++seq}` }); bridgeReach._deps.masterScope = () => ({ type: 'group', groupId: g.id }); }, () => { bridgeReach._deps.masterScope = realScope; }],
           ['project-opted-out', (c) => db().prepare("INSERT INTO bridge_project_optouts (project_id, set_by, set_at) VALUES (?, 'operator', ?)").run(c.project.id, new Date().toISOString()), () => {}],
           ['held', () => { gateway._deps.controlState = lane(true, false); }, () => { gateway._deps.controlState = realControl; }],
           ['stopped', () => { gateway._deps.controlState = lane(true, true); }, () => { gateway._deps.controlState = realControl; }],
@@ -2029,6 +2036,30 @@ describe('bridge API: the round trip (#2031)', () => {
       } finally { restore(); }
     });
 
+    it('a warm-up that fails launches nothing, and a pass that never returns does not stop the next one for ever', async () => {
+      const realWall = gateway._deps.wallClock;
+      try {
+        gateway._deps.warmForLaunch = async () => { throw new Error('network unreachable'); };
+        const cold = await consented();
+        await gateway.tick();
+        assert.deepEqual([launchOf(cold.routeId).state, launchOf(cold.routeId).failureCode, launched.length], ['failed', 'launch-error', 0], 'not launched on facts it could not gather');
+
+        // The first pass's warm-up never comes back.
+        let calls = 0;
+        gateway._deps.warmForLaunch = () => { calls += 1; return calls === 1 ? new Promise(() => {}) : Promise.resolve(); };
+        const stuck = await consented();
+        gateway.tick();
+        await new Promise((resolve) => setImmediate(resolve));
+        const beside = await Promise.race([gateway.tick(), new Promise((resolve) => setTimeout(() => resolve('waited'), 2000))]);
+        assert.deepEqual([beside.launches, launchOf(stuck.routeId).state], [{ begun: 0, dispatched: 0 }, 'queued'], 'for as long as a pass can honestly take, the next leaves it alone');
+        // Past that, it is taken to be gone, and the launch is begun by the pass that is alive.
+        const wall = realWall();
+        gateway._deps.wallClock = () => wall + 6 * 60 * 1000;
+        await gateway.tick();
+        assert.deepEqual([launchOf(stuck.routeId).state, launched.length], ['waiting-ready', 1]);
+      } finally { gateway._deps.wallClock = realWall; gateway._reset(); restore(); }
+    });
+
     it('a project with a session that cannot be reached is not asked about: there is nothing to launch', async () => {
       try {
         const project = stopped();
@@ -2093,6 +2124,187 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.match(declined.stdout, /is closed on the operator's answer: nothing was launched and nothing was sent on/);
         const stray = await tc(['bridge', 'ask', routeId, '--version', '1', '--text', 'x', '--project', 'y']);
         assert.deepEqual([stray.code, /unexpected --project/.test(stray.stderr)], [1, true]);
+      } finally { restore(); }
+    });
+  });
+
+  describe('what the bridge may reach', () => {
+    const version = (id) => bridgeStore.routes.get(id).version;
+    const db = () => store.getDb();
+    const suggestion = (routeId) => bridgeStore.audit.suggestionFor(routeId);
+    let realScope;
+    beforeEach(() => { realScope = bridgeReach._deps.masterScope; });
+    const restore = () => { bridgeReach._deps.masterScope = realScope; };
+    /** An inbound, held, as it arrived. */
+    const inbound = async (text) => (await operatorWrites(`m${++seq}`, text)).body.routeId;
+    /** A Master route write that must be refused and leave the route exactly as it was. */
+    const refusedRoute = async (routeId, to, status, code, why) => {
+      const before = JSON.stringify(bridgeStore.routes.get(routeId));
+      const sent = hub.fromGateway().length;
+      const res = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to });
+      assert.deepEqual([res.status, res.body.code], [status, code], why);
+      assert.equal(JSON.stringify(bridgeStore.routes.get(routeId)), before, `${why}: the message is still held as it was`);
+      assert.equal(hub.fromGateway().length, sent, `${why}: nothing was sent`);
+    };
+
+    it('a new project is reachable with no step, by its name, its slug or its id, and what is suggested is what can be routed to', async () => {
+      try {
+        // No spaces: the stand-in Hub makes a workspace id of the name. The underscores still make its slug differ.
+        const fresh = liveProject(`Fresh_Project_${++seq}`);
+        const slug = bridgeReach.slugOf(fresh.project.name);
+        const byName = await inbound(`@${slug} are you there?`);
+        assert.deepEqual(suggestion(byName), { by: 'alias', to: 'project', projectId: fresh.project.id, reason: null }, 'a project is addressed by its slug');
+        for (const to of [slug, fresh.project.name, fresh.project.id]) {
+          const routeId = await inbound('@nobody-in-particular hello');
+          const res = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to });
+          assert.deepEqual([res.status, res.body.code || null, res.body.route && res.body.route.state, res.body.route && res.body.route.destination && res.body.route.destination.projectId], [200, null, 'routed', fresh.project.id], `${JSON.stringify(to)}: ${res.body.route && res.body.route.failureCode}`);
+        }
+        const listed = await call('GET', '/api/bridge/master/destinations', { headers: asMaster() });
+        assert.equal(listed.status, 200);
+        assert.deepEqual(listed.body.destinations.find((d) => d.projectId === fresh.project.id), { projectId: fresh.project.id, name: fresh.project.name, slug, nicknames: [], live: 'live' });
+        assert.deepEqual(listed.body.scope, { kind: 'all' });
+      } finally { restore(); }
+    });
+
+    it('opting a project out is the signed-in operator\'s alone, takes effect at once, and is undone the same way', async () => {
+      try {
+        const target = liveProject(`Reach${++seq}`);
+        // Not the Master, not the helper, not a caller who only looks like the dashboard.
+        for (const [who, headers] of [['the Master', asMaster()], ['the helper', asHelper()], ['nobody', {}]]) {
+          const res = await call('POST', '/api/bridge/operator/optouts', { headers, body: { project: target.project.id } });
+          assert.ok([401, 403].includes(res.status), `${who}: ${res.status}`);
+        }
+        const ambient = await bridgeApi.handle(bridgeApi.routeFor('POST', '/api/bridge/operator/optouts'), { req: AMBIENT, headers: {}, body: { project: target.project.id } });
+        assert.ok([401, 403].includes(ambient.status), 'a dashboard-shaped request with no signed-in operator');
+        assert.equal(bridgeStore.optouts.has(target.project.id), false, 'none of them changed anything');
+        for (const project of [undefined, 'by-name', 0, -1, 1.5, 99999999]) {
+          const bad = await asOperator('POST', '/api/bridge/operator/optouts', { body: { project } });
+          assert.deepEqual([bad.status, bad.body.code], [400, 'UNKNOWN_PROJECT'], JSON.stringify(project));
+        }
+
+        const out = await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } });
+        assert.deepEqual([out.status, out.body], [200, { projectId: target.project.id, optedOut: true, changed: true }]);
+        const again = await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } });
+        assert.deepEqual([again.status, again.body.changed], [200, false]);
+        assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'optout-set' AND detail_json LIKE ?").get(`%"projectId":${target.project.id},%`).n, 1, 'audited once, by who did it');
+
+        // At once: not suggested, not routable, not launchable, not listed.
+        const addressed = await inbound(`@${target.project.name} hello`);
+        assert.deepEqual(suggestion(addressed), { by: null, to: null, projectId: null, reason: 'address-unresolved' });
+        await refusedRoute(addressed, target.project.id, 409, 'DESTINATION_OPTED_OUT', 'by id');
+        await refusedRoute(addressed, target.project.name, 409, 'DESTINATION_OPTED_OUT', 'by name');
+        const ask = await masterWrites(addressed, 'ask-launch', { expectedVersion: version(addressed), project: target.project.id });
+        assert.deepEqual([ask.status, ask.body.code], [409, 'DESTINATION_OPTED_OUT']);
+        const pin = await masterWrites(addressed, 'pin', { expectedVersion: version(addressed), to: target.project.id });
+        assert.deepEqual([pin.status, pin.body.code], [409, 'DESTINATION_OPTED_OUT'], 'nor pinned to');
+        const listed = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
+        assert.equal(listed.destinations.some((d) => d.projectId === target.project.id), false);
+        assert.ok(listed.optedOut >= 1, 'the Master is told that some are out of reach, and not which');
+        const status = (await asOperator('GET', '/api/bridge/operator/status')).body;
+        assert.deepEqual(status.reach.optouts.filter((o) => o.projectId === target.project.id).map((o) => o.name), [target.project.name]);
+        assert.equal(status.reach.reachable.some((p) => p.projectId === target.project.id), false);
+
+        // Undone by the operator, and only by the operator.
+        const stranger = await call('DELETE', `/api/bridge/operator/optouts/${target.project.id}`, { headers: asMaster() });
+        assert.ok([401, 403].includes(stranger.status));
+        const back = await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } });
+        assert.deepEqual([back.status, back.body], [200, { projectId: target.project.id, optedOut: false }]);
+        const twice = await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } });
+        assert.deepEqual([twice.status, twice.body.code], [404, 'OPTOUT_NOT_FOUND']);
+        for (const projectId of ['abc', '', '0', '1e3']) {
+          const bad = await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId } });
+          assert.deepEqual([bad.status, bad.body.code], [404, 'OPTOUT_NOT_FOUND'], projectId);
+        }
+        const routed = await masterWrites(addressed, 'route', { expectedVersion: version(addressed), to: target.project.id });
+        assert.deepEqual([routed.status, routed.body.route.state], [200, 'routed'], 'within reach again at once');
+      } finally { restore(); }
+    });
+
+    it('the Master\'s scope bounds what it may route to, and a scope that cannot be resolved reaches nothing and says so', async () => {
+      try {
+        const inside = liveProject(`Inside${++seq}`);
+        const outside = liveProject(`Outside${++seq}`);
+        const group = store.projectGroups.create({ name: `Scope${++seq}` });
+        store.projectGroups.addMember(group.id, inside.project.id);
+        bridgeReach._deps.masterScope = () => ({ type: 'group', groupId: group.id });
+        const routeId = await inbound(`@${outside.project.name} hello`);
+        assert.equal(suggestion(routeId).reason, 'address-unresolved', 'a project outside the scope is not even suggested');
+        await refusedRoute(routeId, outside.project.id, 409, 'DESTINATION_OUT_OF_SCOPE', 'outside the scope');
+        const listed = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
+        assert.deepEqual([listed.scope, listed.destinations.map((d) => d.projectId)], [{ kind: 'group', groupName: group.name }, [inside.project.id]]);
+        assert.match((await tc(['bridge', 'destinations'])).stdout, new RegExp(`1 reachable project\\(s\\) \\(your scope, the ${group.name} group\\), worked out just now\\.`));
+
+        // The group is deleted: nothing is reachable, and it is not shown as an empty fleet.
+        store.projectGroups.delete(group.id);
+        await refusedRoute(routeId, inside.project.id, 409, 'SCOPE_UNRESOLVED', 'scope unresolved, even for a project that was inside');
+        const toMaster = await inbound('@master are you there?');
+        assert.equal((await masterWrites(toMaster, 'route', { expectedVersion: version(toMaster), to: 'master' })).status, 200, 'the Master itself is always reachable');
+        const empty = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
+        assert.deepEqual([empty.scope, empty.destinations], [{ kind: 'unresolved' }, []]);
+        const shown = await tc(['bridge', 'destinations']);
+        assert.match(shown.stdout, /^SCOPE UNRESOLVED: your scope names a project group that cannot be found, so the bridge reaches no project at all\.\nThis is not an empty fleet\./);
+        assert.match((await tc(['bridge', 'status'])).stdout, /SCOPE UNRESOLVED: your scope names a project group that cannot be found, so the bridge reaches no project\./);
+        assert.deepEqual((await asOperator('GET', '/api/bridge/operator/status')).body.reach.scope, { kind: 'unresolved' });
+
+        // Recorded once when it happens and once when it is put right, however many passes run.
+        const scopeRows = () => db().prepare("SELECT outcome FROM bridge_audit WHERE op = 'scope' ORDER BY audit_seq").all().map((r) => r.outcome);
+        const before = scopeRows().length;
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.deepEqual(scopeRows().slice(before), ['scope-unresolved']);
+        restore();
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.deepEqual(scopeRows().slice(before), ['scope-unresolved', 'scope-resolved']);
+      } finally { restore(); }
+    });
+
+    it('a name that means two things, and a project with two live sessions, are never guessed at', async () => {
+      try {
+        const alpha = liveProject(`Twin${++seq}`);
+        const beta = liveProject(`Other${++seq}`);
+        // The operator gives one project a nickname that is another project's name.
+        assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: beta.project.name, to: alpha.project.id } })).status, 200);
+        const routeId = await inbound(`@${beta.project.name} which of you?`);
+        assert.equal(suggestion(routeId).reason, 'address-ambiguous');
+        await refusedRoute(routeId, beta.project.name, 409, 'DESTINATION_AMBIGUOUS', 'a name that is one project\'s and another\'s nickname');
+        assert.equal((await asOperator('DELETE', '/api/bridge/operator/aliases/:alias', { params: { alias: beta.project.name } })).status, 200);
+
+        // A second live session of one project: an anomaly. Nothing is sent to either.
+        const second = hub.anotherSession(alpha.project);
+        await refusedRoute(routeId, alpha.project.id, 409, 'TARGET_AMBIGUOUS', 'two live sessions');
+        const ask = await masterWrites(routeId, 'ask-launch', { expectedVersion: version(routeId), project: alpha.project.id });
+        assert.deepEqual([ask.status, ask.body.code], [409, 'TARGET_AMBIGUOUS'], 'and there is nothing to launch');
+        const listed = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
+        assert.equal(listed.destinations.find((d) => d.projectId === alpha.project.id).live, 'several-live');
+        assert.match((await tc(['bridge', 'destinations'])).stdout, new RegExp(`#${alpha.project.id}  ${alpha.project.name}  MORE THAN ONE LIVE SESSION \\(nothing is sent until the operator says which is meant\\)`));
+        // It becomes two between the Master's decision and the send: bounced, to neither.
+        store.sessions.kill(second.sessionId, 'ended');
+        const late = await inbound(`@${alpha.project.name} and now?`);
+        const decided = bridgeStore.applyRouteWrite({
+          op: 'route', requestId: `req-two-${++seq}-0000`, routeId: late, expectedVersion: version(late), actor: 'master', proof: 'master-launch', masterGeneration,
+          change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: masterGeneration, failure_code: null } })
+        });
+        assert.equal(decided.outcome, 'applied');
+        const third = hub.anotherSession(alpha.project);
+        const sent = hub.fromGateway().length;
+        await gateway.advance(late);
+        assert.deepEqual([bridgeStore.routes.get(late).state, bridgeStore.routes.get(late).failureCode], ['awaiting-master', 'target-ambiguous']);
+        assert.equal(hub.fromGateway().length, sent, 'sent to neither');
+        store.sessions.kill(third.sessionId, 'ended');
+      } finally { restore(); }
+    });
+
+    it('`tc bridge destinations` says how each project is named and how it stands', async () => {
+      try {
+        const live = liveProject(`Listed_One_${++seq}`);
+        const stopped = store.projects.create({ name: `Listed Two ${++seq}`, path: path.join(tmpDir, `listed-two-${seq}`) });
+        assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `nick${seq}`, to: live.project.id } })).status, 200);
+        const out = (await tc(['bridge', 'destinations'])).stdout;
+        assert.match(out, /reachable project\(s\) \(every project on this install\), worked out just now\./);
+        assert.ok(out.includes(`  #${live.project.id}  ${live.project.name}  running\n      named by @${live.project.name}, @${bridgeReach.slugOf(live.project.name)}, @nick${seq} or its id`), out);
+        assert.ok(out.includes(`  #${stopped.id}  ${stopped.name}  NOT RUNNING (ask the operator before it is launched: tc bridge ask-launch)`), out);
+        assert.match(out, /`master` always means you\. A name is only ever a suggestion: nothing is sent until you route it\.\n$/);
+        const extra = await tc(['bridge', 'destinations', 'all']);
+        assert.equal(extra.code, 1, 'it takes no argument');
       } finally { restore(); }
     });
   });

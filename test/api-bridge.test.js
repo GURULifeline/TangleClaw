@@ -170,7 +170,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     bridgeStore.settings.set('enabled', 'false');
     const status = await call('GET', '/api/bridge/master/status');
     // The true count: a disabled bridge's open routes are what the Master is there to close.
-    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: before, configurationCircuit: null });
+    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', scope: { kind: 'all' }, openRoutes: before, configurationCircuit: null });
     assert.ok(before >= 1);
     // The Master can still see what is open, and read one, so that it can close it (Architect ruling, 2026-10-04).
     const listed = await call('GET', '/api/bridge/master/routes');

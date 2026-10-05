@@ -377,7 +377,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
     const identity = master.buildMasterClaudeMd(store.config.load());
-    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'ask', 'ask-launch', 'launch', 'decline', 'answer', 'release', 'pin', 'close',
+    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'destinations', 'routes', 'read', 'route', 'ask', 'ask-launch', 'launch', 'decline', 'answer', 'release', 'pin', 'close',
       'candidates', 'candidate', 'approve', 'reject', 'merge', 'blocked', 'requeue', 'withdraw', 'circuit ack', 'reset']);
     /**
      * Whether a usage text names a subverb as a word of its own.
@@ -402,7 +402,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       postJson: async (p) => { asked.push(`POST ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); }
     });
     const args = {
-      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], 'ask-launch': ['rt_1', '--version', '1', '--project', 'Alpha'],
+      status: [], destinations: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], 'ask-launch': ['rt_1', '--version', '1', '--project', 'Alpha'],
       launch: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], decline: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], answer: ['rt_1', '--version', '1', '--text', 'x'],
       release: ['rt_1', '--version', '1'], pin: ['rt_1', '--version', '1', '--to', 'master'], close: ['rt_1', '--version', '1'],
       candidates: [], candidate: ['cand_1'], approve: ['cand_1', '--version', '1'], reject: ['cand_1', '--version', '1'],
@@ -444,6 +444,10 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       // Every inbound is the Master's to route; what the gateway found is advice (operator ruling, 2026-10-05).
       assert.ok(text.includes('- **Every message waits for you to route it.** Nothing the operator writes goes anywhere until you\n  decide.'));
       // And how to ask, what stays held meanwhile, and that only a reply to that very question is an answer.
+      // Where a message can go at all is read, never remembered.
+      assert.ok(text.includes('- **`tc bridge destinations` is where a message can go.**'));
+      assert.match(text.replace(/\n\s+/g, ' '), /It is worked out as you ask, so read it when you need it and do not keep a list of your own\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /If it says the scope is unresolved, no project is reachable: tell the operator at the workstation/);
       assert.ok(text.includes('- **When you cannot tell where a message goes, ask.** `tc bridge ask <route-id> --version <n> --text "<question>"`'));
       assert.match(text.replace(/\n\s+/g, ' '), /The message stays held and nothing is sent on\./);
       assert.match(text.replace(/\n\s+/g, ' '), /`tc bridge route <route-id> --version <n> --to <destination> --answered-by <the reply's route-id>`/);

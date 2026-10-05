@@ -42,7 +42,9 @@
     circuitReset: '/api/bridge/operator/circuit/reset',
     requeue: (id) => `/api/bridge/operator/outbound/${Number(id)}/requeue`,
     withdraw: (id) => `/api/bridge/operator/outbound/${Number(id)}/withdraw`,
-    withdrawCandidate: (id) => `/api/bridge/operator/candidates/${encodeURIComponent(String(id))}/withdraw`
+    withdrawCandidate: (id) => `/api/bridge/operator/candidates/${encodeURIComponent(String(id))}/withdraw`,
+    optouts: '/api/bridge/operator/optouts',
+    optout: (id) => `/api/bridge/operator/optouts/${Number(id)}`
   });
 
   /** What Discord's ids look like: digits only. The server checks again. */
@@ -68,7 +70,9 @@
       : 'Reset the circuit and put what it set aside back in the queue to be posted?'),
     requeue: (f) => `Put item ${f.outboundId} back in the queue to be posted?`,
     withdraw: (f) => `Withdraw item ${f.outboundId}? It will never be posted. If it is a route's answer, that route is closed.`,
-    'withdraw-candidate': (f) => `Withdraw candidate ${f.candidateId}? Nobody has decided it, and it will then never be approved or posted.`
+    'withdraw-candidate': (f) => `Withdraw candidate ${f.candidateId}? Nobody has decided it, and it will then never be approved or posted.`,
+    // Taking a project out of reach narrows what the bridge can do, and asks nothing. Putting one back widens it.
+    'opt-in': (f) => `Put project ${f.projectId} back within reach of the bridge? Messages may then be routed to it, and a session launched for it when you say yes in the chat.`
   });
 
   /**
@@ -188,7 +192,10 @@
       'withdraw-candidate': (f) => {
         const key = `withdraw-candidate:${f.candidateId}`;
         return send(ROUTES.withdrawCandidate(f.candidateId), 'POST', { requestId: requestIdFor(key) }, `Candidate ${f.candidateId} is withdrawn.`, key);
-      }
+      },
+      'opt-out': (f) => send(ROUTES.optouts, 'POST', { project: Number(f.projectId) },
+        `Project ${Number(f.projectId)} is out of reach of the bridge. Nothing is routed to it and no session is launched for it.`),
+      'opt-in': (f) => send(ROUTES.optout(f.projectId), 'DELETE', undefined, `Project ${Number(f.projectId)} is back within reach of the bridge.`)
     };
 
     /**
@@ -209,6 +216,7 @@
       if (action === 'circuit-reset' && f.decision !== 'requeue' && f.decision !== 'withdraw') return 'Say what becomes of the items set aside: put back, or withdrawn.';
       if ((action === 'requeue' || action === 'withdraw') && !Number.isInteger(Number(f.outboundId))) return 'No such item.';
       if (action === 'withdraw-candidate' && !/^[A-Za-z0-9_-]{1,64}$/.test(String(f.candidateId || ''))) return 'No such candidate.';
+      if ((action === 'opt-out' || action === 'opt-in') && !/^[1-9][0-9]{0,15}$/.test(String(f.projectId || ''))) return 'No such project.';
       return null;
     }
 
@@ -294,6 +302,10 @@
       const routes = Object.entries(s.openRoutesByState || {}).map(([k, v]) => `${escapeHtml(k)} ${escapeHtml(v)}`).join(', ');
       const items = Array.isArray(s.setAsideItems) ? s.setAsideItems : [];
       const routeless = Array.isArray(s.routelessItems) ? s.routelessItems : [];
+      const reach = s.reach || {};
+      const reachable = Array.isArray(reach.reachable) ? reach.reachable : [];
+      const optouts = Array.isArray(reach.optouts) ? reach.optouts : [];
+      const scope = reach.scope || {};
       const token = state.token === null ? '' : `
         <div class="ob-token" data-bridge-token-shown="1">
           <div class="form-hint"><strong>The helper token, shown once.</strong> It is not saved anywhere by this page.
@@ -320,6 +332,19 @@
           <input type="text" class="form-input" id="obChannelId" inputmode="numeric" autocomplete="off" aria-label="Discord channel id" placeholder="Discord channel id">
           ${button('allowlist', 'Set the allowlist')}
         </div>
+
+        <div class="gs-section-sublabel">What the bridge may reach</div>
+        ${line('Scope', scope.kind === 'unresolved'
+          ? '<strong>UNRESOLVED</strong>: the Project Master\'s scope names a project group that cannot be found, so the bridge reaches <strong>no project</strong>. Put the scope right in the Master settings.'
+          : (scope.kind === 'group' ? `the Project Master\'s scope, the ${escapeHtml(scope.groupName)} group` : 'every project on this install'))}
+        <div class="form-hint">Every project in scope is reachable without being set up, and a new one is reachable at once. Taking one out of reach is done here and nowhere else:
+          the Project Master cannot do it, and nothing said in the chat can. Nothing is then routed to it and no session is launched for it.</div>
+        ${reachable.length ? reachable.map((p) => `<div class="ob-item" data-bridge-reachable="${escapeHtml(p.projectId)}">project ${escapeHtml(p.projectId)}: ${escapeHtml(p.name)} `
+          + `${button('opt-out', 'Take out of reach', { project: p.projectId })}</div>`).join('')
+          : '<div class="form-hint">No project is within reach.</div>'}
+        ${optouts.length ? `<div class="form-hint">Out of reach by your choice:</div>${optouts.map((o) => `<div class="ob-item" data-bridge-optout="${escapeHtml(o.projectId)}">project ${escapeHtml(o.projectId)}`
+          + `${o.name ? `: ${escapeHtml(o.name)}` : ' (no longer in the registry)'}, since ${escapeHtml(o.setAt)} ${button('opt-in', 'Put back within reach', { project: o.projectId })}</div>`).join('')}`
+          : ''}
 
         <div class="gs-section-sublabel">Helper token</div>
         ${line('Now', s.helperToken ? `one active, created ${escapeHtml(s.helperToken.createdAt)}` : '<strong>none</strong>')}
@@ -410,7 +435,7 @@
       const value = (id) => { const input = doc.getElementById(id); return input ? String(input.value || '').trim() : ''; };
       return {
         authorId: value('obAuthorId'), spaceId: value('obSpaceId'), channelId: value('obChannelId'),
-        outboundId: target.dataset.bridgeItem, candidateId: target.dataset.bridgeCandidate,
+        outboundId: target.dataset.bridgeItem, candidateId: target.dataset.bridgeCandidate, projectId: target.dataset.bridgeProject,
         episodeId: target.dataset.bridgeEpisode, decision: target.dataset.bridgeDecision
       };
     };
