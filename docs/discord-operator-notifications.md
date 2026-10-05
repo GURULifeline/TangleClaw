@@ -1,12 +1,13 @@
 # Discord operator notifications
 
-Status: **interim procedure in force.** The permanent transport's architecture is accepted and
-nothing of it is built. Accepting the architecture did not activate cutover.
+Status: **interim procedure in force.** The permanent transport is built and is disabled: it has
+not been run against Discord and cutover has not happened. See
+[operator-bridge.md](operator-bridge.md) for what is built.
 
 There are two ways an operational message reaches the operator's Discord. They are sequential,
 not parallel: the first is retired when the second goes live.
 
-| | Interim (in force now) | Future (not built) |
+| | Interim (in force now) | Future (built, disabled until cutover) |
 |---|---|---|
 | What it is | The Architect session posts to Discord by hand | The Master-mediated bridge |
 | Governed by | The operator's Rule #145 | [ADR 0023](adr/0023-master-mediated-operator-bridge.md), and the rule that replaces Rule #145 |
@@ -16,7 +17,8 @@ not parallel: the first is retired when the second goes live.
 | Tracked in | #2040 | #2031, #1956, #1799 |
 
 If you are a session with something the operator should see in Discord today, read "Interim
-procedure". Do not read "Future path" as something you can use: none of it exists on `main`.
+procedure". Do not read "Future path" as something you can use: it is disabled until the operator enables
+it at cutover.
 
 ## Interim procedure — until the Master-mediated bridge ships
 
@@ -93,9 +95,11 @@ nonce.
 
 1. The Discord helper authenticates, applies the allowlist, and durably delivers the operator's
    message to the Master gateway, which is server code.
-2. The destination is resolved. A reply, a pin, an exact alias or the default is applied by the
-   gateway. Anything else waits for the Project Master session to decide. Nothing is guessed.
-3. An unaddressed message goes to Master itself, which answers it or delegates it.
+2. The gateway works out where the message looks to be going, from a reply, a pin, an exact
+   alias or the default, and records that as a suggestion. It sends the message nowhere.
+3. The Project Master session routes every message, to the suggested place or another. An
+   unaddressed message is suggested for the Master itself, which routes it to itself and
+   answers it, or routes it to a project.
 4. A correlated, tracked Medusa message goes to the target session, and its correlated reply
    comes back to the gateway and is held there.
 5. Master releases the answer, using that reply as its source. Nothing from a target session
@@ -142,8 +146,13 @@ Cutover happens only when both of these are true:
 
 At cutover:
 
+- **After a rollback, one narrow fallback.** The rule that replaces Rule #145 says so itself:
+  while the bridge is disabled or rolled back the helper sends nothing, and the Architect alone
+  may use the former direct route for milestones and genuine operator-action-required notices
+  until the bridge is enabled again. That uses the send steps of the interim section below,
+  under the new rule's number. No rule is edited to roll back.
 - **The interim procedure is retired, not merged into the new path.** This page's interim section
-  is removed or marked historical.
+  is kept for one use only: the rollback fallback above.
 - **The Architect leaves the routine delivery path** and keeps architectural and governance
   oversight. Master becomes the sole filter and router, and the helper the sole Discord sender.
 

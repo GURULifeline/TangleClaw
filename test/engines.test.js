@@ -1246,6 +1246,35 @@ describe('engines', () => {
       }
     });
 
+    it('an operator switch on this install changes no carrier a project keeps (#2031)', () => {
+      // The candidate primer is one install's setting. A carrier is written
+      // into the project, and two of them are tracked: a verb list that
+      // followed the switch would rewrite a shared file in every managed
+      // repository each time the operator flipped it. Only the session prime,
+      // which is never written to a file, carries a switched verb.
+      const primer = require('../lib/ecosystem-primer');
+      const all = () => ({
+        claude: engines._generateClaudeMd(on, projPath),
+        block: engines._generateOperationalBlock(on, projPath, 'CLAUDE.md'),
+        gemini: engines._generateGeminiMd(on, undefined, projPath),
+        codex: engines._generateCodexYaml(on, projPath),
+        aider: engines._generateAiderConf(on, projPath)
+      });
+      const off = all();
+      try {
+        primer.setSwitchReader(() => ['bridge-candidates']);
+        assert.ok(primer.renderEcosystemPrimerSection({ projectId: 1, projectName: 'P', apiOrigin: 'http://localhost:1', operatorHost: 'h' }, ['bridge-candidates'])
+          .join('\n').includes('`candidate`'), 'precondition: the switch does add the verb where it applies');
+        const switched = all();
+        for (const name of Object.keys(off)) {
+          assert.equal(switched[name], off[name], `${name}: the same with the switch on`);
+          assert.ok(off[name].includes('capabilities') && !/[`, ]candidate[`,)]/.test(switched[name]), `${name}: carries the bootstrap line, without the switched verb`);
+        }
+      } finally {
+        primer.setSwitchReader(() => []);
+      }
+    });
+
     it('states a reachable origin in the engine-private carriers', () => {
       // #1619 moved this property. A tracked carrier may not state this
       // machine's origin, so the "reachable, not a pointer to a guide"

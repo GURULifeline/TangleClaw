@@ -268,12 +268,13 @@ const projects = require('./lib/projects');
 const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
 const launchSequence = require('./lib/launch-sequence');
-const ciStatus = require('./lib/ci-status');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
 const coordinatorRotation = require('./lib/coordinator-rotation');
 const bridgeApi = require('./lib/bridge-api');
+const bridgeGateway = require('./lib/bridge-gateway');
+const bridgeNotify = require('./lib/bridge-notify');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
 const sessionFinalize = require('./lib/session-finalize');
@@ -296,6 +297,7 @@ const serverInfo = require('./lib/server-info');
 const behindOrigin = require('./lib/behind-origin');
 const checkoutState = require('./lib/checkout-state');
 const checkoutFreshness = require('./lib/checkout-freshness');
+const launchWarmup = require('./lib/launch-warmup');
 const checkoutFleet = require('./lib/checkout-fleet');
 const bindPolicy = require('./lib/bind-policy');
 const wrapRunRegistry = require('./lib/wrap-run-registry');
@@ -1574,8 +1576,9 @@ route('POST', '/api/master/kill', (_req, res) => {
 
 // POST /api/master/rules/restore-defaults — replace every master Hard rule
 // with the shipped baseline (the recovery path if an edit ever weakened the
-// boundary). History survives in session_rule_versions. A live master picks
-// the change up on the next ensure (identity regeneration).
+// boundary). History survives in session_rule_versions. The Master's identity
+// file is regenerated on the next ensure, but a running Master read it when it
+// was launched: the change reaches it at its next launch.
 route('POST', '/api/master/rules/restore-defaults', (req, res) => {
   // It deletes every master rule the operator added, so it is theirs to run.
   if (!operatorProjectCaller(req, res, 'restore the Project Master\'s default rules')) return;
@@ -4796,27 +4799,30 @@ route('GET', '/api/tc/workload', (req, res) => {
   return jsonResponse(res, 200, { ...result.body, ...(lane || {}) });
 });
 
-// The Project Master's structured surface on the operator bridge (ADR 0023
-// Decision 15, #2031). Authorised by the live Master generation's credential
-// and by nothing else; `lib/bridge-api.js` holds the handlers.
+// The operator bridge's HTTP surface (ADR 0023, #2031). Three callers, each
+// with its own proof and none standing in for another; `lib/bridge-api.js`
+// holds the handlers.
 
-/**
- * Hand a request to a bridge handler and send what it answers.
- * @param {(request: object) => {status: number, body: object}} handler - A `lib/bridge-api.js` handler.
- * @returns {Function} A route handler.
- */
-function _bridgeRoute(handler) {
-  return (req, res, params, body) => {
+/** How often the operator bridge's gateway runs its pass: often enough that a route never waits long on it, rarely enough to cost nothing while idle. */
+const BRIDGE_TICK_MS = 15 * 1000;
+
+// Each route is declared in `lib/bridge-api.js` with the principal it belongs
+// to, and `bridgeApi.handle` proves that principal before the handler runs.
+// The fleet-idle notification reads the same lane composition the fleet roster
+// does, so the two cannot disagree about whether a lane is clear. Wired where
+// the routes are, not at boot, so anything that loads the server has it.
+bridgeNotify.setLaneReader(() => bridgeNotify.readLanes(_composedLane));
+// Which pane verbs the operator has switched on. Read from the bridge's own
+// settings each time a pane's instructions are written.
+require('./lib/ecosystem-primer').setSwitchReader(() => (bridgeApi.candidatesPrimed() ? ['bridge-candidates'] : []));
+
+for (const entry of bridgeApi.ROUTES) {
+  route(entry.method, entry.path, async (req, res, params, body) => {
     const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
-    const result = handler({ headers: req.headers, params, query, body });
+    const result = await bridgeApi.handle(entry, { req, headers: req.headers, params, query, body });
     return jsonResponse(res, result.status, result.body);
-  };
+  });
 }
-
-route('GET', '/api/bridge/master/status', _bridgeRoute(bridgeApi.status));
-route('GET', '/api/bridge/master/routes', _bridgeRoute(bridgeApi.listRoutes));
-route('GET', '/api/bridge/master/routes/:routeId', _bridgeRoute(bridgeApi.readRoute));
-route('POST', '/api/bridge/master/routes/:routeId/close', _bridgeRoute(bridgeApi.closeRoute));
 
 // Governed coordinator context rotation (#2032). A coordinator prepares its
 // own rotation with a structured checkpoint; the server fences its new
@@ -7045,15 +7051,10 @@ route('POST', '/api/sessions/:project', async (_req, res, params, body) => {
   // required. The TangleClaw session is the only identity source (ADR 0016 OQ2).
   const owner = (_req.tcSession && _req.tcSession.username) || null;
 
-  // #991: warm the base-branch CI verdict OFF the event loop before the
-  // synchronous launch reads it for the prime. Never rejects; a failed probe
-  // is an honest unknown in the prime, not a failed launch.
-  // #1678: the checkout line reads cached facts too; measure them now, bounded,
-  // so the prime says what the clone is on rather than "pending". Concurrent
-  // with the CI probe, so a hung network costs one wait, not two.
-  const checkoutWarm = checkoutFreshness.refreshForLaunch(project, store.config.load());
-  await ciStatus.refresh(project.path);
-  await checkoutWarm;
+  // #991, #1678: warm the CI verdict and the checkout facts OFF the event loop
+  // before the synchronous launch reads them for the prime. Shared with the
+  // operator bridge's consented launch, which must start a session the same way.
+  await launchWarmup.warmForLaunch(project);
 
   // The operator's own request carries the host they actually reached this
   // server on — better evidence than probing this machine, which names the box
@@ -7814,6 +7815,15 @@ medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
         recipientSessionId: session ? sessionKey : null,
         senderWorkspaceId: typeof message.from === 'string' ? message.from : null
       });
+      // The operator bridge's gateway is the one listener that is not a session:
+      // what arrives for it is a held reply or nothing (ADR 0023).
+      if (sessionKey === bridgeGateway.GATEWAY_KEY) {
+        try {
+          bridgeGateway.drainInbox();
+        } catch (err) {
+          log.warn('Operator bridge could not process an arrival', { error: err.message });
+        }
+      }
     }
   } finally {
     // #2086: mail has arrived, so the wake monitor looks at this session now
@@ -7822,6 +7832,8 @@ medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
     // record could be written, because the listener holds the mail either way.
     // The look runs on a later turn of the event loop and passes every wake
     // gate. Asking cannot fail the arrival: the request is contained here.
+    // For the bridge gateway's key there is no session, so the look finds
+    // nothing to look at and does nothing.
     try {
       medusaWake.requestScan(sessionKey, 'mail-arrived');
     } catch (err) {
@@ -12283,6 +12295,16 @@ if (require.main === module) {
     // The Master's bridge credential (ADR 0023): a handoff the restart
     // interrupted is revoked, and so is a credential whose Master is gone.
     master.reconcileBridgeCredential();
+    // The gateway listens exactly while the bridge is enabled, and its pass
+    // carries on any route a restart interrupted. Both do nothing while it is off.
+    try {
+      bridgeGateway.syncListener();
+    } catch (err) {
+      log.warn('Operator bridge listener could not be started', { error: err.message });
+    }
+    setInterval(() => {
+      bridgeGateway.tick().catch((err) => log.warn('Operator bridge pass failed', { error: err.message }));
+    }, BRIDGE_TICK_MS).unref();
     // Resolve the operator's login PATH once, here, so no request ever pays for
     // it. launchd hands this service `/usr/bin:/bin:/usr/sbin:/sbin`, which
     // contains none of the places an engine CLI actually installs (#346) — and

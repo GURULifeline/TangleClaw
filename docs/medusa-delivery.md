@@ -68,7 +68,7 @@ has been replied to reads "satisfied, awaiting initiator close".
 | `escalateAfterMinutes` | Shortens the first escalation, down to 2 minutes. It can never lengthen it |
 | `reason` | `awaiting-ruling`, `awaiting-review`, `awaiting-dispatch`, `incident`, `question` or `other` |
 | `inReplyTo` | The Hub id of the message this answers |
-| `requestId` | An idempotency key; see above |
+| `requestId` | An idempotency key; see above. An id beginning with a prefix a TangleClaw component keeps for its own sends (the operator bridge's is `bridge:`) is refused, `400 REQUEST_ID_RESERVED`, with nothing sent |
 
 Who may claim what:
 
@@ -372,6 +372,30 @@ server time, before its notices go out:
   session on this host holds cannot be supervised from here. Its own host
   owns that.
 - **Retracted and closed exchanges never escalate.**
+
+### A send a TangleClaw component owns
+
+Most system messages are notices and make no exchange. One kind does: a message a TangleClaw
+component sends to a session on someone else's behalf and tracks, as the operator bridge's
+gateway does when it carries an operator's message to a project.
+
+Such a component can declare that it owns what it sends
+(`lib/medusa-exchanges.js#declareSystemOwner`). A send is then that component's when three things
+hold together: it has verified system provenance and no sending project, its sender is the
+component's listener, and its request id begins with the prefix the component declared.
+
+- **The watchdog does not raise it, at normal priority.** No aged notice, no escalation, no
+  operator alert. A blocking or critical send is escalated like anyone's. The
+  component decides what happens when it goes unread or unanswered. It is still re-armed, still
+  woken for, and still ended when its recipient retires.
+- **The component closes it,** in-process, and only its own
+  (`closeAsSystemOwner`). No route reaches that close. `POST .../exchanges/<id>/close` admits
+  the operator and the sending project's verified launch, as before, and nobody else.
+- **Nothing else is exempt.** A system send from a component that has declared nothing, or one
+  missing any of the three proofs, is an ordinary exchange.
+
+The operator bridge's gateway is the only declared owner. See
+[operator-bridge.md](operator-bridge.md), "The one status notice".
 
 ## Undeliverable and retired recipients
 

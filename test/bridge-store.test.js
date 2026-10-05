@@ -220,19 +220,38 @@ describe('bridge store (#2031)', () => {
       change: () => ({ set: { state: 'closed', closed_by: 'master', closed_at: now } }) }));
     const db = store.getDb();
     db.prepare('INSERT INTO bridge_nonces (nonce, seen_at) VALUES (?, ?), (?, ?)').run('n'.repeat(16), old, 'm'.repeat(16), now);
+    bridgeStore.helperTokens.replace('t-old', 'e'.repeat(64), { at: old });
+    bridgeStore.helperTokens.replace('t-new', 'f'.repeat(64), { at: old });
+    bridgeStore.pins.setGlobal({ pinId: 'p-old', conversationKey: null, destination: { kind: 'master' }, at: old });
+    bridgeStore.pins.setGlobal({ pinId: 'p-new', conversationKey: null, destination: { kind: 'master' }, at: old });
     const g1 = bridgeStore.masterCredentials.mint('b'.repeat(64), { at: old });
     bridgeStore.masterCredentials.revoke('master-killed', { at: old });
     const g2 = bridgeStore.masterCredentials.mint('c'.repeat(64), { at: old });
     bridgeStore.masterCredentials.revoke('master-killed', { at: old });
 
     const removed = bridgeStore.prune({ now });
-    assert.deepEqual(removed, { nonces: 1, routes: 1, outbound: 0, candidates: 0, credentials: 1, audit: 1 });
+    assert.deepEqual(removed, { nonces: 1, leases: 0, claims: 0, routes: 1, outbound: 0, candidates: 0, pins: 1, helperTokens: 1, credentials: 1, audit: 1 });
+    assert.equal(bridgeStore.helperTokens.active().tokenId, 't-new', 'the active token stays');
+    assert.deepEqual(bridgeStore.pins.list().map((p) => p.pinId), ['p-new'], 'and so does the active pin');
     assert.equal(bridgeStore.routes.get('rt_1'), null);
     assert.deepEqual(bridgeStore.routes.bodies('rt_1'), [], 'a removed route takes its bodies with it');
     assert.ok(bridgeStore.routes.get('rt_open'), 'an open route stays whatever its age');
     assert.ok(bridgeStore.routes.get('rt_recent'));
     assert.equal(bridgeStore.masterCredentials.mint('d'.repeat(64)), g2 + 1, 'generations are still never reused');
     assert.ok(g1 < g2);
+  });
+
+  it('gives a route one status notice, with fixed text chosen by name', () => {
+    bridgeStore.routes.accept(inbound());
+    const first = bridgeStore.outbound.enqueueStatus('rt_1', 'master-unavailable');
+    const second = bridgeStore.outbound.enqueueStatus('rt_1', 'pending');
+    assert.deepEqual([first.created, second.created], [true, false]);
+    assert.equal(second.item.text, bridgeStore.STATUS_TEXT['master-unavailable'], 'the first notice stands');
+    assert.equal(first.item.kind, 'status');
+    assert.throws(() => bridgeStore.outbound.enqueueStatus('rt_1', 'anything else'), /unknown status notice/);
+    assert.throws(() => bridgeStore.outbound.enqueue({
+      idemKey: 'k', kind: 'status', routeId: 'rt_1', sourceLabel: 'x', text: 'my own words', digest
+    }), /fixed text/);
   });
 
   it('lists open routes oldest first and leaves closed ones out', () => {

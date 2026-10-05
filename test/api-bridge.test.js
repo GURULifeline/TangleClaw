@@ -19,6 +19,7 @@ setLevel('error');
 const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const handoff = require('../lib/bridge-handoff');
+const { pinMasterLiveness } = require('./_master-liveness');
 
 const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
 const HEADER = 'x-tangleclaw-bridge-credential';
@@ -29,6 +30,7 @@ let server;
 let origin;
 let credential;
 let generation;
+let liveness;
 
 /**
  * Make `credential` the live Master generation's, as a completed handoff would.
@@ -96,15 +98,19 @@ describe('bridge API: the Master surface (#2031)', () => {
     server = createServer();
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     origin = `http://127.0.0.1:${server.address().port}`;
+    // tmux's answer about the Master is the test's to give, never the machine's: see _master-liveness.js.
+    liveness = pinMasterLiveness();
   });
 
   after(async () => {
+    liveness.restore();
     await new Promise((resolve) => server.close(resolve));
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   beforeEach(() => {
+    liveness.set({ live: true, answered: true, cause: null });
     issueLiveCredential();
     bridgeStore.settings.set('enabled', 'true');
   });
@@ -130,6 +136,27 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.deepEqual(bridgeStore.audit.forRoute(routeId), []);
   });
 
+  it('the credential lasts exactly as long as tmux says there is a Master: gone revokes it, no answer changes nothing', async () => {
+    // tmux did not answer: that is not the Master being gone, and a valid credential is still served.
+    liveness.set({ live: false, answered: false, cause: 'read-timed-out' });
+    const unanswered = await call('GET', '/api/bridge/master/status');
+    assert.deepEqual([unanswered.status, unanswered.body.masterGeneration], [200, generation]);
+    assert.ok(bridgeStore.masterCredentials.live(), 'still the live credential');
+    // tmux answered that there is no Master: refused, and revoked on the spot.
+    liveness.set({ live: false, answered: true, cause: null });
+    const gone = await call('GET', '/api/bridge/master/status');
+    assert.deepEqual([gone.status, gone.body.code], [401, 'BRIDGE_CREDENTIAL_REQUIRED']);
+    assert.equal(bridgeStore.masterCredentials.live(), null, 'revoked');
+    // A Master seen again does not get the revoked credential back.
+    liveness.set({ live: true, answered: true, cause: null });
+    assert.equal((await call('GET', '/api/bridge/master/status')).status, 401);
+    // And without a valid credential, tmux is not asked at all: nothing is revoked by a stranger's request.
+    issueLiveCredential();
+    liveness.set({ live: false, answered: true, cause: null });
+    assert.equal((await call('GET', '/api/bridge/master/status', { as: 'not-the-credential' })).status, 401);
+    assert.ok(bridgeStore.masterCredentials.live(), 'a request that carried no valid credential revoked nothing');
+  });
+
   it('a launch id and the master role do not stand in for the credential', async () => {
     const res = await fetch(`${origin}/api/bridge/master/status`, {
       headers: { 'x-tangleclaw-role': 'master', 'x-tangleclaw-launch-id': 'any-launch-id' }
@@ -137,20 +164,36 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.equal(res.status, 401);
   });
 
-  it('reports status while disabled and refuses everything else', async () => {
+  it('while disabled: status and the route reads answer, a route can still be closed, and everything that sends or resolves is refused', async () => {
     const routeId = acceptRoute('off');
+    const before = (await call('GET', '/api/bridge/master/status')).body.openRoutes;
     bridgeStore.settings.set('enabled', 'false');
     const status = await call('GET', '/api/bridge/master/status');
-    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', openRoutes: 0 });
+    // The true count: a disabled bridge's open routes are what the Master is there to close.
+    assert.deepEqual(status.body, { enabled: false, masterGeneration: generation, proof: 'master-launch', scope: { kind: 'all' }, openRoutes: before, configurationCircuit: null });
+    assert.ok(before >= 1);
+    // The Master can still see what is open, and read one, so that it can close it (Architect ruling, 2026-10-04).
+    const listed = await call('GET', '/api/bridge/master/routes');
+    assert.equal(listed.status, 200);
+    assert.ok(listed.body.routes.some((r) => r.routeId === routeId));
+    const read = await call('GET', `/api/bridge/master/routes/${routeId}`);
+    assert.deepEqual([read.status, read.body.route.routeId, read.body.authority], [200, routeId, 'conversation-only']);
+    // The reads are still the Master's alone.
+    assert.equal((await call('GET', '/api/bridge/master/routes', { as: 'not-the-masters-credential' })).status, 401);
+    assert.equal((await call('GET', `/api/bridge/master/routes/${routeId}`, { as: null })).status, 401);
     for (const [method, apiPath] of [
-      ['GET', '/api/bridge/master/routes'],
-      ['GET', `/api/bridge/master/routes/${routeId}`],
-      ['POST', `/api/bridge/master/routes/${routeId}/close`]
+      ['POST', `/api/bridge/master/routes/${routeId}/answer`],
+      ['POST', `/api/bridge/master/routes/${routeId}/route`],
+      ['POST', `/api/bridge/master/routes/${routeId}/release`]
     ]) {
-      const r = await call(method, apiPath, { body: method === 'POST' ? { requestId: 'req-off-00001', expectedVersion: 1 } : undefined });
+      const r = await call(method, apiPath, { body: method === 'POST' ? { requestId: 'req-off-00001', expectedVersion: 1, text: 'x' } : undefined });
       assert.deepEqual([r.status, r.body.code], [409, 'BRIDGE_DISABLED'], `${method} ${apiPath}`);
     }
     assert.equal(bridgeStore.routes.get(routeId).state, 'accepted');
+    // Turning the bridge off must not leave message text held with no way out.
+    const closed = await call('POST', `/api/bridge/master/routes/${routeId}/close`, { body: { requestId: 'req-off-00002', expectedVersion: 1 } });
+    assert.deepEqual([closed.status, closed.body.route.state], [200, 'closed']);
+    assert.equal(bridgeStore.routes.bodies(routeId)[0].text, null);
   });
 
   it('lists and reads routes, marking what the operator wrote as conversation only', async () => {
@@ -183,7 +226,7 @@ describe('bridge API: the Master surface (#2031)', () => {
     assert.equal(audit.length, 1);
     assert.deepEqual([audit[0].actor, audit[0].proof, audit[0].masterGeneration, audit[0].outcome],
       ['master', 'master-launch', generation, 'applied']);
-    assert.deepEqual(audit[0].detail, { from: 'accepted', bodiesCleared: 1 });
+    assert.deepEqual(audit[0].detail, { from: 'accepted', withdrawn: 0, bodiesCleared: 1 });
     assert.equal(bridgeStore.routes.bodies(routeId)[0].text, null);
   });
 
@@ -233,7 +276,7 @@ describe('bridge API: the Master surface (#2031)', () => {
 
     const closed = await tc(['bridge', 'close', routeId, '--version', '1', '--request-id', 'req-cli-000001'], env);
     assert.equal(closed.code, 0, closed.stderr);
-    assert.match(closed.stdout, /is closed \(applied\); now v2/);
+    assert.match(closed.stdout, /is closed; now v2/);
 
     const without = await tc(['bridge', 'status']);
     assert.equal(without.code, 2);
