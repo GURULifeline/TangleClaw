@@ -1044,10 +1044,13 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal(res.status, 202, JSON.stringify(res.body));
       return res.body.routeId;
     };
-    /** Run `fn` with the gateway's clock `ms` after the newest question was asked. */
+    /**
+     * Run `fn` with the gateway's clock `ms` after the newest question of this test was asked. Questions an earlier
+     * test asked under a clock it had moved on are in the future and are not the base.
+     */
     const later = async (ms, fn) => {
       const realNow = gateway._deps.now;
-      const asked = store.getDb().prepare('SELECT MAX(asked_at) AS at FROM bridge_questions').get().at;
+      const asked = store.getDb().prepare('SELECT MAX(asked_at) AS at FROM bridge_questions WHERE asked_at <= ?').get(realNow()).at;
       const at = new Date(Date.parse(asked) + ms).toISOString();
       gateway._deps.now = () => at;
       try { return await fn(); } finally { gateway._deps.now = realNow; }
@@ -1107,6 +1110,7 @@ describe('bridge API: the round trip (#2031)', () => {
       const reply = await operatorReplies(posted, `I meant ${alpha.project.name}`);
       const replyRoute = bridgeStore.routes.get(reply);
       assert.equal(replyRoute.state, 'awaiting-master', 'the reply is itself held: it routes nothing by arriving');
+      assert.deepEqual(bridgeStore.audit.suggestionFor(reply), { by: 'question-answer', to: 'master', projectId: null, reason: null }, 'and is shown to the Master as an answer to its question');
       assert.deepEqual([replyRoute.replyContext.kind, replyRoute.replyContext.routeId, replyRoute.replyContext.questionId], ['question', routeId, questionsOf(routeId)[0].question_id]);
       assert.deepEqual(hub.fromGateway(), [], 'nothing has been sent yet');
 
@@ -1233,15 +1237,110 @@ describe('bridge API: the round trip (#2031)', () => {
       });
     });
 
-    it('a question never posted is not posted once it has run out', async () => {
+    it('a question never posted is not posted once it has run out, and the operator is not told of a question they never saw', async () => {
       const routeId = await held();
       assert.equal((await masterWrites(routeId, 'ask', { expectedVersion: version(routeId), text: 'Which?' })).status, 200);
       await later(24 * HOUR, async () => {
         await gateway.tick();
+        assert.equal(questionsOf(routeId)[0].state, 'expired');
         const items = about((await claimAll()), routeId);
-        assert.deepEqual(items.map((i) => i.kind).sort(), ['failure'], 'only the fixed notice is handed over');
+        assert.deepEqual(items.map((i) => i.kind).sort(), ['status'], 'no question, and no notice about one: only the ordinary still-waiting notice, which nothing now stands in for');
         assert.deepEqual(store.getDb().prepare("SELECT state, drop_code, text FROM bridge_outbound WHERE kind = 'question' AND route_id = ?").all(routeId).map((r) => [r.state, r.drop_code, r.text]), [['dropped', 'withdrawn', null]]);
+        const audit = store.getDb().prepare("SELECT detail_json FROM bridge_audit WHERE op = 'expire' AND route_id = ?").get(routeId);
+        assert.equal(JSON.parse(audit.detail_json).operatorTold, false, 'and the audit says the operator was not told');
       });
+    });
+
+    it('the Master going away and coming back changes nothing about a question that is open', async () => {
+      const alpha = liveProject(`Alpha${++seq}`);
+      const routeId = await held();
+      const posted = await askedAndPosted(routeId);
+      const live = gateway._deps.master;
+      gateway._deps.master = () => ({ ...live(), masterLiveness: () => ({ live: false, answered: true }), ensureMasterSession: () => ({ created: false, error: 'tmux did not answer' }) });
+      await gateway.tick();
+      assert.equal(bridgeStore.routes.get(routeId).state, 'queued-master-unavailable', 'the message is queued while the Master is away');
+      assert.equal(questionsOf(routeId)[0].state, 'open', 'and is still held: what was asked about it stands');
+      // The operator answers while the Master is away.
+      const reply = await operatorReplies(posted, alpha.project.name);
+      gateway._deps.master = live;
+      await later(60 * 1000, async () => {
+        await gateway.tick();
+        assert.equal(bridgeStore.routes.get(routeId).state, 'awaiting-master');
+        assert.equal(questionsOf(routeId)[0].state, 'open');
+        const routed = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: alpha.project.id, answeredBy: reply });
+        assert.deepEqual([routed.status, routed.body.route.state], [200, 'routed'], JSON.stringify(routed.body));
+        assert.deepEqual(questionsOf(routeId).map((q) => [q.state, q.adopted_route_id]), [['adopted', reply]]);
+      });
+    });
+
+    it('a reply that was itself asked about takes that question with it when it is adopted', async () => {
+      const routeId = await held();
+      const posted = await askedAndPosted(routeId);
+      const reply = await operatorReplies(posted, 'the usual one');
+      // The Master asks what "the usual one" means, then routes the original on its own reading of the first answer.
+      const second = await askedAndPosted(reply, 'Which is the usual one?');
+      const routed = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: 'master', answeredBy: reply });
+      assert.equal(routed.status, 200, JSON.stringify(routed.body));
+      assert.equal(bridgeStore.routes.get(reply).state, 'closed');
+      assert.deepEqual(questionsOf(reply).map((q) => q.state), ['cancelled'], 'nothing is left open about a closed message');
+      const late = await operatorReplies(second, 'never mind');
+      await later(25 * HOUR, async () => {
+        await gateway.tick();
+        assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE kind = 'failure' AND route_id = ?").get(reply).n, 0, 'and the operator is never told a closed message is still held');
+        assert.deepEqual(questionsOf(reply).map((q) => q.state), ['cancelled']);
+      });
+      assert.equal(bridgeStore.routes.get(late).state, 'awaiting-master');
+    });
+
+    it('a question not yet posted is not posted once the message has been decided, and not ended while the helper is posting it', async () => {
+      const first = await held();
+      assert.equal((await masterWrites(first, 'ask', { expectedVersion: version(first), text: 'Which?' })).status, 200);
+      const routed = await masterWrites(first, 'route', { expectedVersion: version(first), to: 'master' });
+      assert.equal(routed.status, 200, JSON.stringify(routed.body));
+      assert.equal(questionsOf(first)[0].state, 'cancelled');
+      assert.deepEqual(about(await claimAll(), first).filter((i) => i.kind === 'question'), [], 'the question is never put to the operator');
+      assert.deepEqual(store.getDb().prepare("SELECT state, drop_code FROM bridge_outbound WHERE kind = 'question' AND route_id = ?").all(first).map((r) => [r.state, r.drop_code]), [['dropped', 'withdrawn']]);
+
+      const second = await held('@nobody-again and this?');
+      assert.equal((await masterWrites(second, 'ask', { expectedVersion: version(second), text: 'Who?' })).status, 200);
+      const handed = about(await claimAll(), second);
+      assert.deepEqual(handed.map((i) => i.kind), ['question'], 'the helper has the question and may be posting it');
+      const before = everything(second);
+      const refused = await masterWrites(second, 'route', { expectedVersion: version(second), to: 'master' });
+      assert.deepEqual([refused.status, refused.body.code], [409, 'OUTBOUND_IN_FLIGHT']);
+      assert.equal(everything(second), before, 'nothing moved: the question is still open and the message still held');
+      assert.equal((await ackItem(handed[0], `dq${++seq}`)).status, 200);
+      assert.equal((await masterWrites(second, 'route', { expectedVersion: version(second), to: 'master' })).status, 200, 'once it is posted the Master may decide');
+    });
+
+    it('withdrawing a question\'s text ends the question, and the message can be asked about again', async () => {
+      const routeId = await held();
+      assert.equal((await masterWrites(routeId, 'ask', { expectedVersion: version(routeId), text: 'Which?' })).status, 200);
+      const item = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE kind = 'question' AND route_id = ?").get(routeId).outbound_id;
+      const withdrawn = await call('POST', `/api/bridge/master/outbound/${item}/withdraw`, { headers: asMaster(), body: { requestId: `req-wd-${++seq}-0000` } });
+      assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+      assert.deepEqual(questionsOf(routeId).map((q) => q.state), ['cancelled'], 'a question that will never be posted cannot be answered');
+      assert.equal(bridgeStore.routes.get(routeId).state, 'awaiting-master', 'the message itself is untouched');
+      const again = await masterWrites(routeId, 'ask', { expectedVersion: version(routeId), text: 'Which project?' });
+      assert.equal(again.status, 200, JSON.stringify(again.body));
+      // A question that ended this way stands in for no notice: the ordinary still-waiting notice still goes.
+      const other = await held('@nobody-here either');
+      assert.equal((await masterWrites(other, 'ask', { expectedVersion: version(other), text: 'Who?' })).status, 200);
+      const otherItem = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE kind = 'question' AND route_id = ?").get(other).outbound_id;
+      assert.equal((await call('POST', `/api/bridge/master/outbound/${otherItem}/withdraw`, { headers: asMaster(), body: { requestId: `req-wd-${++seq}-0000` } })).status, 200);
+      await later(6 * 60 * 1000, async () => {
+        await gateway.tick();
+        assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE kind = 'status' AND route_id = ?").get(other).n, 1);
+      });
+    });
+
+    it('an adoption under the longest request id the bridge accepts is applied', async () => {
+      const routeId = await held();
+      const posted = await askedAndPosted(routeId);
+      const reply = await operatorReplies(posted, 'the Master');
+      const res = await call('POST', `/api/bridge/master/routes/${routeId}/route`, { headers: asMaster(), body: { requestId: 'r'.repeat(128), expectedVersion: version(routeId), to: 'master', answeredBy: reply } });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(bridgeStore.routes.get(reply).state, 'closed');
     });
 
     it('routing or closing the message on the Master\'s own reading ends the question', async () => {

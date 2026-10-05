@@ -641,6 +641,21 @@ Against the schema `main` actually has:
   of adding a version nobody could be upgrading from. That holds only until the stack merges:
   from then on 53 and 54 are shipped versions, and a shipped version is never edited. If `main`
   takes either number first, the stack renumbers before it merges.
+- **v54 carries the storage for what the operator ruled on 2026-10-05, ahead of the code that
+  uses all of it,** because once v54 ships it cannot be edited and each of these needs rules
+  the store itself must hold:
+  - `bridge_questions`: what the Master asked about a held message, and how the question stands.
+    One open question per message; one use of an operator's reply; a settled question is never
+    reopened and its time is never extended.
+  - `bridge_launches`: a launch the operator consented to. A row is admitted only on an adopted
+    consent for exactly that message, project and reply; one is in flight on the install at a
+    time, in the order consent was adopted; a settled launch is final.
+  - `bridge_project_optouts`: projects the operator has taken out of reach. The operator's
+    alone to write.
+  - On `bridge_aliases`: who last changed a nickname, when, and the operator message that
+    authorised it when the Master wrote it. A Master write without such a message is refused.
+  - A `question` kind of outbound item, so that nothing reasoning about a route's answer has to
+    tell an answer from a question.
 - **A shipped object is retired by a later version, never erased from the one that made it.**
   v52 created `idx_bridge_routes_conversation` for a lookup that was never written; nothing
   reads it. The upgrade into v54 drops it by name, a fresh v54 store is never given it, and from

@@ -165,9 +165,10 @@ default does not rewrite it, and a destination the Master has fixed on a route d
 A route gets at most one `status` item in its life: that the Master is unavailable, or, after
 five minutes without a final answer, that the message is still waiting. Whichever comes first
 is the only one. Its text is one of two fixed sentences the server wrote; a status item cannot
-carry anything anybody typed. A message the Master has asked the operator about gets no
-"still waiting" notice: while the question is open the wait is the operator's, and once it has
-run out its own notice says the message is still held.
+carry anything anybody typed. A message gets no "still waiting" notice while a question about
+it is open, since the wait is then the operator's, nor after one has run out and the operator
+was told so, since that notice already says the message is still held. A question that was
+answered, withdrawn or never posted stands in for nothing, and the ordinary notice still goes.
 
 The Medusa message the gateway sends to the project gets no notice of its own. The gateway
 declares the exchanges it sends as its own (`lib/medusa-exchanges.js#declareSystemOwner`), and
@@ -221,12 +222,25 @@ nothing the reply says:
 A refusal changes nothing. Whether the reply's words mean what the Master takes them to mean is
 the Master's judgement, and the audit records both route ids and none of the text.
 
-A question can be answered for 24 hours. After that the gateway marks it expired, withdraws it
-if it was never posted, and sends the operator one fixed sentence saying the message is still
-held and nothing was sent on. The message itself is not closed and not routed: the Master is
-told, and may ask again, route it on its own reading, or close it. Routing or closing the
-message without `--answered-by` ends an open question; an answer that arrives afterwards
-answers nothing.
+A question can be answered for 24 hours. After that the gateway marks it expired and sends the
+operator one fixed sentence saying the message is still held and nothing was sent on. A
+question that was never posted is withdrawn instead, and the operator, who never saw it, is
+told nothing. Either way the message itself is not closed and not routed: the Master is told,
+and may ask again, route it on its own reading, or close it.
+
+What ends an open question without an answer:
+
+- **Routing or closing the message without `--answered-by`.** An answer that arrives afterwards
+  answers nothing. If the question has not been posted yet it is withdrawn and never posted.
+  While the helper holds it and may be posting it, the write is refused
+  `409 OUTBOUND_IN_FLIGHT`, to be made again once the lease has settled.
+- **Withdrawing the question's item** (`tc bridge withdraw`, or a circuit reset that withdraws).
+  The message can then be asked about again.
+- **Adopting a reply closes that reply's route,** and with it any question the Master had asked
+  about the reply itself.
+
+The Master being away does not end one. A message queued because the Master is unavailable is
+still held, and what was asked about it stands when the Master is back.
 
 ## The Project Master's credential
 
@@ -571,6 +585,7 @@ and what follows is only the destination the bridge suggests with it.
 | Any part of an answer whose route is still held | That route's destination | Reply inheritance. Any part, not only the first. |
 | Any part of a milestone, another candidate or a notification | The Project Master, resolved by `outbound-correlation` | The item has no route: the durable record of the posted message supplies the correlation. The Master reads the route and sees what it answers. A conversation pin does not divert it. |
 | Any part of an answer whose route has since been removed | The Project Master, resolved by `outbound-correlation` | There is nowhere left to inherit; what it answered is still on record. |
+| Any part of a question the Master asked | The Project Master, as `question-answer` | It answers the Master's question, whatever has become since of the message the question was about. |
 | A message the bridge does not know | Resolved as an unaddressed message | Nothing is invented about what it answers. |
 
 A leading `@name` is the suggestion instead of any of these when it names exactly one current
@@ -724,10 +739,10 @@ v54 shape is a superset of v53's.
 
 v54 also carries what the Master's questions rest on. `bridge_questions` holds each question's
 standing; `bridge_outbound`, `bridge_outbound_parts` and `bridge_route_reply_context` gain the
-`question` kind and the id of the question an item asks. `bridge_aliases` records who last
-changed a nickname, when, and on which operator message, and its rows from an earlier store
-come through with those fields empty. `bridge_launches` and `bridge_project_optouts` exist and
-are not yet used. The store itself holds the rules that must not depend on a caller: one open
+`question` kind and the id of the question an item asks. `bridge_aliases` has columns for who
+last changed a nickname, when, and on which operator message; nothing writes them yet, and
+rows from an earlier store come through with them empty. `bridge_launches` and
+`bridge_project_optouts` exist and are not yet used. The store itself holds the rules that must not depend on a caller: one open
 question per message, one use of an operator's reply, and a settled question never reopened.
 
 "Superset" is a statement about shape: every object an earlier version required is still there
