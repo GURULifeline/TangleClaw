@@ -281,6 +281,15 @@ default does not rewrite it, and a destination the Master has fixed on a route d
   back to the Master to route again, and the operator gets one failure notice.
 - **The exchange later fails** (undeliverable, recipient retired): the same.
 - **Nobody knows whether it arrived:** see "Sending exactly once". It is not sent again.
+
+**The notice is part of the write it reports.** Each of these is one store transaction: the
+route is handed back (or marked unconfirmed) and the operator's notice is queued together, or
+neither happens and the next pass finds the failure again from the records. So an accepted
+message that then fails is reported exactly once: a stop at any moment cannot leave the route
+changed with the operator untold, and no pass, retry or restart makes a second notice. The
+notice is a reply to the operator's own message, a fixed sentence the server wrote, and carries
+nothing of the message, the session or any credential. A send that has not ended reports
+nothing.
 - **The Master is not running:** the gateway starts it, at most once per backoff window (15
   seconds, doubling to 10 minutes). If it cannot, the route is queued. Nothing falls back to
   the Architect.
