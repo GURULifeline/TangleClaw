@@ -2704,6 +2704,12 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.deepEqual([mine.createdBy, mine.changedBy, mine.confirmedRouteId, mine.display], ['operator', 'operator', null, `O${op.slice(1)}`]);
       assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: op, to: 'master' } })).status, 200);
       assert.deepEqual(bridgeStore.aliases.record(op).destination, { kind: 'master', projectId: null });
+      // Pointing a nickname somewhere else keeps who first made it and when; only who changed it last moves.
+      bridgeStore.aliases.set(`old-${op}`, { kind: 'master', projectId: null }, { by: 'master', confirmedRouteId: asked, display: `old-${op}`, at: '2026-01-01T00:00:00.000Z' });
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `old-${op}`, to: target.project.id } })).status, 200);
+      const moved = bridgeStore.aliases.record(`old-${op}`);
+      assert.deepEqual([moved.createdBy, moved.createdAt, moved.changedBy, moved.confirmedRouteId, moved.destination.projectId], ['master', '2026-01-01T00:00:00.000Z', 'operator', null, target.project.id]);
+      assert.notEqual(moved.changedAt, '2026-01-01T00:00:00.000Z');
       assert.equal((await asOperator('DELETE', '/api/bridge/operator/aliases/:alias', { params: { alias: `${name}b` } })).status, 200);
       assert.equal(bridgeStore.aliases.record(`${name}b`), null);
       const forgetMsg = await instruction('@master forget it');
