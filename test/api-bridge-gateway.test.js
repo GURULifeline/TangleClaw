@@ -1703,6 +1703,7 @@ describe('bridge API: the round trip (#2031)', () => {
 
     it('READY that never comes, or comes from another session, sends nothing: the launch ends after ten minutes and the session is left running', async () => {
       try {
+        assert.equal(gateway.READY_WAIT_MS, 10 * MIN, 'ten minutes, as ruled');
         // Never READY.
         const slow = await consented();
         await gateway.tick();
@@ -1888,6 +1889,23 @@ describe('bridge API: the round trip (#2031)', () => {
       // And both launch a session after the same warm-up, by the same function.
       assert.match(read('server.js'), /await launchWarmup\.warmForLaunch\(project\);/);
       assert.match(read('lib/bridge-gateway.js'), /await require\('\.\/launch-warmup'\)\.warmForLaunch\(project\);\n\s+return require\('\.\/sessions'\)\.launchSession\(project\.name, \{ primePrompt: true, owner: null \}\);/);
+    });
+
+    it('a launch that can neither begin nor end is left for the next pass, and does not hold the pass in a loop', async () => {
+      try {
+        const stuck = await consented();
+        const behind = await consented();
+        const realBegin = bridgeStore.launches.begin;
+        let attempts = 0;
+        // The store refuses to record the launch as begun: the row stays queued.
+        bridgeStore.launches.begin = () => { attempts += 1; throw new Error('database is locked'); };
+        try {
+          const done = await Promise.race([gateway.tick().then(() => 'returned'), new Promise((resolve) => setTimeout(() => resolve('still looping'), 3000))]);
+          assert.equal(done, 'returned', 'the pass ends');
+          assert.equal(attempts, 1, 'having tried the one whose turn it was, once');
+        } finally { bridgeStore.launches.begin = realBegin; }
+        assert.deepEqual([launchOf(stuck.routeId).state, launchOf(behind.routeId).state], ['queued', 'queued'], 'nothing overtook it');
+      } finally { restore(); }
     });
 
     it('the three verbs over the command line', async () => {
