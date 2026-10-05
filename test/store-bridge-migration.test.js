@@ -767,6 +767,8 @@ describe('store: operator bridge constraints (#2031)', () => {
       refuses(() => db.prepare("UPDATE bridge_questions SET expires_at = '2027-01-01T00:00:00.000Z' WHERE question_id = 'q1'").run(), /settled once and is otherwise fixed/, 'a question cannot be kept open longer');
       refuses(() => db.prepare("UPDATE bridge_questions SET purpose = 'launch', target_project_id = 7 WHERE question_id = 'q1'").run(), /otherwise fixed/, 'nor become a question about something else');
       refuses(() => db.prepare("UPDATE bridge_questions SET route_id = 'r2' WHERE question_id = 'q1'").run(), /otherwise fixed|UNIQUE/);
+      refuses(() => settle('q1', 'adopted', 'yes', null), /CHECK/, 'a reply is adopted for something, and the row says what');
+      refuses(() => settle('q1', 'cancelled', null, 'route'), /CHECK/, 'and nothing is adopted without a reply');
       settle('q1', 'adopted', 'yes', 'route');
       refuses(() => settle('q2', 'adopted', 'yes', 'route'), /UNIQUE/, 'the same reply cannot be adopted for a second question');
       refuses(() => settle('q1', 'declined', 'yes', 'decline'), /settled once/, 'an adopted question is not then declined');

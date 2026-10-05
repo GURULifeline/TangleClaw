@@ -442,6 +442,11 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       assert.match(text, /## Operator bridge/);
       // Every inbound is the Master's to route; what the gateway found is advice (operator ruling, 2026-10-05).
       assert.ok(text.includes('- **Every message waits for you to route it.** Nothing the operator writes goes anywhere until you\n  decide.'));
+      // And how to ask, what stays held meanwhile, and that only a reply to that very question is an answer.
+      assert.ok(text.includes('- **When you cannot tell where a message goes, ask.** `tc bridge ask <route-id> --version <n> --text "<question>"`'));
+      assert.match(text.replace(/\n\s+/g, ' '), /The message stays held and nothing is sent on\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /`tc bridge route <route-id> --version <n> --to <destination> --answered-by <the reply's route-id>`/);
+      assert.match(text.replace(/\n\s+/g, ' '), /Only a reply to that very question counts\. A new message that happens to say yes, a reply to another question, a second reply, and one that comes after the question has run out \(a day\) are answers to nothing/);
       assert.ok(text.includes('The suggestion is advice, and you may\n  decide otherwise. `tc bridge route <route-id> --version <n> --to <master|project>` is the decision.'));
       assert.ok(text.includes('A message meant for you needs `--to master` first, and only then `tc bridge answer`.'));
       // Disabled is not "nothing to do": a rollback has the Master close what is still open.
