@@ -348,6 +348,14 @@ another session has taken its place in that instant, the message goes back to th
 `identity-changed`. That binds the one send the launch made. A later decision by the Master to
 route the same message is its own, and goes to whichever session is live then.
 
+**A limitation, accepted for v5.31.** Whether a project's session will have a Medusa listener
+cannot be known before the session runs, so a project whose Medusa is switched off is launched
+like any other on the operator's consent. Its session can attest READY and still cannot be
+sent to. The launch holds the one launch slot for the ten minutes of its wait and no longer,
+then ends as `ready-timeout`: the operator and the Master are told, the message stays held,
+the session is left running, and nothing is sent or launched again without a new decision.
+The bridge does not try to predict a listener.
+
 Closing the message abandons its launch. Disabling the bridge abandons every launch not yet
 settled, and enabling it again revives none. Nothing about a launch is kept in memory: after a
 restart the gateway reads the same rows and carries on, and a launch is never made twice.

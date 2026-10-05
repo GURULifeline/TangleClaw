@@ -1854,6 +1854,53 @@ describe('bridge API: the round trip (#2031)', () => {
       } finally { restore(); }
     });
 
+    it('a launched session with Medusa switched off: READY is not enough, and after ten minutes the launch ends with nothing sent or retried', async () => {
+      // Whether a project's session will have a listener cannot be known before it runs, so this launch is made.
+      // It may hold the one launch slot for the ten minutes of the wait, and no longer (Architect ruling, 2026-10-05).
+      try {
+        const c = await consented();
+        const behind = await consented();
+        const heldVersion = version(c.routeId);
+        await gateway.tick();
+        const session = store.sessions.getActive(c.project.id);
+        const workspace = hub.workspaces.get(String(session.id));
+        hub.workspaces.delete(String(session.id));
+        becomesReady(session.id);
+        const realNow = gateway._deps.now;
+        const started = Date.parse(launchOf(c.routeId).startedAt);
+        const at = (ms) => { const iso = new Date(started + ms).toISOString(); gateway._deps.now = () => iso; };
+        try {
+          at(gateway.READY_WAIT_MS);
+          await gateway.tick();
+          assert.deepEqual([launchOf(c.routeId).state, launchOf(behind.routeId).state], ['waiting-ready', 'queued'], 'at exactly ten minutes it is still waited for, and holds the slot');
+          assert.equal(launched.length, 1);
+          at(gateway.READY_WAIT_MS + 1);
+          await gateway.tick();
+          assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode], ['failed', 'ready-timeout'], 'one millisecond later it is given up');
+          // The original is still held, with the code on it, its text intact, and was sent to nobody.
+          const route = bridgeStore.routes.get(c.routeId);
+          assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', 'ready-timeout', null]);
+          assert.ok(route.version > heldVersion, 'its version moved, so the Master is told');
+          assert.equal(bridgeStore.routes.body(c.routeId, 'inbound').text, `@${c.project.name} please run the nightly`);
+          assert.equal(hub.fromGateway().filter((m) => m.message.includes(c.project.name)).length, 0, 'nothing was dispatched');
+          // The operator is told once, in the fixed words.
+          assert.deepEqual(about(await claimAll(), c.routeId).filter((i) => i.kind === 'failure').map((i) => i.text),
+            ['I could not get a session ready for your message (ready-timeout). Your message is still held, and nothing was sent on.']);
+          // The session is left running; the slot is free for the next in line; nothing is retried.
+          assert.equal(store.sessions.getActive(c.project.id).id, session.id);
+          assert.equal(launchOf(behind.routeId).state, 'waiting-ready', 'the next consented launch takes its turn in the same pass');
+          assert.deepEqual(launched.map((args) => args[0].id), [c.project.id, behind.project.id]);
+          // The listener comes on afterwards: the launch that was given up sends nothing, then or later.
+          hub.workspaces.set(String(session.id), workspace);
+          for (let i = 0; i < 3; i++) await gateway.tick();
+          assert.deepEqual(sentTo(workspace), [], 'no automatic dispatch once the session can be reached');
+          assert.equal(launched.filter((args) => args[0].id === c.project.id).length, 1, 'and no second launch');
+          assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'launch-dispatch' AND route_id = ?").get(c.routeId).n, 0);
+          assert.equal(launchOf(c.routeId).state, 'failed');
+        } finally { gateway._deps.now = realNow; }
+      } finally { restore(); }
+    });
+
     it('every condition is asked again immediately before launching, and while waiting', async () => {
       try {
         const lane = (blocked, stopped) => () => ({ ...realControl(), blockingOf: () => ({ blocked, stopped, code: stopped ? 'CONTROL_STOPPED' : 'CONTROL_HELD' }) });
