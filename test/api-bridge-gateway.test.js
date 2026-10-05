@@ -2722,7 +2722,32 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal(standing(), after);
       // And the Master answers the instruction in the same conversation, with no route step of its own.
       assert.equal((await masterWrites(asked, 'answer', { expectedVersion: version(asked), text: `Stored: @${name} is ${target.project.name}.` })).status, 200);
-      bridgeStore.aliases.remove(name);
+
+      // The same holds for every kind of change, not only a new name: here a forget, then a rename.
+      const heldAndAnswered = async (text) => {
+        const routeId = (await operatorWrites(`m${++seq}`, text)).body.routeId;
+        assert.equal((await masterWrites(routeId, 'ask', { expectedVersion: version(routeId), text: 'Which?' })).status, 200);
+        assert.equal((await ackItem(about(await claimAll(), routeId).find((i) => i.kind === 'question'), `dn${++seq}`)).status, 200);
+        return { routeId, reply: await operatorReplies(`dn${seq}`, 'that one') };
+      };
+      const renameIt = await heldAndAnswered('@master rename that one');
+      // The store's write alone, before the gateway carries anything: the decision is whole and durable as it commits,
+      // one version on from where the message stood.
+      const stood = version(renameIt.routeId);
+      const direct = bridgeStore.applyNicknameWrite({
+        op: 'nickname-rename', requestId: `req-direct-${++seq}-0000`, answeredBy: renameIt.reply, proof: 'test', masterGeneration: 1,
+        change: () => (bridgeStore.aliases.rename(name, `${name}-b`, { by: 'master', confirmedRouteId: renameIt.reply }) ? { detail: { nickname: `${name}-b`, was: name } } : { refuse: 'nickname-not-found' })
+      });
+      assert.deepEqual([direct.outcome, direct.detail.instructionRouteId], ['applied', renameIt.routeId]);
+      const committed = db().prepare('SELECT state, version, destination_kind, resolved_by FROM bridge_routes WHERE route_id = ?').get(renameIt.routeId);
+      assert.deepEqual({ ...committed }, { state: 'accepted', version: stood + 1, destination_kind: 'master', resolved_by: 'master' });
+      assert.equal((await gateway.advance(renameIt.routeId)).state, 'routed', 'and the gateway carries it from there');
+      const forgetIt = await heldAndAnswered('@master forget that one');
+      const forgot = await nick(`/${name}-b/forget`, { answeredBy: forgetIt.reply });
+      assert.deepEqual([forgot.status, forgot.body.via, forgot.body.instruction.state], [200, 'reply', 'routed'], JSON.stringify(forgot.body));
+      assert.equal(bridgeStore.routes.get(forgetIt.routeId).state, 'routed');
+      assert.equal(JSON.parse(db().prepare("SELECT detail_json FROM bridge_audit WHERE route_id = ? AND op = 'route' AND outcome = 'applied'").get(forgetIt.routeId).detail_json).with, 'nickname-forget');
+      assert.equal(bridgeStore.aliases.record(`${name}-b`), null);
     });
 
     it('when the message does not say exactly one thing, the Master asks, and the operator\'s reply is what authorises it', async () => {
