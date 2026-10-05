@@ -43,6 +43,7 @@
     requeue: (id) => `/api/bridge/operator/outbound/${Number(id)}/requeue`,
     withdraw: (id) => `/api/bridge/operator/outbound/${Number(id)}/withdraw`,
     withdrawCandidate: (id) => `/api/bridge/operator/candidates/${encodeURIComponent(String(id))}/withdraw`,
+    alias: (name) => `/api/bridge/operator/aliases/${encodeURIComponent(String(name))}`,
     optouts: '/api/bridge/operator/optouts',
     optout: (id) => `/api/bridge/operator/optouts/${Number(id)}`
   });
@@ -71,6 +72,7 @@
     requeue: (f) => `Put item ${f.outboundId} back in the queue to be posted?`,
     withdraw: (f) => `Withdraw item ${f.outboundId}? It will never be posted. If it is a route's answer, that route is closed.`,
     'withdraw-candidate': (f) => `Withdraw candidate ${f.candidateId}? Nobody has decided it, and it will then never be approved or posted.`,
+    'forget-nickname': (f) => `Forget the nickname @${f.nickname}? A message addressed by it will then be suggested for nobody. Nicknames are set by asking the Project Master in the chat.`,
     // Taking a project out of reach narrows what the bridge can do, and asks nothing. Putting one back widens it.
     'opt-in': (f) => `Put project ${f.projectId} back within reach of the bridge? Messages may then be routed to it, and a session launched for it when you say yes in the chat.`
   });
@@ -193,6 +195,7 @@
         const key = `withdraw-candidate:${f.candidateId}`;
         return send(ROUTES.withdrawCandidate(f.candidateId), 'POST', { requestId: requestIdFor(key) }, `Candidate ${f.candidateId} is withdrawn.`, key);
       },
+      'forget-nickname': (f) => send(ROUTES.alias(f.nickname), 'DELETE', undefined, `The nickname @${f.nickname} is forgotten.`),
       'opt-out': (f) => send(ROUTES.optouts, 'POST', { project: Number(f.projectId) },
         `Project ${Number(f.projectId)} is out of reach of the bridge. Nothing is routed to it and no session is launched for it.`),
       'opt-in': (f) => send(ROUTES.optout(f.projectId), 'DELETE', undefined, `Project ${Number(f.projectId)} is back within reach of the bridge.`)
@@ -217,6 +220,7 @@
       if ((action === 'requeue' || action === 'withdraw') && !Number.isInteger(Number(f.outboundId))) return 'No such item.';
       if (action === 'withdraw-candidate' && !/^[A-Za-z0-9_-]{1,64}$/.test(String(f.candidateId || ''))) return 'No such candidate.';
       if ((action === 'opt-out' || action === 'opt-in') && !/^[1-9][0-9]{0,15}$/.test(String(f.projectId || ''))) return 'No such project.';
+      if (action === 'forget-nickname' && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(String(f.nickname || ''))) return 'No such nickname.';
       return null;
     }
 
@@ -306,6 +310,7 @@
       const reachable = Array.isArray(reach.reachable) ? reach.reachable : [];
       const optouts = Array.isArray(reach.optouts) ? reach.optouts : [];
       const scope = reach.scope || {};
+      const nicknames = Array.isArray(s.nicknames) ? s.nicknames : [];
       const token = state.token === null ? '' : `
         <div class="ob-token" data-bridge-token-shown="1">
           <div class="form-hint"><strong>The helper token, shown once.</strong> It is not saved anywhere by this page.
@@ -345,6 +350,16 @@
         ${optouts.length ? `<div class="form-hint">Out of reach by your choice:</div>${optouts.map((o) => `<div class="ob-item" data-bridge-optout="${escapeHtml(o.projectId)}">project ${escapeHtml(o.projectId)}`
           + `${o.name ? `: ${escapeHtml(o.name)}` : ' (no longer in the registry)'}, since ${escapeHtml(o.setAt)} ${button('opt-in', 'Put back within reach', { project: o.projectId })}</div>`).join('')}`
           : ''}
+
+        <div class="gs-section-sublabel">Nicknames</div>
+        <div class="form-hint">Set, renamed and forgotten by asking the Project Master in the chat ("@master remember @name means a project"). Shown here to look at, and to remove one that is wrong.
+          A nickname is only a suggestion to the Master: it routes nothing and grants nothing.</div>
+        ${nicknames.length ? nicknames.map((n) => `<div class="ob-item" data-bridge-nickname="${escapeHtml(n.nickname)}">@${escapeHtml(n.display)} means `
+          + `${n.destination && n.destination.kind === 'master' ? 'the Project Master' : `project ${escapeHtml(n.destination ? n.destination.projectId : '')}${n.destination && n.destination.name ? `: ${escapeHtml(n.destination.name)}` : ''}`}`
+          + `${n.reachable ? '' : ` <strong>(out of reach: ${escapeHtml(n.outOfReach)}; it names nothing now)</strong>`}; `
+          + `${n.changedBy ? `set by ${n.changedBy === 'master' ? `the Project Master on your message ${escapeHtml(n.confirmedRouteId)}` : 'you'}, ${escapeHtml(n.changedAt)}` : `set ${escapeHtml(n.createdAt)}`} `
+          + `${button('forget-nickname', 'Forget', { nickname: n.nickname })}</div>`).join('')
+          : '<div class="form-hint">No nicknames are stored.</div>'}
 
         <div class="gs-section-sublabel">Helper token</div>
         ${line('Now', s.helperToken ? `one active, created ${escapeHtml(s.helperToken.createdAt)}` : '<strong>none</strong>')}
@@ -435,7 +450,7 @@
       const value = (id) => { const input = doc.getElementById(id); return input ? String(input.value || '').trim() : ''; };
       return {
         authorId: value('obAuthorId'), spaceId: value('obSpaceId'), channelId: value('obChannelId'),
-        outboundId: target.dataset.bridgeItem, candidateId: target.dataset.bridgeCandidate, projectId: target.dataset.bridgeProject,
+        outboundId: target.dataset.bridgeItem, candidateId: target.dataset.bridgeCandidate, projectId: target.dataset.bridgeProject, nickname: target.dataset.bridgeNickname,
         episodeId: target.dataset.bridgeEpisode, decision: target.dataset.bridgeDecision
       };
     };

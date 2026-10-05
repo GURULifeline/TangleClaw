@@ -140,6 +140,54 @@ An address is a leading `@name` that names **exactly one** destination the bridg
   made one dash. It counts only while exactly one reachable project has it;
 - a project's id.
 
+### Nicknames
+
+A nickname is a second name for a project, or for the Master: `@tc-arc` for TangleClaw
+Architect. It is an overlay on a project id and nothing more. It is only ever a suggestion to
+the Master, so a message addressed by one still waits to be routed; it changes no rule,
+credential or permission; and it grants nothing.
+
+**They are managed by asking the Master in the chat.** The operator writes to `@master`:
+"remember @TC-ARC means TangleClaw Architect", "list nicknames", "what is @tc-arc?", "rename
+@tc-arc to @arch", "forget @tc-arc". The Master routes the message to itself, makes the change
+with `tc bridge nickname`, and answers in the same conversation with `tc bridge answer`.
+
+**Every change rests on one operator message,** named by `--answered-by`, and the check is
+mechanical:
+
+- **The instruction itself:** an inbound the Master has routed to itself, still open, that has
+  authorised no nickname change before. This is enough when the message says exactly one
+  thing: the target is one reachable project and the name is free.
+- **A reply to a clarifying question:** when the message does not say exactly one thing, the
+  Master asks with `tc bridge ask` and names the operator's reply. Adopting it settles the
+  question and closes the reply's route with the write, by the same correlation as any answer.
+
+One message authorises one change. Whether its words ask for that change is the Master's
+reading; the audit records the nickname, the target and the message's route id, and none of
+its text.
+
+| Refused | Answer |
+|---|---|
+| The message is not one the Master has routed to itself, is closed, or does not exist | `409 NOT_AN_INSTRUCTION` |
+| The message has already authorised a nickname change | `409 INSTRUCTION_USED` |
+| A reply that is not the answer to an open clarifying question | `409 NOT_AN_ANSWER`, `QUESTION_SETTLED`, `QUESTION_EXPIRED`, `QUESTION_PURPOSE` |
+| The name is `master` | `409 NICKNAME_RESERVED` |
+| The name is already a nickname | `409 NICKNAME_EXISTS` |
+| The name is a reachable project's name, slug or id | `409 NICKNAME_COLLIDES` |
+| The name is not 1 to 64 letters, digits, dots, dashes or underscores | `400 BAD_NICKNAME` |
+| No such nickname, on a rename or a forget | `404 NICKNAME_NOT_FOUND` |
+| The target is not something the bridge may reach | As for any destination, below |
+
+A refused change uses nothing up: the same message can still authorise the corrected one. A
+name is never allowed to mean two things when it is written; if a project is later created or
+renamed onto an existing nickname, the name is ambiguous and is never guessed at.
+
+A nickname whose project goes out of reach stays on record and names nothing until that
+changes; `tc bridge nickname <name>` says why. Each nickname records who last set it (the
+operator, or the Master), when, the operator message behind a Master's change, and the name as
+it was typed. The operator's panel lists them with that record and can remove one; the
+operator's alias routes remain for putting things right, and are held to the same rules.
+
 ### What the bridge may reach
 
 No project is connected to the bridge by hand. A project is reachable when it is in the
@@ -193,7 +241,9 @@ held as it was and the refusal on the audit by its code:
 An address is a suggestion to the Master, like every other way a destination is found: it
 names where the operator meant the message to go, and the Master's route write is what sends
 it. An `@name` that matches nothing, or more than one destination, is never guessed at: the
-route waits with no suggestion and the reason (`address-unresolved`, `address-ambiguous`). A
+route waits with no suggestion and the reason: `address-unresolved` for a name that is
+nobody's, `address-ambiguous` for one that is two things', and `address-out-of-reach` for a
+nickname or a project's name whose project the bridge may not reach. A
 chat application's own mention syntax, such as `<@123>`, is not an address, and neither is an
 `@name` in the middle of a sentence.
 
@@ -424,7 +474,11 @@ the bridge's own routes and nowhere else, so it is never typed.
 | Command | Does |
 |---|---|
 | `tc bridge status` | Says whether the bridge is enabled and which generation is asking. Answers while disabled. |
-| `tc bridge destinations` | Lists every project the bridge may reach, with each name it answers to and whether it is running. Worked out as it is asked. Answers while disabled. |
+| `tc bridge destinations` | Lists every project the bridge may reach, with each name it answers to and whether it is running. Worked out as it is asked (`GET /api/bridge/master/destinations`). Answers while disabled. |
+| `tc bridge nicknames`, `tc bridge nickname <name>` | Lists every nickname, or explains one: what it means, whether that is reachable and running, who set it and on which message. Answer while disabled. |
+| `tc bridge nickname set <name> --to <dest> --answered-by <route-id>` | Stores a nickname the operator asked for. |
+| `tc bridge nickname rename <name> <new-name> --answered-by <route-id>` | Gives a nickname a new name. What it points at does not change. |
+| `tc bridge nickname forget <name> --answered-by <route-id>` | Removes a nickname. |
 | `tc bridge routes [--state <state>]...` | Lists routes, oldest first, without bodies. Open states by default. |
 | `tc bridge read <route-id>` | Shows one route with the text still held for it. |
 | `tc bridge route <route-id> --version <n> --to <dest>` | Names the destination of a route that is waiting for the Master. The gateway then sends it. With `--answered-by <route-id>`, also adopts that operator reply as the answer to the question asked about it. |
@@ -821,6 +875,7 @@ it has to sign in, and nothing of the bridge.
 | Control | What it does |
 |---|---|
 | Enable / Disable the bridge | Enabling asks first. Disabling asks nothing and acts at once: it is the kill switch. |
+| Forget a nickname | Lists every nickname with who set it, when, and on which of your messages. Removing one asks first. Nicknames are set by asking the Master in the chat. |
 | Take a project out of reach / Put it back | Lists every reachable project and every one opted out, and says how the Master's scope reads. Taking one out of reach asks nothing and acts at once. Putting one back asks first. |
 | Set the allowlist | The exact author, server and channel, as Discord's numbers. It names all three back before it sends. |
 | Create or replace the helper token | Shows the value once. Copying is a button the operator presses; nothing is copied without it. The page keeps the value in no storage, no URL and no log, and it is gone when dismissed or when settings closes. It goes into the helper's Keychain through `bin/tc-bridge-helper set-secret helper`, which reads it from standard input. Created only over https, from this machine itself, or through a proxy on this machine that says the browser came over https; from anywhere else it is refused with nothing created (`403 SECURE_TRANSPORT_REQUIRED`). |
@@ -837,7 +892,7 @@ request.
 
 | Route | Does |
 |---|---|
-| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), each item set aside by id, kind and reason and never its text (`setAsideItems`), everything queued that no open route owns, undecided candidates included, by id, kind, state and age and never its text (`routelessItems`), whether sessions are being told of `tc candidate`, what the switch was last set to whether or not the bridge is on for it to take effect, and the last launch that was not told (`candidatesPrimed`, `candidatePrimerSetting`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
+| `GET /api/bridge/operator/status` | Whether it is enabled, the allowlist, whether a helper token exists, the Master generation, aliases, each nickname with who set it and on which message (`nicknames`), what the bridge may reach (`reach`: how the Master's scope reads, the reachable projects, and the projects opted out), pins, how many routes are open, in each state and since when (`openRoutes`, `openRoutesByState`, `oldestOpenRouteAt`: counts and a time, no text), what is waiting (`waitingForHelper`, which counts an open episode's notice), how many items are set aside (`setAside`), each item set aside by id, kind and reason and never its text (`setAsideItems`), everything queued that no open route owns, undecided candidates included, by id, kind, state and age and never its text (`routelessItems`), whether sessions are being told of `tc candidate`, what the switch was last set to whether or not the bridge is on for it to take effect, and the last launch that was not told (`candidatesPrimed`, `candidatePrimerSetting`, `candidatePrimerOmitted`), whether the Master can be told and how many routes it has not been told of (`masterListener`, `routesMasterNotTold`), the open configuration episode if there is one (`configurationCircuit`), and the arrivals the gateway dropped since the server started, each with its reason. |
 | `POST /api/bridge/operator/allowlist` | Sets the one `authorId`, `spaceId` and `channelId` accepted. |
 | `POST /api/bridge/operator/helper-token` | Replaces the helper token. The value is in this response and nowhere else. |
 | `DELETE /api/bridge/operator/helper-token` | Revokes it. |
@@ -847,7 +902,7 @@ request.
 | `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Switching it on is refused `409 BRIDGE_DISABLED` while the bridge is off; switching it off is always taken. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
-| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. The destination must be one the bridge may reach. |
+| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a nickname, for putting right what was set in conversation. `master` is reserved, the destination must be one the bridge may reach, and a new name may not be a reachable project's name, slug or id (`409 NICKNAME_COLLIDES`). Recorded as the operator's. |
 | `POST /api/bridge/operator/optouts`, `DELETE .../optouts/:projectId` | Takes a project out of reach of the bridge, or puts it back. `{project}` is a project id (`400 UNKNOWN_PROJECT` otherwise); putting back one that is not out is `404 OPTOUT_NOT_FOUND`. Audited. |
 | `POST /api/bridge/operator/pins`, `DELETE .../pins/:pinId` | Sets a pin for one conversation, or for every conversation when no `conversationKey` is given; revokes any active pin, the Master's included. |
 

@@ -377,7 +377,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
     const identity = master.buildMasterClaudeMd(store.config.load());
-    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'destinations', 'routes', 'read', 'route', 'ask', 'ask-launch', 'launch', 'decline', 'answer', 'release', 'pin', 'close',
+    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'destinations', 'nicknames', 'nickname', 'nickname set', 'nickname rename', 'nickname forget', 'routes', 'read', 'route', 'ask', 'ask-launch', 'launch', 'decline', 'answer', 'release', 'pin', 'close',
       'candidates', 'candidate', 'approve', 'reject', 'merge', 'blocked', 'requeue', 'withdraw', 'circuit ack', 'reset']);
     /**
      * Whether a usage text names a subverb as a word of its own.
@@ -402,7 +402,8 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       postJson: async (p) => { asked.push(`POST ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); }
     });
     const args = {
-      status: [], destinations: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], 'ask-launch': ['rt_1', '--version', '1', '--project', 'Alpha'],
+      status: [], destinations: [], nicknames: [], nickname: ['tc-arc'], 'nickname set': ['tc-arc', '--to', 'master', '--answered-by', 'rt_2'],
+      'nickname rename': ['tc-arc', 'arch', '--answered-by', 'rt_2'], 'nickname forget': ['tc-arc', '--answered-by', 'rt_2'], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], 'ask-launch': ['rt_1', '--version', '1', '--project', 'Alpha'],
       launch: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], decline: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], answer: ['rt_1', '--version', '1', '--text', 'x'],
       release: ['rt_1', '--version', '1'], pin: ['rt_1', '--version', '1', '--to', 'master'], close: ['rt_1', '--version', '1'],
       candidates: [], candidate: ['cand_1'], approve: ['cand_1', '--version', '1'], reject: ['cand_1', '--version', '1'],
@@ -444,6 +445,12 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       // Every inbound is the Master's to route; what the gateway found is advice (operator ruling, 2026-10-05).
       assert.ok(text.includes('- **Every message waits for you to route it.** Nothing the operator writes goes anywhere until you\n  decide.'));
       // And how to ask, what stays held meanwhile, and that only a reply to that very question is an answer.
+      // Nicknames are the operator's to ask for, in conversation, and never more than a suggestion.
+      assert.ok(text.includes('- **Nicknames are the operator\'s to ask for, in the chat.**'));
+      assert.match(text.replace(/\n\s+/g, ' '), /Store one only when the operator has asked for it: every change names the operator's message behind it with `--answered-by`\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /If the message does not say exactly one thing \(a target you cannot find, or more than one, or a name already in use\), ask first/);
+      assert.match(text.replace(/\n\s+/g, ' '), /A nickname grants nothing and changes no rule, credential or permission: it is a name, and a message addressed by it still waits for you to route it\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /Then tell the operator what you did, in the same conversation, with `tc bridge answer`\./);
       // Where a message can go at all is read, never remembered.
       assert.ok(text.includes('- **`tc bridge destinations` is where a message can go.**'));
       assert.match(text.replace(/\n\s+/g, ' '), /It is worked out as you ask, so read it when you need it and do not keep a list of your own\./);

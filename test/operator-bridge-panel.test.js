@@ -621,15 +621,49 @@ describe('the Operator Bridge panel (#2031)', () => {
           scope: { kind: 'group', groupName: '<img src=x onerror=1>' },
           reachable: [{ projectId: 7, name: '<script>a</script>' }],
           optouts: [{ projectId: 9, name: '"><b>gone</b>', setAt: '<2026>' }, { projectId: 11, name: null, setAt: '2026-10-05T00:00:00.000Z' }]
-        }
+        },
+        nicknames: [{ nickname: 'x', display: '<u>X</u>', destination: { kind: 'project', projectId: 7, name: '<s>p</s>' }, reachable: false, outOfReach: '<em>', changedBy: 'master', changedAt: '<t>', confirmedRouteId: '<r>' }]
       };
       const { panel } = controller(scripted(() => ({ status: 200, body: status })));
       await panel.load();
       const html = panel.html();
-      for (const raw of ['<img src=x', '<script>a', '"><b>gone', '<2026>']) assert.ok(!html.includes(raw), raw);
+      for (const raw of ['<img src=x', '<script>a', '"><b>gone', '<2026>', '<u>X</u>', '<s>p</s>', '<em>', '<t>', '<r>']) assert.ok(!html.includes(raw), raw);
+      assert.ok(html.includes('@&lt;u&gt;X&lt;/u&gt; means project 7: &lt;s&gt;p&lt;/s&gt;'));
       assert.ok(html.includes('the &lt;img src=x onerror=1&gt; group'));
       assert.ok(html.includes('project 7: &lt;script&gt;a&lt;/script&gt;'));
       assert.ok(html.includes('project 11 (no longer in the registry), since 2026-10-05T00:00:00.000Z'), 'an opt-out whose project is gone can still be seen and put back');
+    });
+
+    it('shows each nickname with who set it and on which message, and lets the operator remove one, asking first', async () => {
+      const db = store.getDb();
+      db.exec('DELETE FROM bridge_aliases');
+      const project = store.projects.create({ name: `Nick Target ${Date.now()}`, path: path.join(tmpDir, `nick-${Date.now()}`) });
+      bridgeStore.aliases.set('tc-arc', { kind: 'project', projectId: project.id }, { by: 'master', confirmedRouteId: 'rt_instruction', display: 'TC-ARC', at: '2026-10-05T01:00:00.000Z' });
+      bridgeStore.aliases.set('mine', { kind: 'master', projectId: null }, { by: 'operator', display: 'Mine', at: '2026-10-05T02:00:00.000Z' });
+      const wires = real(SIGNED_IN);
+      const { panel, asked } = controller(wires, { confirm: () => false });
+      await panel.load();
+      const html = panel.html();
+      assert.match(html, /Set, renamed and forgotten by asking the Project Master in the chat/);
+      assert.match(html, /A nickname is only a suggestion to the Master: it routes nothing and grants nothing\./);
+      assert.ok(html.includes(`data-bridge-nickname="tc-arc">@TC-ARC means project ${project.id}: ${project.name}; set by the Project Master on your message rt_instruction, 2026-10-05T01:00:00.000Z `), html.slice(html.indexOf('Nicknames'), html.indexOf('Nicknames') + 900));
+      assert.ok(html.includes('data-bridge-nickname="mine">@Mine means the Project Master; set by you, 2026-10-05T02:00:00.000Z '));
+      assert.ok(html.includes('data-bridge-action="forget-nickname" data-bridge-nickname="tc-arc">Forget</button>'));
+      // Removing asks first, and a no sends nothing.
+      assert.equal(await panel.act('forget-nickname', { nickname: 'tc-arc' }), 'declined');
+      assert.match(asked[0], /^Forget the nickname @tc-arc\? A message addressed by it will then be suggested for nobody\./);
+      assert.ok(bridgeStore.aliases.record('tc-arc'));
+      const yes = controller(wires);
+      await yes.panel.load();
+      assert.equal(await yes.panel.act('forget-nickname', { nickname: 'tc-arc' }), 'done');
+      assert.equal(bridgeStore.aliases.record('tc-arc'), null);
+      assert.ok(!yes.panel.html().includes('data-bridge-nickname="tc-arc"'));
+      for (const nickname of [undefined, '', 'Has Space', '../x', 'UPPER']) assert.equal(await yes.panel.act('forget-nickname', { nickname }), 'blocked', String(nickname));
+      // A nickname whose project is out of reach is shown as naming nothing.
+      bridgeStore.aliases.set('gone', { kind: 'project', projectId: project.id }, { by: 'operator', display: 'gone' });
+      store.projects.archive(project.id);
+      await yes.panel.load();
+      assert.match(yes.panel.html(), /data-bridge-nickname="gone">@gone means project \d+: [^<]* <strong>\(out of reach: archived; it names nothing now\)<\/strong>/);
     });
 
     it('says when the scope cannot be resolved, and does not show that as an empty fleet', async () => {

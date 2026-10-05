@@ -220,6 +220,13 @@ no Master judgement in between. The operator has ruled that out.
   fails closed: an unresolvable one reaches nothing, and is said and audited. Opt-out is the
   signed-in operator's alone. Two live sessions of one project are never guessed between. No
   session is designated primary in v5.31.
+- **Nicknames are managed in conversation** (operator ruling, 2026-10-05), through the reserved
+  `@master`: remember, list, explain, rename, forget. The dashboard is for inspection and
+  recovery. A nickname is low-risk routing metadata: it names exactly one destination, is only
+  ever a suggestion, and grants no authority. The Master stores one only with an operator
+  message behind it. An explicit instruction is its own confirmation only when its target is
+  exact and unique, the name collides with nothing, and that message has authorised no other
+  change; otherwise the Master asks, and the operator's correlated reply is what authorises it.
 
 ### 10. The interim path, and what cutover requires (D4)
 

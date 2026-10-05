@@ -405,6 +405,8 @@ describe('bridge API: the round trip (#2031)', () => {
     const answered = bridgeApi.ROUTES.filter((r) => r.whileDisabled).map((r) => `${r.method} ${r.path}`).sort();
     assert.deepEqual(answered, [
       'GET /api/bridge/master/destinations',
+      'GET /api/bridge/master/nicknames',
+      'GET /api/bridge/master/nicknames/:name',
       'GET /api/bridge/master/outbound/blocked',
       'GET /api/bridge/master/routes',
       'GET /api/bridge/master/routes/:routeId',
@@ -2237,7 +2239,7 @@ describe('bridge API: the round trip (#2031)', () => {
 
         // At once: not suggested, not routable, not launchable, not listed.
         const addressed = await inbound(`@${target.project.name} hello`);
-        assert.deepEqual(suggestion(addressed), { by: null, to: null, projectId: null, reason: 'address-unresolved' });
+        assert.deepEqual(suggestion(addressed), { by: null, to: null, projectId: null, reason: 'address-out-of-reach' }, 'not suggested, and said to be out of reach, not unknown');
         await refusedRoute(addressed, target.project.id, 409, 'DESTINATION_OPTED_OUT', 'by id');
         await refusedRoute(addressed, target.project.name, 409, 'DESTINATION_OPTED_OUT', 'by name');
         const ask = await masterWrites(addressed, 'ask-launch', { expectedVersion: version(addressed), project: target.project.id });
@@ -2275,7 +2277,7 @@ describe('bridge API: the round trip (#2031)', () => {
         store.projectGroups.addMember(group.id, inside.project.id);
         bridgeReach._deps.masterScope = () => ({ type: 'group', groupId: group.id });
         const routeId = await inbound(`@${outside.project.name} hello`);
-        assert.equal(suggestion(routeId).reason, 'address-unresolved', 'a project outside the scope is not even suggested');
+        assert.equal(suggestion(routeId).reason, 'address-out-of-reach', 'a project outside the scope is not even suggested');
         await refusedRoute(routeId, outside.project.id, 409, 'DESTINATION_OUT_OF_SCOPE', 'outside the scope');
         const listed = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
         assert.deepEqual([listed.scope, listed.destinations.map((d) => d.projectId)], [{ kind: 'group', groupName: group.name }, [inside.project.id]]);
@@ -2366,12 +2368,16 @@ describe('bridge API: the round trip (#2031)', () => {
       try {
         const alpha = liveProject(`Twin${++seq}`);
         const beta = liveProject(`Other${++seq}`);
-        // The operator gives one project a nickname that is another project's name.
-        assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: beta.project.name, to: alpha.project.id } })).status, 200);
+        // A nickname may not be given a name a reachable project already has: that is how a name comes to mean two things.
+        const clash = await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: beta.project.name, to: alpha.project.id } });
+        assert.deepEqual([clash.status, clash.body.code], [409, 'NICKNAME_COLLIDES']);
+        // It can still happen the other way round, when a project is created or renamed onto an existing nickname. Then nothing is guessed.
+        bridgeStore.aliases.set(beta.project.name.toLowerCase(), { kind: 'project', projectId: alpha.project.id });
         const routeId = await inbound(`@${beta.project.name} which of you?`);
         assert.equal(suggestion(routeId).reason, 'address-ambiguous');
         await refusedRoute(routeId, beta.project.name, 409, 'DESTINATION_AMBIGUOUS', 'a name that is one project\'s and another\'s nickname');
         assert.equal((await asOperator('DELETE', '/api/bridge/operator/aliases/:alias', { params: { alias: beta.project.name } })).status, 200);
+        assert.equal(suggestion(await inbound(`@no-such-thing-${seq} hello`)).reason, 'address-unresolved', 'a name that is nobody\'s is still just unknown');
 
         // A second live session of one project: an anomaly. Nothing is sent to either.
         const second = hub.anotherSession(alpha.project);
@@ -2428,6 +2434,281 @@ describe('bridge API: the round trip (#2031)', () => {
         const extra = await tc(['bridge', 'destinations', 'all']);
         assert.equal(extra.code, 1, 'it takes no argument');
       } finally { restore(); }
+    });
+  });
+
+  describe('nicknames, asked for in conversation', () => {
+    const version = (id) => bridgeStore.routes.get(id).version;
+    const db = () => store.getDb();
+    const suggestion = (routeId) => bridgeStore.audit.suggestionFor(routeId);
+    const about = (items, routeId) => items.filter((i) => i.inReplyTo && i.inReplyTo.externalId === bridgeStore.routes.get(routeId).externalId);
+    const claimAll = async () => {
+      const all = [];
+      for (let pass = 0; pass < 10; pass++) {
+        const { items } = (await claim()).body;
+        if (!items.length) break;
+        all.push(...items);
+      }
+      return all;
+    };
+    /** A Master nickname write. */
+    const nick = (apiPath, body) => call('POST', `/api/bridge/master/nicknames${apiPath}`, { headers: asMaster(), body: { requestId: `req-nick-${++seq}-0000`, ...body } });
+    /** The operator writes to the Master, and the Master takes the message as one for itself. */
+    const instruction = async (text) => {
+      const routeId = (await operatorWrites(`m${++seq}`, text)).body.routeId;
+      const routed = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: 'master' });
+      assert.deepEqual([routed.status, routed.body.route.state, routed.body.route.destination.kind], [200, 'routed', 'master'], JSON.stringify(routed.body));
+      return routeId;
+    };
+    const operatorReplies = async (to, text) => {
+      const res = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, replyToExternalId: to, text } });
+      assert.equal(res.status, 202, JSON.stringify(res.body));
+      return res.body.routeId;
+    };
+    const names = () => JSON.stringify(bridgeStore.aliases.records());
+
+    it('"remember @X means Y": stored on the operator\'s own message, recorded with who and when, and still only a suggestion', async () => {
+      const target = liveProject(`Architect${++seq}`);
+      const name = `TC-ARC${seq}`;
+      const asked = await instruction(`@master remember @${name} means ${target.project.name}`);
+      const sentBefore = hub.fromGateway().length;
+      const stored = await nick('', { name: `@${name}`, to: target.project.id, answeredBy: asked });
+      assert.deepEqual([stored.status, stored.body.outcome, stored.body.nickname, stored.body.projectId, stored.body.via], [200, 'applied', name.toLowerCase(), target.project.id, 'instruction'], JSON.stringify(stored.body));
+      const record = bridgeStore.aliases.record(name.toLowerCase());
+      assert.deepEqual([record.display, record.destination, record.createdBy, record.changedBy, record.confirmedRouteId],
+        [name, { kind: 'project', projectId: target.project.id }, 'master', 'master', asked], 'as typed, pointing at the project id, by the Master, on that message');
+      assert.ok(record.changedAt && record.createdAt);
+      assert.equal(hub.fromGateway().length, sentBefore, 'storing a name sends nothing anywhere');
+      // The audit names the nickname, the target and the message. None of the message's words.
+      const audit = db().prepare("SELECT outcome, route_id, detail_json FROM bridge_audit WHERE op = 'nickname-set' AND route_id = ?").get(asked);
+      assert.deepEqual([audit.outcome, JSON.parse(audit.detail_json)], ['applied', { nickname: name.toLowerCase(), to: 'project', projectId: target.project.id, via: 'instruction', questionId: null }]);
+      assert.ok(!/remember|means/.test(audit.detail_json));
+
+      // A message addressed by it is suggested for that project, and goes nowhere until the Master routes it.
+      const addressed = (await operatorWrites(`m${++seq}`, `@${name.toUpperCase()} are you there?`)).body.routeId;
+      assert.deepEqual(suggestion(addressed), { by: 'alias', to: 'project', projectId: target.project.id, reason: null }, 'without regard to case');
+      assert.equal(bridgeStore.routes.get(addressed).state, 'awaiting-master');
+      assert.equal(hub.fromGateway().length, sentBefore, 'a nickname is a suggestion: it routes nothing');
+      const routed = await masterWrites(addressed, 'route', { expectedVersion: version(addressed), to: name.toLowerCase() });
+      assert.deepEqual([routed.status, routed.body.route.destination.projectId], [200, target.project.id], 'and the Master may route by the nickname');
+
+      // The Master tells the operator in the same conversation: an answer on the instructing message.
+      const told = await masterWrites(asked, 'answer', { expectedVersion: version(asked), text: `Stored: @${name.toLowerCase()} is ${target.project.name}.` });
+      assert.equal(told.status, 200, JSON.stringify(told.body));
+      assert.deepEqual(about(await claimAll(), asked).filter((i) => i.kind === 'reply').map((i) => i.text), [`Stored: @${name.toLowerCase()} is ${target.project.name}.`]);
+
+      // Listed and explained.
+      const listed = (await call('GET', '/api/bridge/master/nicknames', { headers: asMaster() })).body.nicknames.find((n) => n.nickname === name.toLowerCase());
+      assert.deepEqual([listed.display, listed.destination, listed.reachable, listed.live, listed.changedBy, listed.confirmedRouteId],
+        [name, { kind: 'project', projectId: target.project.id, name: target.project.name }, true, 'live', 'master', asked]);
+      const one = await call('GET', `/api/bridge/master/nicknames/${name.toLowerCase()}`, { headers: asMaster() });
+      assert.deepEqual([one.status, one.body.nickname.nickname], [200, name.toLowerCase()]);
+      assert.equal((await call('GET', '/api/bridge/master/nicknames/no-such-nickname', { headers: asMaster() })).status, 404);
+    });
+
+    it('one operator message authorises one change, and a repeat of the same request changes nothing', async () => {
+      const target = liveProject(`Once${++seq}`);
+      const asked = await instruction(`@master remember @once${seq} means ${target.project.name}`);
+      const body = { requestId: `req-nick-once-${seq}-0000`, name: `once${seq}`, to: target.project.id, answeredBy: asked };
+      const first = await call('POST', '/api/bridge/master/nicknames', { headers: asMaster(), body });
+      assert.deepEqual([first.status, first.body.replayed], [200, false]);
+      const again = await call('POST', '/api/bridge/master/nicknames', { headers: asMaster(), body });
+      assert.deepEqual([again.status, again.body.replayed, again.body.nickname], [200, true, `once${seq}`], 'the same request, answered as it was the first time');
+      const before = names();
+      for (const [apiPath, more] of [['', { name: `twice${seq}`, to: target.project.id }], [`/once${seq}/rename`, { to: `renamed${seq}` }], [`/once${seq}/forget`, {}]]) {
+        const res = await nick(apiPath, { ...more, answeredBy: asked });
+        assert.deepEqual([res.status, res.body.code], [409, 'INSTRUCTION_USED'], apiPath || 'set');
+      }
+      assert.equal(names(), before, 'nothing more was stored, renamed or forgotten on that one message');
+      assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE route_id = ? AND op LIKE 'nickname-%' AND outcome = 'applied'").get(asked).n, 1);
+    });
+
+    it('only a message the operator sent to the Master, or their reply to its question, authorises anything', async () => {
+      const target = liveProject(`Auth${++seq}`);
+      const before = names();
+      const refused = async (answeredBy, status, code, why) => {
+        const res = await nick('', { name: `auth${++seq}`, to: target.project.id, answeredBy });
+        assert.deepEqual([res.status, res.body.code], [status, code], why);
+        assert.equal(names(), before, `${why}: nothing was stored`);
+      };
+      // Still waiting for the Master: no routing decision has made it the Master's message.
+      const waiting = (await operatorWrites(`m${++seq}`, '@master remember @x means y')).body.routeId;
+      await refused(waiting, 409, 'NOT_AN_INSTRUCTION', 'a message the Master has not taken');
+      // Routed to a project: it was not for the Master.
+      const elsewhere = (await operatorSays(`m${++seq}`, `@${target.project.name} remember @x means y`)).body.routeId;
+      await refused(elsewhere, 409, 'NOT_AN_INSTRUCTION', 'a message that went to a project');
+      // Closed.
+      const closed = await instruction('@master remember @x means y');
+      assert.equal((await masterWrites(closed, 'close', { expectedVersion: version(closed) })).status, 200);
+      await refused(closed, 409, 'NOT_AN_INSTRUCTION', 'a closed message');
+      await refused('rt_no_such_route', 409, 'NOT_AN_INSTRUCTION', 'no such message');
+      for (const bad of [undefined, '', 'has spaces', 7]) await refused(bad, 400, 'BAD_ANSWERED_BY', JSON.stringify(bad));
+      // A reply to a launch question is an answer about launching, and nothing else.
+      const stopped = store.projects.create({ name: `AuthStopped${++seq}`, path: path.join(tmpDir, `auth-stopped-${seq}`) });
+      const held = (await operatorWrites(`m${++seq}`, `@${stopped.name} run it`)).body.routeId;
+      assert.equal((await masterWrites(held, 'ask-launch', { expectedVersion: version(held), project: stopped.id })).status, 200);
+      const question = about(await claimAll(), held).find((i) => i.kind === 'question');
+      assert.equal((await ackItem(question, `dn${++seq}`)).status, 200);
+      const yes = await operatorReplies(`dn${seq}`, 'yes, and call it @x');
+      await refused(yes, 409, 'QUESTION_PURPOSE', 'a reply to a launch question');
+      // No write without a request id, and none by anyone but the Master.
+      const bare = await call('POST', '/api/bridge/master/nicknames', { headers: asMaster(), body: { name: 'x', to: target.project.id, answeredBy: closed } });
+      assert.deepEqual([bare.status, bare.body.code], [400, 'REQUEST_ID_REQUIRED']);
+      for (const headers of [asHelper(), {}]) {
+        const res = await call('POST', '/api/bridge/master/nicknames', { headers, body: { requestId: 'req-nick-stranger-0000', name: 'x', to: target.project.id, answeredBy: closed } });
+        assert.ok([401, 403].includes(res.status));
+      }
+      assert.equal(names(), before);
+    });
+
+    it('when the message does not say exactly one thing, the Master asks, and the operator\'s reply is what authorises it', async () => {
+      const one = liveProject(`Alpha_One_${++seq}`);
+      liveProject(`Alpha_Two_${++seq}`);
+      const al = `al${seq}`;
+      // "@master remember @al means Alpha": which Alpha? The Master asks before it has taken the message.
+      const asked = (await operatorWrites(`m${++seq}`, `@master remember @${al} means Alpha`)).body.routeId;
+      assert.equal((await masterWrites(asked, 'ask', { expectedVersion: version(asked), text: `Which did you mean: ${one.project.name}, or the other?` })).status, 200);
+      const question = about(await claimAll(), asked).find((i) => i.kind === 'question');
+      assert.equal((await ackItem(question, `dn${++seq}`)).status, 200);
+      const reply = await operatorReplies(`dn${seq}`, 'the first');
+      const stored = await nick('', { name: al, to: one.project.id, answeredBy: reply });
+      assert.deepEqual([stored.status, stored.body.via, typeof stored.body.questionId], [200, 'reply', 'string'], JSON.stringify(stored.body));
+      assert.equal(bridgeStore.aliases.record(al).confirmedRouteId, reply, 'the reply is the message on record behind it');
+      const q = db().prepare('SELECT state, adopted_route_id, adopted_for FROM bridge_questions WHERE question_id = ?').get(stored.body.questionId);
+      assert.deepEqual({ ...q }, { state: 'adopted', adopted_route_id: reply, adopted_for: 'nickname' });
+      assert.equal(bridgeStore.routes.get(reply).state, 'closed', 'and its route is closed with the write');
+      // The reply is used: it authorises nothing more, and routes nothing.
+      const twice = await nick('', { name: `${al}-again`, to: one.project.id, answeredBy: reply });
+      assert.deepEqual([twice.status, twice.body.code], [409, 'QUESTION_SETTLED']);
+      const asRoute = await masterWrites(asked, 'route', { expectedVersion: version(asked), to: one.project.id, answeredBy: reply });
+      assert.deepEqual([asRoute.status, asRoute.body.code], [409, 'QUESTION_SETTLED']);
+      // The original instruction is still the operator's message to the Master: taken, and answered in the same conversation.
+      assert.equal(bridgeStore.routes.get(asked).state, 'awaiting-master');
+      assert.equal((await masterWrites(asked, 'route', { expectedVersion: version(asked), to: 'master' })).status, 200);
+      assert.equal((await masterWrites(asked, 'answer', { expectedVersion: version(asked), text: `Stored: @${al} is ${one.project.name}.` })).status, 200);
+    });
+
+    it('a nickname never makes a name mean two things, and a refused change uses nothing up', async () => {
+      const target = liveProject(`Clash_Target_${++seq}`);
+      const other = liveProject(`Clash_Other_${++seq}`);
+      const [taken, fine, boss] = [`taken${seq}`, `fine${seq}`, `boss${seq}`];
+      const asked = await instruction('@master remember some names');
+      bridgeStore.aliases.set(taken, { kind: 'project', projectId: other.project.id });
+      const before = names();
+      const CASES = [
+        ['master', 'NICKNAME_RESERVED'], ['@MASTER', 'NICKNAME_RESERVED'],
+        [taken, 'NICKNAME_EXISTS'],
+        [other.project.name, 'NICKNAME_COLLIDES'], [other.project.name.toUpperCase(), 'NICKNAME_COLLIDES'],
+        [bridgeReach.slugOf(other.project.name), 'NICKNAME_COLLIDES'], [String(other.project.id), 'NICKNAME_COLLIDES']
+      ];
+      for (const [name, code] of CASES) {
+        const res = await nick('', { name, to: target.project.id, answeredBy: asked });
+        assert.deepEqual([res.status, res.body.code], [409, code], name);
+      }
+      for (const name of [undefined, '', '@', 'has space', '-leading', 'a/b', 'x'.repeat(65), 42]) {
+        const res = await nick('', { name, to: target.project.id, answeredBy: asked });
+        assert.deepEqual([res.status, res.body.code], [400, 'BAD_NICKNAME'], JSON.stringify(name));
+      }
+      for (const [to, status, code] of [['No Such Project', 400, 'UNKNOWN_DESTINATION'], [undefined, 400, 'UNKNOWN_DESTINATION']]) {
+        const res = await nick('', { name: fine, to, answeredBy: asked });
+        assert.deepEqual([res.status, res.body.code], [status, code], JSON.stringify(to));
+      }
+      assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
+      const out = await nick('', { name: fine, to: target.project.id, answeredBy: asked });
+      assert.deepEqual([out.status, out.body.code], [409, 'DESTINATION_OPTED_OUT'], 'a nickname is not given to a project out of reach');
+      assert.equal((await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } })).status, 200);
+      assert.equal(names(), before, 'none of that stored anything');
+      // And none of it used the operator's message up: the corrected change still goes through on it.
+      const good = await nick('', { name: fine, to: target.project.id, answeredBy: asked });
+      assert.deepEqual([good.status, good.body.nickname], [200, fine], JSON.stringify(good.body));
+      // A nickname may point at the Master itself.
+      const forMaster = await instruction('@master call yourself @boss');
+      assert.equal((await nick('', { name: boss, to: 'master', answeredBy: forMaster })).status, 200);
+      assert.deepEqual(suggestion((await operatorWrites(`m${++seq}`, `@${boss} hello`)).body.routeId), { by: 'alias', to: 'master', projectId: null, reason: null });
+    });
+
+    it('rename and forget, each on the operator\'s say-so; a nickname whose project is gone names nothing and says why', async () => {
+      const target = liveProject(`Life${++seq}`);
+      const [first, second] = [`first${seq}`, `second${seq}`];
+      const set = await instruction('@master remember @first means it');
+      assert.equal((await nick('', { name: first, to: target.project.id, answeredBy: set })).status, 200);
+      const created = bridgeStore.aliases.record(first);
+
+      const rename = await instruction(`@master rename @${first} to @${second}`);
+      const missing = await nick(`/nope-${first}/rename`, { to: second, answeredBy: rename });
+      assert.deepEqual([missing.status, missing.body.code], [404, 'NICKNAME_NOT_FOUND']);
+      const clash = await nick(`/${first}/rename`, { to: target.project.name, answeredBy: rename });
+      assert.deepEqual([clash.status, clash.body.code], [409, 'NICKNAME_COLLIDES']);
+      const renamed = await nick(`/${first}/rename`, { to: `@${second.charAt(0).toUpperCase()}${second.slice(1)}`, answeredBy: rename });
+      assert.deepEqual([renamed.status, renamed.body.nickname, renamed.body.was], [200, second, first], JSON.stringify(renamed.body));
+      assert.equal(bridgeStore.aliases.record(first), null);
+      const after = bridgeStore.aliases.record(second);
+      assert.deepEqual([after.destination, after.display, after.confirmedRouteId, after.createdAt, after.createdBy],
+        [created.destination, `${second.charAt(0).toUpperCase()}${second.slice(1)}`, rename, created.createdAt, 'master'], 'what it points at, and who first made it, are unchanged');
+      // To its own name in another case is a rename of how it is shown, not a clash with itself.
+      const recase = await instruction(`@master show it as @${second.toUpperCase()}`);
+      assert.equal((await nick(`/${second}/rename`, { to: second.toUpperCase(), answeredBy: recase })).status, 200);
+      assert.equal(bridgeStore.aliases.record(second).display, second.toUpperCase());
+
+      // The project goes out of reach: the nickname stays on record, names nothing, and is explained as that.
+      store.projects.archive(target.project.id);
+      const stale = (await call('GET', `/api/bridge/master/nicknames/${second}`, { headers: asMaster() })).body.nickname;
+      assert.deepEqual([stale.reachable, stale.outOfReach, stale.live], [false, 'archived', null]);
+      assert.equal(suggestion((await operatorWrites(`m${++seq}`, `@${second} hello?`)).body.routeId).reason, 'address-out-of-reach');
+      const shown = await tc(['bridge', 'nickname', second]);
+      assert.match(shown.stdout, /OUT OF REACH \(archived\): it names nothing until that changes/);
+
+      const forget = await instruction(`@master forget @${second}`);
+      const forgotten = await nick(`/${second}/forget`, { answeredBy: forget });
+      assert.deepEqual([forgotten.status, forgotten.body.was], [200, second]);
+      assert.equal(bridgeStore.aliases.record(second), null);
+      const again = await instruction('@master forget it again');
+      const gone = await nick(`/${second}/forget`, { answeredBy: again });
+      assert.deepEqual([gone.status, gone.body.code], [404, 'NICKNAME_NOT_FOUND']);
+      assert.deepEqual(db().prepare("SELECT op FROM bridge_audit WHERE op LIKE 'nickname-%' AND outcome = 'applied' AND route_id IN (?, ?, ?, ?) ORDER BY audit_seq").all(set, rename, recase, forget).map((r) => r.op),
+        ['nickname-set', 'nickname-rename', 'nickname-rename', 'nickname-forget'], 'each change is on the audit, against the message that asked for it');
+    });
+
+    it('the same over the command line, and the operator can see and put right what was stored', async () => {
+      const target = liveProject(`Cli_Nick_${++seq}`);
+      const name = `cli${seq}`;
+      const asked = await instruction(`@master remember @${name} means ${target.project.name}`);
+      const bare = await tc(['bridge', 'nickname', 'set', name, '--to', String(target.project.id)]);
+      assert.deepEqual([bare.code, /needs --answered-by <route-id>: the operator's message that asked for it/.test(bare.stderr)], [1, true]);
+      const noTo = await tc(['bridge', 'nickname', 'set', name, '--answered-by', asked]);
+      assert.deepEqual([noTo.code, /needs --to <master\|project>/.test(noTo.stderr)], [1, true]);
+      const stored = await tc(['bridge', 'nickname', 'set', `@${name.toUpperCase()}`, '--to', bridgeReach.slugOf(target.project.name), '--answered-by', asked]);
+      assert.equal(stored.code, 0, stored.stderr);
+      assert.equal(stored.stdout, `Stored: @${name} now means project #${target.project.id}. Tell the operator in the same conversation with tc bridge answer.\n`);
+      const listed = await tc(['bridge', 'nicknames']);
+      assert.ok(listed.stdout.includes(`  @${name.toUpperCase()} means project #${target.project.id} ${target.project.name}, running\n      set by you (an earlier or the present Master), on the operator's message ${asked}, `), listed.stdout);
+      assert.match(listed.stdout, /A nickname is only ever a suggestion: nothing is sent until you route it\.\n$/);
+      const refused = await tc(['bridge', 'nickname', 'forget', name, '--answered-by', asked]);
+      assert.deepEqual([refused.code, /refused \[INSTRUCTION_USED\]/.test(refused.stderr)], [2, true]);
+      const renameMsg = await instruction(`@master rename @${name} to @${name}b`);
+      const renamed = await tc(['bridge', 'nickname', 'rename', name, `${name}b`, '--answered-by', renameMsg]);
+      assert.equal(renamed.stdout, `Renamed: @${name} is now @${name}b. Tell the operator in the same conversation with tc bridge answer.\n`);
+      const extra = await tc(['bridge', 'nickname', 'rename', name, `${name}c`, '--to', 'master', '--answered-by', renameMsg]);
+      assert.deepEqual([extra.code, /takes no --to/.test(extra.stderr)], [1, true]);
+      const odd = await tc(['bridge', 'nickname', 'has/slash']);
+      assert.deepEqual([odd.code, /is not shaped like a nickname/.test(odd.stderr)], [1, true], 'a name is never put in a path as typed');
+
+      // The operator sees who stored it, when and on which message, and can remove it: the dashboard is for looking and putting right.
+      const status = (await asOperator('GET', '/api/bridge/operator/status')).body;
+      const seen = status.nicknames.find((n) => n.nickname === `${name}b`);
+      assert.deepEqual([seen.changedBy, seen.confirmedRouteId, seen.destination.name, seen.reachable], ['master', renameMsg, target.project.name, true]);
+      // The operator's own nickname is recorded as theirs, and re-pointing one that exists is theirs to do.
+      const op = `op${seq}`;
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `Op${seq}`, to: target.project.id } })).status, 200);
+      const mine = bridgeStore.aliases.record(op);
+      assert.deepEqual([mine.createdBy, mine.changedBy, mine.confirmedRouteId, mine.display], ['operator', 'operator', null, `O${op.slice(1)}`]);
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: op, to: 'master' } })).status, 200);
+      assert.deepEqual(bridgeStore.aliases.record(op).destination, { kind: 'master', projectId: null });
+      assert.equal((await asOperator('DELETE', '/api/bridge/operator/aliases/:alias', { params: { alias: `${name}b` } })).status, 200);
+      assert.equal(bridgeStore.aliases.record(`${name}b`), null);
+      const forgetMsg = await instruction('@master forget it');
+      const forgot = await tc(['bridge', 'nickname', 'forget', op, '--answered-by', forgetMsg]);
+      assert.equal(forgot.stdout, `Forgotten: @${op} no longer means anything. Tell the operator in the same conversation with tc bridge answer.\n`);
     });
   });
 
