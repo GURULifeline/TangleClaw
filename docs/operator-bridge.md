@@ -156,11 +156,13 @@ with `tc bridge answer`. When it does not, the Master asks first, as set out bel
 **Every change rests on one operator message,** named by `--answered-by`, and the check is
 mechanical:
 
-- **The instruction itself:** an inbound the Master has routed to itself, still open, that has
-  authorised no nickname change before. This is enough when the message says exactly one
+- **The instruction itself:** an inbound the operator wrote to `@master`, by that name, which
+  the Master has routed to itself, still open, and which has authorised no nickname change
+  before. This is enough when the message says exactly one
   thing: the target is one reachable project and the name is free.
-- **A reply to a clarifying question:** when the message does not say exactly one thing, the
-  Master asks with `tc bridge ask` and names the operator's reply. Adopting it settles the
+- **A reply to a clarifying question:** when such a message does not say exactly one thing,
+  the Master asks with `tc bridge ask` and names the operator's reply. The question must be
+  about a message the operator wrote to `@master`. Adopting it settles the
   question and closes the reply's route with the write, by the same correlation as any answer.
 
 The order matters, because a question can only be asked about a message that still waits for
@@ -168,9 +170,12 @@ the Master. A message that says one thing is routed to the Master and then acted
 that does not is asked about first; the change is made on the reply, and only then is the
 first message routed to the Master and answered.
 
-A reply to a clarifying question authorises a change whatever the first message was addressed
-to: what counts is that the Master asked the question about a message still waiting for it and
-the operator answered it, not where that message would have gone.
+**Only a message written to `@master` carries this authority** (Architect ruling, 2026-10-05).
+What the operator addressed is recorded when the message arrives and is never rewritten. A
+message written to a project, to a nickname (one that means the Master included) or to nobody
+authorises no nickname change, and none through a reply to a question asked about it, even
+when the Master routes it to itself. The reply to such a question still does everything else a
+reply may do. The Master tells the operator to ask `@master`.
 
 One message authorises one change, whichever way it was used: an instruction whose clarifying
 reply authorised a change authorises no second one of its own. Whether its words ask for that change is the Master's
@@ -179,7 +184,7 @@ its text.
 
 | Refused | Answer |
 |---|---|
-| The message is not one the Master has routed to itself, is closed, or does not exist | `409 NOT_AN_INSTRUCTION` |
+| The message was not written to `@master`, or is a reply to a question about one that was not; or it is not one the Master has routed to itself, is closed, or does not exist | `409 NOT_AN_INSTRUCTION` |
 | The message has already authorised a nickname change | `409 INSTRUCTION_USED` |
 | A reply that is not the answer to an open clarifying question | `409 NOT_AN_ANSWER`, `QUESTION_SETTLED`, `QUESTION_EXPIRED`, `QUESTION_PURPOSE` |
 | The name is `master`, or `set`, `rename` or `forget`, which `tc bridge nickname` reads as what to do | `409 NICKNAME_RESERVED` |

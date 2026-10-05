@@ -2543,9 +2543,30 @@ describe('bridge API: the round trip (#2031)', () => {
       await refused(closed, 409, 'NOT_AN_INSTRUCTION', 'a closed message');
       await refused('rt_no_such_route', 409, 'NOT_AN_INSTRUCTION', 'no such message');
       for (const bad of [undefined, '', 'has spaces', 7]) await refused(bad, 400, 'BAD_ANSWERED_BY', JSON.stringify(bad));
+      // Taken by the Master, but never written to @master: to nobody, or to a nickname that means the Master.
+      const unaddressed = (await operatorWrites(`m${++seq}`, 'remember @x means y')).body.routeId;
+      assert.notEqual(suggestion(unaddressed).by, 'alias', 'it carries no address');
+      assert.equal((await masterWrites(unaddressed, 'route', { expectedVersion: version(unaddressed), to: 'master' })).status, 200);
+      await refused(unaddressed, 409, 'NOT_AN_INSTRUCTION', 'a message addressed to nobody');
+      const boss = `boss${++seq}`;
+      bridgeStore.aliases.set(boss, { kind: 'master', projectId: null });
+      const viaNickname = (await operatorWrites(`m${++seq}`, `@${boss} remember @x means y`)).body.routeId;
+      assert.deepEqual([suggestion(viaNickname).by, suggestion(viaNickname).to], ['alias', 'master']);
+      assert.equal((await masterWrites(viaNickname, 'route', { expectedVersion: version(viaNickname), to: 'master' })).status, 200);
+      const namesWithBoss = names();
+      const viaBoss = await nick('', { name: `auth${++seq}`, to: target.project.id, answeredBy: viaNickname });
+      assert.deepEqual([viaBoss.status, viaBoss.body.code], [409, 'NOT_AN_INSTRUCTION'], 'a nickname that means the Master is not @master');
+      assert.equal(names(), namesWithBoss);
+      bridgeStore.aliases.remove(boss);
+      // Written to @master in any case of letters is written to @master.
+      const shouted = await instruction(`@MASTER remember @x means ${target.project.name}`);
+      const keptName = `auth${++seq}`;
+      const kept = await nick('', { name: keptName, to: target.project.id, answeredBy: shouted });
+      assert.equal(kept.status, 200, JSON.stringify(kept.body));
+      assert.equal((await nick(`/${keptName}/forget`, { answeredBy: await instruction(`@master forget @${keptName}`) })).status, 200);
       // A reply to a launch question is an answer about launching, and nothing else.
       const stopped = store.projects.create({ name: `AuthStopped${++seq}`, path: path.join(tmpDir, `auth-stopped-${seq}`) });
-      const held = (await operatorWrites(`m${++seq}`, `@${stopped.name} run it`)).body.routeId;
+      const held = (await operatorWrites(`m${++seq}`, `@master run ${stopped.name}`)).body.routeId;
       assert.equal((await masterWrites(held, 'ask-launch', { expectedVersion: version(held), project: stopped.id })).status, 200);
       const question = about(await claimAll(), held).find((i) => i.kind === 'question');
       assert.equal((await ackItem(question, `dn${++seq}`)).status, 200);
@@ -2559,6 +2580,50 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.ok([401, 403].includes(res.status));
       }
       assert.equal(names(), before);
+    });
+
+    it('a message written to a project gains no authority over nicknames by being asked about (Architect ruling)', async () => {
+      const target = liveProject(`Borrow${++seq}`);
+      const before = names();
+      /** The Master asks a clarifying question about a held message, and the operator replies to it. */
+      const askedAndAnswered = async (routeId, answer) => {
+        assert.equal((await masterWrites(routeId, 'ask', { expectedVersion: version(routeId), text: 'Which did you mean?' })).status, 200);
+        const question = about(await claimAll(), routeId).filter((i) => i.kind === 'question').pop();
+        assert.equal((await ackItem(question, `dn${++seq}`)).status, 200);
+        return operatorReplies(`dn${seq}`, answer);
+      };
+      // Written to a project. The Master asks about it; the reply is a real, correlated answer to a real question.
+      const toProject = (await operatorWrites(`m${++seq}`, `@${target.project.name} carry on, and call yourself @bo`)).body.routeId;
+      assert.deepEqual([suggestion(toProject).by, suggestion(toProject).to], ['alias', 'project']);
+      const reply = await askedAndAnswered(toProject, 'yes, @bo');
+      for (const [apiPath, body] of [['', { name: `bo${seq}`, to: target.project.id }], ['/nosuch/rename', { to: `bo${seq}` }], ['/nosuch/forget', {}]]) {
+        const res = await nick(apiPath, { ...body, answeredBy: reply });
+        assert.deepEqual([res.status, res.body.code], [409, 'NOT_AN_INSTRUCTION'], apiPath || 'set');
+      }
+      assert.equal(names(), before, 'nothing was stored');
+      // The refusal used nothing up: the question is still open, and its reply still does what a reply may do.
+      assert.equal(db().prepare("SELECT state FROM bridge_questions WHERE route_id = ? ORDER BY rowid DESC LIMIT 1").get(toProject).state, 'open');
+      const routed = await masterWrites(toProject, 'route', { expectedVersion: version(toProject), to: target.project.id, answeredBy: reply });
+      assert.equal(routed.status, 200, JSON.stringify(routed.body));
+      // Routing that message to the Master afterwards changes nothing: it is what the operator wrote that counts.
+      const rerouted = (await operatorWrites(`m${++seq}`, `@${target.project.name} remember @bo means you`)).body.routeId;
+      assert.equal((await masterWrites(rerouted, 'route', { expectedVersion: version(rerouted), to: 'master' })).status, 200);
+      const direct = await nick('', { name: `bo${seq}`, to: target.project.id, answeredBy: rerouted });
+      assert.deepEqual([direct.status, direct.body.code], [409, 'NOT_AN_INSTRUCTION'], 'a project-addressed message the Master took for itself');
+      assert.equal(names(), before);
+      // A message written to @master is untouched by any of that, and one of them authorises one change in all:
+      // a second question about it, answered, authorises nothing more.
+      const toMaster = (await operatorWrites(`m${++seq}`, '@master remember @bo means Borrow')).body.routeId;
+      const first = await askedAndAnswered(toMaster, 'the live one');
+      const name = `bo${++seq}`;
+      const stored = await nick('', { name, to: target.project.id, answeredBy: first });
+      assert.deepEqual([stored.status, stored.body.via], [200, 'reply'], JSON.stringify(stored.body));
+      const after = names();
+      const second = await askedAndAnswered(toMaster, 'and also @bo2');
+      const again = await nick('', { name: `${name}-two`, to: target.project.id, answeredBy: second });
+      assert.deepEqual([again.status, again.body.code], [409, 'INSTRUCTION_USED'], 'one message, one change, however many questions are asked about it');
+      assert.equal(names(), after);
+      bridgeStore.aliases.remove(name);
     });
 
     it('when the message does not say exactly one thing, the Master asks, and the operator\'s reply is what authorises it', async () => {

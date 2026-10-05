@@ -227,6 +227,10 @@ no Master judgement in between. The operator has ruled that out.
   message behind it. An explicit instruction is its own confirmation only when its target is
   exact and unique, the name collides with nothing, and that message has authorised no other
   change; otherwise the Master asks, and the operator's correlated reply is what authorises it.
+  The authority is the `@master` message's and no other's (Architect ruling, 2026-10-05): the
+  instruction must be one the operator addressed to `@master` and the Master routed to itself,
+  and a reply authorises a change only when its question was about such a message. A message
+  addressed to a project acquires none by being asked about.
 
 ### 10. The interim path, and what cutover requires (D4)
 
