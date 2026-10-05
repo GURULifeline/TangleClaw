@@ -2624,6 +2624,8 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
       const out = await nick('', { name: fine, to: target.project.id, answeredBy: asked });
       assert.deepEqual([out.status, out.body.code], [409, 'DESTINATION_OPTED_OUT'], 'a nickname is not given to a project out of reach');
+      const outByName = await nick('', { name: fine, to: target.project.name, answeredBy: asked });
+      assert.deepEqual([outByName.status, outByName.body.code], [409, 'DESTINATION_OPTED_OUT'], 'however the project is named');
       // Every one of those refusals is on the audit, against the message, with the nickname it was about and none of the message's words.
       const refusals = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'nickname-set' AND route_id = ? AND outcome <> 'applied' ORDER BY audit_seq").all(asked);
       assert.deepEqual([...new Set(refusals.map((r) => r.outcome))].sort(), ['destination-opted-out', 'nickname-collides', 'nickname-exists', 'nickname-reserved', 'unknown-destination']);
