@@ -2629,10 +2629,99 @@ describe('bridge API: the round trip (#2031)', () => {
       const stored = await nick('', { name, to: target.project.id, answeredBy: first });
       assert.deepEqual([stored.status, stored.body.via], [200, 'reply'], JSON.stringify(stored.body));
       const after = names();
+      // A second question can only be asked if the message comes back to the Master, as one does after a failure.
+      const again0 = await masterWrites(toMaster, 'ask', { expectedVersion: version(toMaster), text: 'And?' });
+      assert.deepEqual([again0.status, again0.body.code], [409, 'NOT_AWAITING_MASTER'], 'taken with the change, it is no longer waiting to be asked about');
+      db().prepare("UPDATE bridge_routes SET state = 'awaiting-master', version = version + 1 WHERE route_id = ?").run(toMaster);
       const second = await askedAndAnswered(toMaster, 'and also @bo2');
       const again = await nick('', { name: `${name}-two`, to: target.project.id, answeredBy: second });
       assert.deepEqual([again.status, again.body.code], [409, 'INSTRUCTION_USED'], 'one message, one change, however many questions are asked about it');
       assert.equal(names(), after);
+      bridgeStore.aliases.remove(name);
+    });
+
+    it('a change made on a reply takes the message it was about for the Master in the same write: all of it or none (Architect ruling)', async () => {
+      const target = liveProject(`Atomic${++seq}`);
+      const name = `at${seq}`;
+      const asked = (await operatorWrites(`m${++seq}`, `@master remember @${name} means Atomic`)).body.routeId;
+      assert.equal((await masterWrites(asked, 'ask', { expectedVersion: version(asked), text: 'Which Atomic?' })).status, 200);
+      const question = about(await claimAll(), asked).find((i) => i.kind === 'question');
+      assert.equal((await ackItem(question, `dn${++seq}`)).status, 200);
+      const reply = await operatorReplies(`dn${seq}`, 'the live one');
+      const questionId = db().prepare('SELECT question_id FROM bridge_questions WHERE route_id = ?').get(asked).question_id;
+      /** Everything the write could touch, as it stands. */
+      const standing = () => JSON.stringify({
+        names: bridgeStore.aliases.records(),
+        instruction: db().prepare('SELECT state, version, destination_kind, resolved_by, resolved_generation FROM bridge_routes WHERE route_id = ?').get(asked),
+        reply: db().prepare('SELECT state, version FROM bridge_routes WHERE route_id = ?').get(reply),
+        question: db().prepare('SELECT state, adopted_route_id, adopted_for FROM bridge_questions WHERE question_id = ?').get(questionId),
+        applied: db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE route_id IN (?, ?) AND outcome = 'applied' AND op IN ('route', 'nickname-set')").get(asked, reply).n
+      });
+      const before = standing();
+      const startVersion = version(asked);
+
+      // The message cannot be routed to the Master as it stands: refused, and nothing is used.
+      db().prepare("UPDATE bridge_routes SET state = 'queued-master-unavailable' WHERE route_id = ?").run(asked);
+      const held = await nick('', { name, to: target.project.id, answeredBy: reply });
+      assert.deepEqual([held.status, held.body.code], [409, 'NOT_AWAITING_MASTER'], JSON.stringify(held.body));
+      db().prepare("UPDATE bridge_routes SET state = 'awaiting-master' WHERE route_id = ?").run(asked);
+      assert.equal(standing(), before, 'nothing moved');
+
+      // A failure part way through leaves nothing behind: not the name, not the routing, not the settled question.
+      const realSettle = bridgeStore.questions.settleOnReply;
+      bridgeStore.questions.settleOnReply = () => { throw new Error('injected: the write fails after the change and the routing'); };
+      try {
+        assert.throws(() => bridgeStore.applyNicknameWrite({
+          op: 'nickname-set', requestId: `req-inject-${++seq}-0000`, answeredBy: reply, proof: 'test', masterGeneration: 1,
+          change: () => { bridgeStore.aliases.set(name, { kind: 'project', projectId: target.project.id }, { by: 'master', confirmedRouteId: reply }); return { detail: { nickname: name } }; }
+        }), /injected/);
+      } finally { bridgeStore.questions.settleOnReply = realSettle; }
+      assert.equal(standing(), before, 'rolled back whole');
+      assert.equal(db().prepare('SELECT COUNT(*) AS n FROM bridge_audit WHERE request_id = ?').get(`req-inject-${seq}-0000`).n, 0);
+
+      // A change that is itself refused takes nothing for the Master either.
+      const taken = `taken${++seq}`;
+      bridgeStore.aliases.set(taken, { kind: 'project', projectId: target.project.id });
+      const clash = await nick('', { name: taken, to: target.project.id, answeredBy: reply });
+      assert.deepEqual([clash.status, clash.body.code], [409, 'NICKNAME_EXISTS']);
+      bridgeStore.aliases.remove(taken);
+      assert.equal(standing(), before);
+
+      // It works: one write, and every part of it is there.
+      // Anything still waiting on that message as a held one ends with it: here, a launch left queued for it.
+      const consent = (await operatorWrites(`m${++seq}`, 'yes')).body.routeId;
+      const now = new Date().toISOString();
+      db().prepare("INSERT INTO bridge_questions (question_id, route_id, purpose, target_project_id, state, asked_generation, asked_at, expires_at, adopted_route_id, adopted_for, settled_at) VALUES (?, ?, 'launch', ?, 'adopted', 1, ?, ?, ?, 'launch', ?)")
+        .run(`q_launch_${seq}`, asked, target.project.id, now, new Date(Date.now() + 3600000).toISOString(), consent, now);
+      db().prepare("INSERT INTO bridge_launches (route_id, question_id, consent_route_id, project_id, master_generation, state, requested_at) VALUES (?, ?, ?, ?, 1, 'queued', ?)")
+        .run(asked, `q_launch_${seq}`, consent, target.project.id, now);
+      const requestId = `req-atomic-${++seq}-0000`;
+      const write = () => call('POST', '/api/bridge/master/nicknames', { headers: asMaster(), body: { requestId, name, to: target.project.id, answeredBy: reply } });
+      const stored = await write();
+      assert.deepEqual([stored.status, stored.body.via, stored.body.instructionRouteId], [200, 'reply', asked], JSON.stringify(stored.body));
+      const instruction = bridgeStore.routes.get(asked);
+      assert.deepEqual([instruction.state, instruction.destination.kind, instruction.resolvedBy], ['routed', 'master', 'master'], 'no longer awaiting the Master');
+      assert.ok(instruction.version > startVersion);
+      assert.deepEqual(stored.body.instruction, { routeId: asked, state: 'routed', version: instruction.version });
+      assert.equal(bridgeStore.aliases.record(name).confirmedRouteId, reply);
+      assert.deepEqual({ ...db().prepare('SELECT state, adopted_route_id, adopted_for FROM bridge_questions WHERE question_id = ?').get(questionId) }, { state: 'adopted', adopted_route_id: reply, adopted_for: 'nickname' });
+      assert.equal(bridgeStore.routes.get(reply).state, 'closed');
+      // The Master's decision about that message is on that message's own record, by the Master, at the version it had.
+      const decided = db().prepare("SELECT actor, expected_version, master_generation, detail_json FROM bridge_audit WHERE route_id = ? AND op = 'route' AND outcome = 'applied'").all(asked);
+      assert.equal(decided.length, 1);
+      assert.deepEqual([decided[0].actor, decided[0].expected_version, typeof decided[0].master_generation], ['master', startVersion, 'number']);
+      assert.deepEqual(JSON.parse(decided[0].detail_json), { to: 'master', projectId: null, questionId, replyRouteId: reply, adoptedFor: 'nickname', with: 'nickname-set', launchesAbandoned: 1 });
+      assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_launches WHERE route_id = ? AND settled_at IS NULL").get(asked).n, 0, 'nothing is launched for a message that is no longer held');
+      // A write that was reading the old version is told it is stale.
+      const stale = await masterWrites(asked, 'route', { expectedVersion: startVersion, to: target.project.id });
+      assert.deepEqual([stale.status, stale.body.code], [409, 'VERSION_CONFLICT']);
+      // The same request again is the same answer, and does nothing twice.
+      const after = standing();
+      const replay = await write();
+      assert.deepEqual([replay.status, replay.body.replayed, replay.body.instruction], [200, true, stored.body.instruction]);
+      assert.equal(standing(), after);
+      // And the Master answers the instruction in the same conversation, with no route step of its own.
+      assert.equal((await masterWrites(asked, 'answer', { expectedVersion: version(asked), text: `Stored: @${name} is ${target.project.name}.` })).status, 200);
       bridgeStore.aliases.remove(name);
     });
 
@@ -2655,11 +2744,12 @@ describe('bridge API: the round trip (#2031)', () => {
       // The reply is used: it authorises nothing more, and routes nothing.
       const twice = await nick('', { name: `${al}-again`, to: one.project.id, answeredBy: reply });
       assert.deepEqual([twice.status, twice.body.code], [409, 'QUESTION_SETTLED']);
+      // The write itself took the instruction for the Master: there is no later route step, and it is answered in the same conversation.
+      const taken = bridgeStore.routes.get(asked);
+      assert.deepEqual([taken.state, taken.destination.kind, taken.resolvedBy], ['routed', 'master', 'master']);
+      assert.deepEqual(stored.body.instruction, { routeId: asked, state: 'routed', version: taken.version });
       const asRoute = await masterWrites(asked, 'route', { expectedVersion: version(asked), to: one.project.id, answeredBy: reply });
-      assert.deepEqual([asRoute.status, asRoute.body.code], [409, 'QUESTION_SETTLED']);
-      // The original instruction is still the operator's message to the Master: taken, and answered in the same conversation.
-      assert.equal(bridgeStore.routes.get(asked).state, 'awaiting-master');
-      assert.equal((await masterWrites(asked, 'route', { expectedVersion: version(asked), to: 'master' })).status, 200);
+      assert.deepEqual([asRoute.status, asRoute.body.code], [409, 'NOT_AWAITING_MASTER'], 'and it cannot be routed anywhere else afterwards');
       // One operator request, one change: the instruction whose question was answered is used up with the reply.
       const before = names();
       const second = await nick('', { name: `${al}-second`, to: one.project.id, answeredBy: asked });
@@ -2795,6 +2885,16 @@ describe('bridge API: the round trip (#2031)', () => {
       const stored = await tc(['bridge', 'nickname', 'set', `@${name.toUpperCase()}`, '--to', bridgeReach.slugOf(target.project.name), '--answered-by', asked]);
       assert.equal(stored.code, 0, stored.stderr);
       assert.equal(stored.stdout, `Stored: @${name} now means project #${target.project.id}. Tell the operator in the same conversation with tc bridge answer.\n`);
+      // On a reply, the command says which message is now the Master's to answer, so that it is not routed again.
+      const unclear = (await operatorWrites(`m${++seq}`, '@master remember @that means Cli')).body.routeId;
+      assert.equal((await masterWrites(unclear, 'ask', { expectedVersion: version(unclear), text: 'Which, and called what?' })).status, 200);
+      assert.equal((await ackItem(about(await claimAll(), unclear).find((i) => i.kind === 'question'), `dn${++seq}`)).status, 200);
+      const clarified = await operatorReplies(`dn${seq}`, 'this one');
+      const viaReply = await tc(['bridge', 'nickname', 'set', `${name}-r`, '--to', String(target.project.id), '--answered-by', clarified]);
+      assert.equal(viaReply.code, 0, viaReply.stderr);
+      assert.equal(viaReply.stdout, `Stored: @${name}-r now means project #${target.project.id}. Their first message, ${unclear}, is now yours (version ${version(unclear)}): do not route it, answer it. Tell the operator in the same conversation with tc bridge answer.\n`);
+      assert.equal(bridgeStore.routes.get(unclear).state, 'routed');
+      bridgeStore.aliases.remove(`${name}-r`);
       const listed = await tc(['bridge', 'nicknames']);
       assert.ok(listed.stdout.includes(`  @${name.toUpperCase()} means project #${target.project.id} ${target.project.name}, running\n      set by you (an earlier or the present Master), on the operator's message ${asked}, `), listed.stdout);
       assert.match(listed.stdout, /A nickname is only ever a suggestion: nothing is sent until you route it\.\n$/);

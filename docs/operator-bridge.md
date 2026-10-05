@@ -162,13 +162,18 @@ mechanical:
   thing: the target is one reachable project and the name is free.
 - **A reply to a clarifying question:** when such a message does not say exactly one thing,
   the Master asks with `tc bridge ask` and names the operator's reply. The question must be
-  about a message the operator wrote to `@master`. Adopting it settles the
-  question and closes the reply's route with the write, by the same correlation as any answer.
+  about a message the operator wrote to `@master`. Adopting it is one
+  write, all of it or none (Architect ruling, 2026-10-05): the change is made, the message the
+  question was about is routed to the Master as the Master's own decision about it, the
+  question is settled and the reply's route is closed. There is no later route step and nothing
+  in between for a failure to leave half done. If that message cannot be routed to the Master
+  as it stands, the write is refused `409 NOT_AWAITING_MASTER` and nothing is used.
 
 The order matters, because a question can only be asked about a message that still waits for
 the Master. A message that says one thing is routed to the Master and then acted on. A message
-that does not is asked about first; the change is made on the reply, and only then is the
-first message routed to the Master and answered.
+that does not is asked about first; the change is made on the reply, and that same write
+routes the first message to the Master, which then answers it. The answer to the write
+carries `instruction`, the first message's route with its new state and version.
 
 **Only a message written to `@master` carries this authority** (Architect ruling, 2026-10-05).
 What the operator addressed is recorded when the message arrives and is never rewritten. A
@@ -188,6 +193,7 @@ its text.
 |---|---|
 | The message was not written to `@master`, or is a reply to a question about one that was not; or it is not one the Master has routed to itself, is closed, or does not exist | `409 NOT_AN_INSTRUCTION` |
 | The message has already authorised a nickname change | `409 INSTRUCTION_USED` |
+| On a reply: the message its question was about cannot be routed to the Master as it stands | `409 NOT_AWAITING_MASTER` |
 | A reply that is not the answer to an open clarifying question | `409 NOT_AN_ANSWER`, `QUESTION_SETTLED`, `QUESTION_EXPIRED`, `QUESTION_PURPOSE` |
 | The name is `master`, or `set`, `rename` or `forget`, which `tc bridge nickname` reads as what to do | `409 NICKNAME_RESERVED` |
 | The name is already a nickname | `409 NICKNAME_EXISTS` |

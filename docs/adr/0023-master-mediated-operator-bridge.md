@@ -230,7 +230,12 @@ no Master judgement in between. The operator has ruled that out.
   The authority is the `@master` message's and no other's (Architect ruling, 2026-10-05): the
   instruction must be one the operator addressed to `@master` and the Master routed to itself,
   and a reply authorises a change only when its question was about such a message. A message
-  addressed to a project acquires none by being asked about.
+  addressed to a project acquires none by being asked about. A change made on a reply is one
+  transaction: it proves the address record, the correlation, the question's purpose and
+  standing and single use, routes the `@master` message to the Master as the Master's
+  decision, makes exactly one change, settles the question and closes the reply's route. All
+  of it or none; a message that cannot be routed to the Master as it stands is refused and
+  nothing is consumed.
 
 ### 10. The interim path, and what cutover requires (D4)
 
