@@ -1712,6 +1712,170 @@ describe('bridge API: the round trip (#2031)', () => {
       } finally { restore(); }
     });
 
+    describe('a failed launch is ended, marked on its message and reported in one write (#2112)', () => {
+      const failureRows = (routeId) => db().prepare("SELECT outbound_id, idem_key, text, digest FROM bridge_outbound WHERE route_id = ? AND kind = 'failure' ORDER BY outbound_id").all(routeId);
+      const applied = (routeId, op) => bridgeStore.audit.forRoute(routeId).filter((a) => a.op === op && (op === 'launch' ? a.outcome === 'failed' : a.outcome === 'applied'));
+      /** Everything the failure writes, as it stands. */
+      const standing = (c) => JSON.stringify({
+        route: db().prepare('SELECT state, version, failure_code FROM bridge_routes WHERE route_id = ?').get(c.routeId),
+        launch: db().prepare('SELECT state, failure_code, settled_at FROM bridge_launches WHERE route_id = ? ORDER BY launch_seq DESC LIMIT 1').get(c.routeId),
+        notices: failureRows(c.routeId).length,
+        ended: applied(c.routeId, 'launch').length,
+        marked: applied(c.routeId, 'launch-failed').length
+      });
+      /** A consented launch whose session started and is waited for. */
+      const waitedFor = async () => {
+        const c = await consented();
+        await gateway.tick();
+        assert.equal(launchOf(c.routeId).state, 'waiting-ready');
+        return c;
+      };
+      const NOTICE = 'I could not get a session ready for your message (ready-timeout). Your message is still held, and nothing was sent on.';
+      /** Each place the three old writes used to part: the store is made to fail there, once the write has got that far. */
+      const BOUNDARIES = {
+        'as the launch is ended': (real) => { bridgeStore.audit.append = (row) => { if (row.op === 'launch' && row.outcome === 'failed') throw new Error('injected: at the launch\'s end'); return real.append.call(bridgeStore.audit, row); }; },
+        'as the notice is queued': (real) => { bridgeStore.outbound.enqueue = (item) => { if (item.kind === 'failure') throw new Error('injected: at the notice'); return real.enqueue.call(bridgeStore.outbound, item); }; },
+        'as the message is marked': (real) => { bridgeStore.audit.append = (row) => { if (row.op === 'launch-failed') throw new Error('injected: at the route\'s record'); return real.append.call(bridgeStore.audit, row); }; }
+      };
+
+      it('all three land together: the launch ended, the message marked, and one fixed notice in reply to the operator\'s message', async () => {
+        try {
+          const c = await waitedFor();
+          const before = bridgeStore.routes.get(c.routeId);
+          await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick());
+          const launch = launchOf(c.routeId);
+          const route = bridgeStore.routes.get(c.routeId);
+          assert.deepEqual([launch.state, launch.failureCode], ['failed', 'ready-timeout']);
+          assert.deepEqual([route.state, route.failureCode, route.version], ['awaiting-master', 'ready-timeout', before.version + 1], 'still held, and carrying the code');
+          const rows = failureRows(c.routeId);
+          assert.deepEqual(rows.map((r) => [r.idem_key, r.text]), [[`route:${c.routeId}:launch-failed:${launch.launchSeq}`, NOTICE]]);
+          const posted = about(await claimAll(), c.routeId).filter((i) => i.kind === 'failure');
+          assert.deepEqual(posted.map((i) => [i.outboundId, i.sourceLabel, i.text, i.inReplyTo.externalId]),
+            [[rows[0].outbound_id, 'TangleClaw', NOTICE, bridgeStore.routes.get(c.routeId).externalId]]);
+          // One instant and one record of each: the launch's end, and the write that marked the message and names the notice it queued.
+          const [ended] = applied(c.routeId, 'launch');
+          const [marked] = applied(c.routeId, 'launch-failed');
+          assert.deepEqual([applied(c.routeId, 'launch').length, applied(c.routeId, 'launch-failed').length], [1, 1]);
+          assert.deepEqual(marked.detail, { launchSeq: launch.launchSeq, code: 'ready-timeout', outboundId: rows[0].outbound_id });
+          assert.deepEqual([ended.detail.launchSeq, ended.detail.code, ended.actor, marked.actor], [launch.launchSeq, 'ready-timeout', 'gateway', 'gateway']);
+          assert.equal(ended.at, marked.at, 'written together');
+          assert.equal(launch.settledAt, marked.at);
+        } finally { restore(); }
+      });
+
+      for (const [where, inject] of Object.entries(BOUNDARIES)) {
+        it(`a stop ${where} leaves none of it, and the next pass does all of it, once`, async () => {
+          const real = { append: bridgeStore.audit.append, enqueue: bridgeStore.outbound.enqueue };
+          try {
+            const c = await waitedFor();
+            const before = standing(c);
+            let hit = 0;
+            inject(real);
+            for (const [object, name] of [[bridgeStore.audit, 'append'], [bridgeStore.outbound, 'enqueue']]) {
+              const injected = object[name];
+              object[name] = (...args) => { try { return injected(...args); } catch (err) { if (/^injected/.test(err.message)) hit += 1; throw err; } };
+            }
+            try {
+              await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick().catch(() => {}));
+            } finally { bridgeStore.audit.append = real.append; bridgeStore.outbound.enqueue = real.enqueue; }
+            assert.ok(hit >= 1, 'the write got as far as the injected failure');
+            assert.equal(standing(c), before, 'none of the three landed');
+            assert.equal(launchOf(c.routeId).state, 'waiting-ready', 'so the launch is still one a pass comes back to');
+            // As after a restart: nothing remembered. The next pass finds the launch and finishes the job.
+            gateway._reset();
+            await later(gateway.READY_WAIT_MS + 10000, () => gateway.tick());
+            assert.deepEqual(JSON.parse(standing(c)).notices, 1);
+            assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode, bridgeStore.routes.get(c.routeId).failureCode], ['failed', 'ready-timeout', 'ready-timeout']);
+            assert.deepEqual([applied(c.routeId, 'launch').length, applied(c.routeId, 'launch-failed').length], [1, 1]);
+            // And nothing after that makes a second notice, before or after the helper has posted the first.
+            const after = standing(c);
+            for (let i = 0; i < 3; i++) { gateway._reset(); await later(gateway.READY_WAIT_MS + 20000 + i, () => gateway.tick()); }
+            assert.equal(standing(c), after);
+            const item = about(await claimAll(), c.routeId).find((i) => i.kind === 'failure');
+            assert.equal((await ackItem(item, `dn-launch-${++seq}`)).status, 200);
+            for (let i = 0; i < 2; i++) { gateway._reset(); await later(gateway.READY_WAIT_MS + 30000 + i, () => gateway.tick()); }
+            assert.equal(failureRows(c.routeId).length, 1);
+            assert.deepEqual(about(await claimAll(), c.routeId).filter((i) => i.kind === 'failure'), [], 'nothing waits to be posted twice');
+          } finally { bridgeStore.audit.append = real.append; bridgeStore.outbound.enqueue = real.enqueue; restore(); }
+        });
+      }
+
+      it('a launch that is already ended is not reported again by a write that names it, and one that is another message\'s is not touched', async () => {
+        try {
+          const c = await waitedFor();
+          await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick());
+          const launch = launchOf(c.routeId);
+          const after = standing(c);
+          const again = (routeId, requestId) => bridgeStore.applyRouteWrite({
+            op: 'launch-failed', requestId, routeId, expectedVersion: bridgeStore.routes.get(routeId).version, actor: 'gateway', proof: 'gateway',
+            change: () => ({
+              set: { failure_code: 'launch-error' }, detail: { launchSeq: launch.launchSeq, code: 'launch-error' },
+              failLaunch: { launchSeq: launch.launchSeq, code: 'launch-error' },
+              outbound: { idemKey: `route:${routeId}:launch-failed:${launch.launchSeq}:again`, kind: 'failure', sourceLabel: 'TangleClaw', text: 'x', digest: bridgeStore.digest('x') }
+            })
+          });
+          assert.equal(again(c.routeId, `gw:test-again:${++seq}`).outcome, 'launch-settled');
+          assert.equal(standing(c), after, 'nothing marked, nothing queued');
+          // A write on one message cannot end the launch of another.
+          const other = await waitedFor();
+          const otherBefore = standing(other);
+          const mine = standing(c);
+          const crossed = bridgeStore.applyRouteWrite({
+            op: 'launch-failed', requestId: `gw:test-cross:${++seq}`, routeId: c.routeId, expectedVersion: bridgeStore.routes.get(c.routeId).version, actor: 'gateway', proof: 'gateway',
+            change: () => ({ set: { failure_code: 'launch-error' }, detail: {}, failLaunch: { launchSeq: launchOf(other.routeId).launchSeq, code: 'launch-error' } })
+          });
+          assert.equal(crossed.outcome, 'launch-settled');
+          assert.deepEqual([standing(other), standing(c)], [otherBefore, mine]);
+        } finally { restore(); }
+      });
+
+      it('a message that is no longer held has nothing to mark and nobody to tell: its launch is still ended', async () => {
+        try {
+          const c = await waitedFor();
+          // Not a state the bridge leaves a waited-for launch in, since leaving the held state ends it; forced, to hold the branch to its word.
+          db().prepare("UPDATE bridge_routes SET state = 'routed', destination_kind = 'master', resolved_by = 'master', resolved_generation = 1 WHERE route_id = ?").run(c.routeId);
+          const version = bridgeStore.routes.get(c.routeId).version;
+          await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick());
+          assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode], ['failed', 'ready-timeout']);
+          assert.deepEqual([bridgeStore.routes.get(c.routeId).version, bridgeStore.routes.get(c.routeId).failureCode, failureRows(c.routeId).length], [version, null, 0]);
+          assert.equal(applied(c.routeId, 'launch').length, 1);
+          db().prepare("UPDATE bridge_routes SET state = 'closed', closed_at = ? WHERE route_id = ?").run(new Date().toISOString(), c.routeId);
+        } finally { restore(); }
+      });
+
+      it('the notice and its record carry a closed code and nothing of the message, the session or any credential', async () => {
+        try {
+          const SECRET = 'heron-basalt-4419';
+          const project = stopped();
+          const accepted = await operatorWrites(`m${++seq}`, `@${project.name} run it with ${SECRET}`);
+          const routeId = accepted.body.routeId;
+          assert.equal((await masterWrites(routeId, 'ask-launch', { expectedVersion: version(routeId), project: project.id })).status, 200);
+          const question = about(await claimAll(), routeId).find((i) => i.kind === 'question');
+          assert.equal((await ackItem(question, `dl${++seq}`)).status, 200);
+          const reply = await operatorReplies(`dl${seq}`, `yes, ${SECRET}`);
+          assert.equal((await masterWrites(routeId, 'launch', { expectedVersion: version(routeId), answeredBy: reply })).status, 200);
+          await gateway.tick();
+          const waited = launchOf(routeId);
+          const session = store.sessions.getActive(project.id);
+          await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick());
+          const claimed = about(await claimAll(), routeId).filter((i) => i.kind === 'failure');
+          assert.equal(claimed.length, 1);
+          const everything = JSON.stringify([
+            claimed, failureRows(routeId),
+            bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'launch' || a.op === 'launch-failed')
+          ]);
+          const helperToken = bridgeStore.helperTokens.active();
+          for (const [what, value] of [['the message', SECRET], ['the project\'s name', project.name], ['the session\'s launch id', waited.launchId],
+            ['the session\'s workspace', hub.workspaces.get(String(session.id))], ['the helper token', helperToken && helperToken.tokenId]]) {
+            assert.ok(value && !everything.includes(String(value)), `${what} is not in the notice or its record`);
+          }
+          assert.equal(claimed[0].text, NOTICE);
+          assert.equal(failureRows(routeId)[0].digest, bridgeStore.digest(NOTICE));
+          assert.match(NOTICE, /\(ready-timeout\)/, 'what it says of the cause is one of a closed list');
+        } finally { restore(); }
+      });
+    });
+
     it('READY that never comes, or comes from another session, sends nothing: the launch ends after ten minutes and the session is left running', async () => {
       try {
         assert.equal(gateway.READY_WAIT_MS, 10 * MIN, 'ten minutes, as ruled');
@@ -2019,6 +2183,7 @@ describe('bridge API: the round trip (#2031)', () => {
         const behind = await consented();
         const realBegin = bridgeStore.launches.begin;
         const realEnd = bridgeStore.launches.end;
+        const realWrite = bridgeStore.applyRouteWrite;
         let attempts = 0;
         // The store refuses to record a launch as begun.
         bridgeStore.launches.begin = () => { attempts += 1; throw new Error('database is locked'); };
@@ -2031,12 +2196,17 @@ describe('bridge API: the round trip (#2031)', () => {
           // And when not even the ending can be written, the pass stops there and the next one tries again.
           const third = await consented();
           const fourth = await consented();
+          // The ending is written by the route write that reports it (#2112), so that is what cannot be written here.
           bridgeStore.launches.end = () => { throw new Error('database is locked'); };
+          bridgeStore.applyRouteWrite = (write) => {
+            if (write.op === 'launch-failed') throw new Error('database is locked');
+            return realWrite(write);
+          };
           attempts = 0;
           const again = await Promise.race([gateway.tick().then(() => 'returned'), new Promise((resolve) => setTimeout(() => resolve('still looping'), 3000))]);
           assert.deepEqual([again, attempts], ['returned', 1], 'it does not go on to the one behind');
           assert.deepEqual([launchOf(third.routeId).state, launchOf(fourth.routeId).state], ['queued', 'queued']);
-        } finally { bridgeStore.launches.begin = realBegin; bridgeStore.launches.end = realEnd; }
+        } finally { bridgeStore.launches.begin = realBegin; bridgeStore.launches.end = realEnd; bridgeStore.applyRouteWrite = realWrite; }
       } finally { restore(); }
     });
 
