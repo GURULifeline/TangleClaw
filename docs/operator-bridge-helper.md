@@ -360,7 +360,7 @@ TangleClaw's answer is echoed.
 | `outbound-uncertain` | An item is held here and set aside at the bridge; see "Settling an `uncertain` item". |
 | `outbound-rejected`, `outbound-part-conflict` | The bridge was asked to set an item aside; see "Items set aside". |
 | `outbound-report-failed` | The bridge could not be told that an item could not be posted. It is told again on the next pass. |
-| `outbound-ack-failed` | A posted item could not be reported or acknowledged: the bridge did not answer, or the helper's lease on it is no longer live. If the item is still waiting it is handed over again and acknowledged then. |
+| `outbound-ack-failed` | A posted item could not be reported or acknowledged: the bridge did not answer, the helper's lease on it is no longer live, or the item was withdrawn or set aside at the bridge in the meantime (`409 ACK_NOT_APPLIED`). The helper does not post it again. If the item is still waiting it is handed over again and acknowledged then. |
 | `outbound-digest-mismatch`, `outbound-foreign-channel` | An item did not pass the helper's checks and was not posted. Either is a defect to report. |
 | `outbound-pass-failed` | A pass ended on a failure the helper did not expect. The line gives the failure's type and never its message. Report it, with the lines around it. |
 

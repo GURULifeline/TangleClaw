@@ -40,9 +40,10 @@ conditions.
    → Expected: `helper: not running`. In Discord the bot shows as offline within about a minute.
    An error from `bootout` because the job was never loaded is fine.
    → `tc_helper` is not a command in this terminal, or it answers naming `TC_RECEIPT`: the first
-   line has already stopped the helper. Set `TC_RECEIPT` to the cutover receipt, paste the first
-   block of [the checked-commands step](activate-the-operator-bridge.md#checked-commands) of
-   the activation runbook, and run those two again.
+   line has already stopped the helper. Enter `unalias -a` on a line of its own, set `TC_RECEIPT`
+   to the cutover receipt, paste the first block of
+   [the checked-commands step](activate-the-operator-bridge.md#checked-commands) of the
+   activation runbook, and run those two again.
    → `tc_helper` refuses for another reason ("the receipt has no to_commit line", "the checkout
    is not at the commit the receipt records"): the activation did not get far enough to record
    the build, or the checkout has moved since. The first line has already stopped the helper.

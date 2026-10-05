@@ -138,7 +138,7 @@ describe('the operator bridge runbooks (#2031)', () => {
       // The commands are defined only where no alias is set: a function keeps whatever its lines were read as.
       const defined = /^if \[ -z "\$\(alias\)" \]; then\n([\s\S]*)\nelse echo "this terminal has aliases, so no command was defined: enter unalias -a on a line of its own, then paste this again" >&2; fi$/.exec(FUNCTIONS.trim());
       assert.ok(defined, 'the five commands sit inside one test for aliases');
-      for (const doc of [ACTIVATE, RESTORE]) assert.match(flat(doc), /enter `unalias -a` on a line of its own/, 'and the step says to enter it first');
+      for (const doc of [ACTIVATE, RESTORE, ROLLBACK]) assert.match(flat(doc), /enter `unalias -a` on a line of its own/i, 'and every step that has a block pasted says to enter it first');
       for (const body of defined[1].split(/\n(?=tc_)/)) {
         assert.match(body, /^tc_[a-z]+\(\) (\(\n  set -eu\n[\s\S]*\n\)|\{ tc_checked [a-z./-]+ "\$@"; \})$/, 'each command is a subshell that stops at the first failure, or one line that calls one');
       }

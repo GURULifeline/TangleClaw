@@ -147,14 +147,17 @@ byte, but nothing merges them back.
    sha256", "is not a commit id", "is not a number", "is not a TangleClaw label", "a restore was
    already begun", "not the one the server job runs from", "no such snapshot", "does not match
    the receipt", "integrity check failed", "lsof is needed", "no store at the receipt's path",
-   "not a SQLite store", "the bridge helper's job is still loaded", or "the bridge helper's job
-   file is still installed"; or when git does not know the commit. Put right what it names and paste it again.
+   "not a SQLite store", "the bridge helper's job is still loaded", "could not prove the
+   helper's job is gone", "the bridge helper's job file is still installed", or "this terminal
+   has aliases"; or when git does not know the commit. Put right what it names and paste it again.
    → "still loaded", "could not prove the server job is gone" or "still open": the store is
    untouched; the server may be stopped. A line beginning `p` is the id of a process that has
    the file open. Stop nothing by name or pattern. Tell the Architect the ids and paths printed.
    → A last line beginning `returned:` instead: the store was still at the snapshot's schema,
    so v5.31.0 never migrated it. The block checked out the previous build and started it on
-   the store as it is. Nothing was restored or lost, and the procedure is done.
+   the store as it is. Nothing was restored or lost, and the procedure is done. If it stopped
+   on that path without a `returned:` line, the store is untouched: put right what it named
+   and paste it again.
    → "neither the snapshot's … nor one v5.31.0 leaves", or "could not read the store's schema":
    the store is untouched and the server is stopped. Start nothing: v5.31.0 would migrate the
    store when it starts. Tell the Architect the schema it printed.
