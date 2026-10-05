@@ -87,6 +87,12 @@
       "match": "^pin-https-listener \u2014 against real caddy$",
       "why": "Hands real Caddyfiles to `caddy adapt` to prove the in-place HTTP/1.1 pin (#848) is read by Caddy as the only change \u2014 including the address-less `servers` block whose settings Caddy drops once a listener gains its own block, which no fixture can show without Caddy's parser. The runner has no caddy binary. The DECISION layer of the suite runs on committed adapt fixtures with `adapt` injected, so what counts as a pin-only change is covered here; only the parts that need Caddy itself skip.",
       "runsWhere": "any developer or operator machine with caddy installed \u2014 the population the pin tool is run on."
+    },
+    {
+      "id": "runbook-blocks-typed-into-zsh",
+      "match": "^the operator bridge runbooks \\(#2031\\) > the blocks a person pastes, run as printed > each block typed into an interactive zsh: .*$",
+      "why": "Types each pasted runbook block into an interactive zsh on a terminal, with `expect`, to see what a person's paste really does: history expansion, interactive parsing and aliases do not apply under `zsh -c`. The runner is Linux and has no macOS zsh to type into.",
+      "runsWhere": "every macOS developer machine with `expect`, which ships with macOS \u2014 the platform the runbooks are written for. What holds everywhere is in the two tests beside it: every block's structure and guards run under `sh`, and every one-line command and the helper's page are read for what an interactive shell would take differently."
     }
   ]
 }
