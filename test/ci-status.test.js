@@ -231,7 +231,34 @@ describe('#991 the launch route warms the cache before the synchronous launch re
     const path = require('node:path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
     const route = src.slice(src.indexOf("route('POST', '/api/sessions/:project',"), src.indexOf('sessions.launchSession(params.project'));
-    assert.match(route, /await ciStatus\.refresh\(project\.path\)/,
+    // The warm-up lives in one module now, because the operator bridge launches sessions too (#2031) and must warm
+    // up the same way. The route awaits it ahead of the launch, and it awaits the CI probe: the same contract, in two steps.
+    assert.match(route, /await launchWarmup\.warmForLaunch\(project\)/,
       'the spawn belongs off the event loop, ahead of the sync prime generator');
+    const warmup = fs.readFileSync(path.join(__dirname, '..', 'lib', 'launch-warmup.js'), 'utf8');
+    assert.match(warmup, /await ciStatus\.refresh\(project\.path\)/, 'and the warm-up is what awaits the CI probe');
+    assert.match(warmup, /checkoutFreshness\.refreshForLaunch\(project, store\.config\.load\(\)\)/, 'with the checkout facts measured beside it (#1678)');
+  });
+
+  it('the warm-up waits for both probes and never rejects, so a failed probe is an unknown in the prime and not a failed launch', async () => {
+    const warmup = require('../lib/launch-warmup');
+    const ciStatus = require('../lib/ci-status');
+    const checkoutFreshness = require('../lib/checkout-freshness');
+    const real = { refresh: ciStatus.refresh, refreshForLaunch: checkoutFreshness.refreshForLaunch };
+    const order = [];
+    let release;
+    ciStatus.refresh = async (projectPath) => { order.push(`ci:${projectPath}`); await new Promise((resolve) => { release = resolve; }); order.push('ci done'); };
+    checkoutFreshness.refreshForLaunch = async (project) => { order.push(`checkout:${project.name}`); };
+    try {
+      const warmed = warmup.warmForLaunch({ name: 'Alpha', path: '/projects/alpha' }).then(() => order.push('warmed'));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(order.sort(), ['checkout:Alpha', 'ci:/projects/alpha'], 'both probes are started, and the warm-up has not returned');
+      release();
+      await warmed;
+      assert.deepEqual(order.slice(-2), ['ci done', 'warmed'], 'it returns only once the CI probe has');
+    } finally {
+      ciStatus.refresh = real.refresh;
+      checkoutFreshness.refreshForLaunch = real.refreshForLaunch;
+    }
   });
 });

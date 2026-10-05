@@ -1791,12 +1791,62 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.deepEqual([rerouted.status, rerouted.body.route.state], [200, 'routed'], JSON.stringify(rerouted.body));
         assert.equal(sentTo(newcomer.workspaceId).length, 1, 'a settled launch governs the one send it made, and no later one');
 
-        // A session whose launch can never attest is said to be that at once.
+        // A session whose launch can never attest is said to be that at once (its own test, below, holds the rest).
         launchBehaviour = (project) => { hub.anotherSession(project); return { session: store.sessions.getActive(project.id), error: null }; };
         const mute = await consented();
         await gateway.tick();
         await gateway.tick();
         assert.deepEqual([launchOf(mute.routeId).state, launchOf(mute.routeId).failureCode], ['failed', 'ready-not-applicable']);
+      } finally { restore(); }
+    });
+
+    it('a session that can never attest READY: failed at once, nothing sent, the session left running, and a later route is a new decision', async () => {
+      try {
+        // The launch succeeds, and its launch sequence is one with nothing to attest.
+        launchBehaviour = (project) => { hub.anotherSession(project); return { session: store.sessions.getActive(project.id), error: null }; };
+        const c = await consented();
+        const heldVersion = version(c.routeId);
+        await gateway.tick();
+        const session = store.sessions.getActive(c.project.id);
+        const workspace = hub.workspaces.get(String(session.id));
+        assert.equal(store.launchSequences.getBySession(session.id).applicability === 'applicable', false, 'precondition: this session can never say it is READY');
+        await gateway.tick();
+
+        // Settled as failed, with the closed code, on the audit.
+        const launch = launchOf(c.routeId);
+        assert.deepEqual([launch.state, launch.failureCode, launch.sessionId], ['failed', 'ready-not-applicable', session.id]);
+        assert.ok(Date.parse(launch.settledAt) - Date.parse(launch.startedAt) < gateway.READY_WAIT_MS, 'at once, not after the ten-minute wait');
+        const audit = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'launch' AND route_id = ? ORDER BY audit_seq").all(c.routeId);
+        assert.deepEqual(audit.map((r) => r.outcome), ['applied', 'waiting-ready', 'failed']);
+        assert.deepEqual([JSON.parse(audit[2].detail_json).code, JSON.parse(audit[2].detail_json).sessionId], ['ready-not-applicable', session.id]);
+        // The held original is never sent on by the launch.
+        assert.deepEqual(sentTo(workspace), [], 'the original was not dispatched');
+        // It is back with the Master, still held, with the code on it and its text intact.
+        const route = bridgeStore.routes.get(c.routeId);
+        assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', 'ready-not-applicable', null]);
+        assert.ok(route.version > heldVersion, 'its version moved, so the Master is told');
+        assert.equal(bridgeStore.routes.body(c.routeId, 'inbound').text, `@${c.project.name} please run the nightly`);
+        // The operator gets the fixed sentence, once.
+        const notices = about(await claimAll(), c.routeId).filter((i) => i.kind === 'failure').map((i) => i.text);
+        assert.deepEqual(notices, ['I could not get a session ready for your message (ready-not-applicable). Your message is still held, and nothing was sent on.']);
+        // The session that did start is left running, and nothing else is launched or retried.
+        for (let i = 0; i < 4; i++) await gateway.tick();
+        assert.equal(store.sessions.getActive(c.project.id).id, session.id, 'the started session is still the active one');
+        assert.equal(launched.length, 1, 'no retry and no second session');
+        assert.deepEqual(sentTo(workspace), [], 'and still nothing sent: no pass picks the failed launch up again');
+        assert.equal(db().prepare('SELECT COUNT(*) AS n FROM bridge_launches WHERE route_id = ?').get(c.routeId).n, 1);
+        assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE route_id = ? AND kind = 'failure' AND idem_key LIKE '%launch-failed%'").get(c.routeId).n, 1, 'told once');
+
+        // Sending it there now is the Master's own, new decision, under the ordinary rules for a live session.
+        const again = await masterWrites(c.routeId, 'ask-launch', { expectedVersion: version(c.routeId), project: c.project.id });
+        assert.deepEqual([again.status, again.body.code], [409, 'TARGET_LIVE'], 'there is nothing to launch: the project is running');
+        const routed = await masterWrites(c.routeId, 'route', { expectedVersion: version(c.routeId), to: c.project.id });
+        assert.deepEqual([routed.status, routed.body.route.state], [200, 'routed'], JSON.stringify(routed.body));
+        assert.equal(sentTo(workspace).length, 1);
+        const decision = db().prepare("SELECT actor, detail_json FROM bridge_audit WHERE op = 'route' AND route_id = ? AND outcome = 'applied' ORDER BY audit_seq DESC LIMIT 1").get(c.routeId);
+        assert.equal(decision.actor, 'master', 'on the Master\'s route write, not the gateway\'s launch-dispatch');
+        assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE op = 'launch-dispatch' AND route_id = ?").get(c.routeId).n, 0, 'the failed launch dispatched nothing, then or later');
+        assert.equal(launchOf(c.routeId).state, 'failed', 'and it is still a failed launch: the route did not continue it');
       } finally { restore(); }
     });
 
