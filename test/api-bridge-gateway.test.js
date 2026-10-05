@@ -2602,10 +2602,15 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.deepEqual([res.status, res.body.code], [409, 'NOT_AN_INSTRUCTION'], apiPath || 'set');
       }
       assert.equal(names(), before, 'nothing was stored');
-      // Only the gateway's own record of the address counts: a row of the same kind under any other writer does not.
-      bridgeStore.audit.append({ op: 'suggest', requestId: `forged-suggest-${++seq}`, actor: 'master', proof: 'test', masterGeneration: 1, routeId: toProject, outcome: 'applied', detail: { by: 'alias', to: 'master', projectId: null, reason: null, reserved: true }, at: '2000-01-01T00:00:00.000Z' });
-      const forged = await nick('', { name: `bo${seq}`, to: target.project.id, answeredBy: reply });
-      assert.deepEqual([forged.status, forged.body.code], [409, 'NOT_AN_INSTRUCTION'], 'another writer\'s row is not the gateway\'s');
+      // Only the gateway's own record of the address counts. Under a route id with no other record, so that the
+      // row in question is the only one there is to read: another writer's is not it, and the gateway's is.
+      const marked = { by: 'alias', to: 'master', projectId: null, reason: null, reserved: true };
+      const ghost = `rt_only_row_${++seq}`;
+      bridgeStore.audit.append({ op: 'suggest', requestId: `forged-suggest-${seq}`, actor: 'master', proof: 'test', masterGeneration: 1, routeId: ghost, outcome: 'applied', detail: marked });
+      assert.equal(bridgeStore.audit.addressedToMaster(ghost), false, 'another writer\'s row is not the gateway\'s');
+      bridgeStore.audit.append({ op: 'suggest', requestId: `gateway-suggest-${seq}`, actor: 'gateway', proof: 'gateway', routeId: ghost, outcome: 'applied', detail: marked });
+      assert.equal(bridgeStore.audit.addressedToMaster(ghost), true, 'the gateway\'s own is');
+      assert.equal(bridgeStore.audit.addressedToMaster(`rt_no_row_${seq}`), false, 'and no record at all is not');
       // The refusal used nothing up: the question is still open, and its reply still does what a reply may do.
       assert.equal(db().prepare("SELECT state FROM bridge_questions WHERE route_id = ? ORDER BY rowid DESC LIMIT 1").get(toProject).state, 'open');
       const routed = await masterWrites(toProject, 'route', { expectedVersion: version(toProject), to: target.project.id, answeredBy: reply });
