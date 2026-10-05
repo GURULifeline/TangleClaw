@@ -175,7 +175,9 @@ What the operator addressed is recorded when the message arrives and is never re
 message written to a project, to a nickname (one that means the Master included) or to nobody
 authorises no nickname change, and none through a reply to a question asked about it, even
 when the Master routes it to itself. The reply to such a question still does everything else a
-reply may do. The Master tells the operator to ask `@master`.
+reply may do. The Master tells the operator to ask `@master`. It is the message asked about
+that is read, so a reply that itself opens with `@master` changes nothing; and a message with
+no such record, as one accepted by an earlier build would be, authorises nothing: send it again.
 
 One message authorises one change, whichever way it was used: an instruction whose clarifying
 reply authorised a change authorises no second one of its own. Whether its words ask for that change is the Master's
