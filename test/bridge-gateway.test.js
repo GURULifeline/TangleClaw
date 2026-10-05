@@ -878,7 +878,7 @@ describe('bridge gateway (#2031)', () => {
         assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed'],
           'not routed: nothing could reply to it yet');
         assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'send-unconfirmed').detail.cause, 'outcome-unknown');
-        assert.match(store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = ?").get(`route:${routeId}:send-unconfirmed`).text, /^It is not known whether your message reached its destination\./);
+        assert.match(store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key LIKE ?").get(`route:${routeId}:send-unconfirmed:v%`).text, /^It is not known whether your message reached its destination\./);
         gateway._reset();
         later(10 * 60 * 1000);
         await gateway.tick();
@@ -929,7 +929,7 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(hub.fromGateway().length, 1, 'and not sent a second time');
       const audit = bridgeStore.audit.forRoute('rt_gone').filter((a) => a.op === 'send-unconfirmed');
       assert.deepEqual(audit.map((a) => [a.outcome, a.detail.cause]), [['applied', 'recipient-unknown']], 'once, with its cause');
-      const notices = store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = 'route:rt_gone:send-unconfirmed'").all();
+      const notices = store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key LIKE 'route:rt_gone:send-unconfirmed:v%'").all();
       assert.deepEqual(notices.map((n) => n.text), [
         'Your message was handed over, but the session it went to can no longer be identified, so its reply could not be accepted. '
         + 'It has not been sent again. The Project Master will follow up.'
@@ -1027,6 +1027,219 @@ describe('bridge gateway (#2031)', () => {
       await gateway.advance(routeId);
       assert.equal(hub.fromGateway().length, 1, 'a new attempt under a new request id');
       assert.ok(store.medusaExchanges.getByRequestId(`bridge:${routeId}:send2`));
+    });
+  });
+
+  describe('a message that was accepted and then could not be delivered is reported once (#2005)', () => {
+    const SECRET = 'zebra-quartz-7731';
+    const failures = () => waitingForHelper().filter((i) => i.kind === 'failure');
+    const failureRows = (routeId) => store.getDb().prepare("SELECT outbound_id, idem_key, text FROM bridge_outbound WHERE route_id = ? AND kind = 'failure' ORDER BY outbound_id").all(routeId);
+    /** End the Hub exchange of a route's one send in a terminal failure state. */
+    const ENDINGS = {
+      undeliverable: () => store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE hub_id = ? AND origin = 'send'").run(hub.fromGateway()[0].hubId),
+      recipient_retired: (alpha) => exchanges.markRecipientRetired(alpha.workspaceId)
+    };
+
+    for (const [ending, end] of Object.entries(ENDINGS)) {
+      it(`${ending} after the message was routed: one notice, as a reply to the operator's own message, and the route goes back to the Master`, async () => {
+        const alpha = liveProject('Alpha');
+        const routeId = (await operatorSays('m1', `@alpha the code is ${SECRET}`)).body.routeId;
+        assert.equal(bridgeStore.routes.get(routeId).state, 'routed', 'it was accepted and sent on');
+        assert.deepEqual(failures(), [], 'nothing is reported while nothing has failed');
+        end(alpha);
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        const code = `exchange-${ending.replace(/_/g, '-')}`;
+        const route = bridgeStore.routes.get(routeId);
+        assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', code, null]);
+        // Exactly one, tied to the route and so to the message it was about.
+        const rows = failureRows(routeId);
+        assert.deepEqual(rows.map((r) => r.idem_key), [`route:${routeId}:failure:${code}:v${route.version}`]);
+        const [item] = failures();
+        assert.deepEqual(item, {
+          outboundId: rows[0].outbound_id, kind: 'failure', sourceLabel: 'TangleClaw',
+          text: 'Your message did not reach its destination. It is waiting for the Project Master to route it.',
+          inReplyTo: { externalId: 'm1' }
+        });
+        // The write that handed the route back is the write that queued the notice.
+        const handedBack = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'target-failed');
+        assert.equal(handedBack.length, 1);
+        assert.deepEqual(handedBack[0].detail, { code, outboundId: rows[0].outbound_id });
+        assert.equal(handedBack[0].actor, 'gateway');
+      });
+    }
+
+    it('a send whose outcome was never learned: one notice, the route is not handed back, and nothing is sent again', async () => {
+      liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const routeId = (await operatorSays('m1', `@alpha the code is ${SECRET}`)).body.routeId;
+      hub.failSend = null;
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      const route = bridgeStore.routes.get(routeId);
+      assert.deepEqual([route.state, route.failureCode, route.destination.kind], ['accepted', 'send-unconfirmed', 'project']);
+      const rows = failureRows(routeId);
+      assert.deepEqual(rows.map((r) => r.idem_key), [`route:${routeId}:send-unconfirmed:v${route.version}`]);
+      assert.match(rows[0].text, /^It is not known whether your message reached its destination\. It has not been sent again\./);
+      assert.deepEqual(failures().map((i) => i.inReplyTo), [{ externalId: 'm1' }]);
+      const marked = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed');
+      assert.deepEqual(marked.map((a) => a.detail), [{ cause: 'outcome-unknown', outboundId: rows[0].outbound_id }]);
+      assert.equal(hub.fromGateway().length, 0);
+    });
+
+    it('the notice and the change it reports are one write: if the notice cannot be queued the route does not move, and the next pass does both', async () => {
+      const alpha = liveProject('Alpha');
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      const before = bridgeStore.routes.get(routeId);
+      ENDINGS.undeliverable();
+      const realEnqueue = bridgeStore.outbound.enqueue;
+      let refused = 0;
+      bridgeStore.outbound.enqueue = (item) => {
+        if (item.kind === 'failure') { refused += 1; throw new Error('injected: the notice could not be queued'); }
+        return realEnqueue.call(bridgeStore.outbound, item);
+      };
+      try {
+        await gateway.tick().catch(() => {});
+      } finally { bridgeStore.outbound.enqueue = realEnqueue; }
+      assert.ok(refused >= 1, 'the failure was seen and the notice was attempted');
+      const held = bridgeStore.routes.get(routeId);
+      assert.deepEqual([held.state, held.version, held.failureCode], ['routed', before.version, null], 'not handed back with nobody told');
+      assert.deepEqual(failureRows(routeId), []);
+      assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'target-failed' && a.outcome === 'applied').length, 0);
+      // As after a restart: nothing remembered, and the failure is found again from the records.
+      gateway._reset();
+      for (let i = 0; i < 3; i++) await gateway.tick();
+      assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['awaiting-master', 'exchange-undeliverable']);
+      assert.equal(failureRows(routeId).length, 1);
+      assert.ok(alpha.sessionId);
+    });
+
+    it('the same holds for a send whose outcome was never learned', async () => {
+      liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const realEnqueue = bridgeStore.outbound.enqueue;
+      bridgeStore.outbound.enqueue = (item) => {
+        if (item.kind === 'failure') throw new Error('injected: the notice could not be queued');
+        return realEnqueue.call(bridgeStore.outbound, item);
+      };
+      let routeId;
+      let refused = 0;
+      const refusing = bridgeStore.outbound.enqueue;
+      bridgeStore.outbound.enqueue = (item) => { if (item.kind === 'failure') refused += 1; return refusing(item); };
+      try {
+        const accepted = await operatorWrites('m1', '@alpha hello');
+        routeId = accepted.body.routeId;
+        await masterTakesSuggestion(routeId, { at: clock }).catch(() => {});
+        later(10 * 60 * 1000);
+        await gateway.tick().catch(() => {});
+      } finally { bridgeStore.outbound.enqueue = realEnqueue; hub.failSend = null; }
+      assert.ok(refused >= 1, 'the unlearned outcome was seen and the notice was attempted');
+      const held = bridgeStore.routes.get(routeId);
+      assert.deepEqual([held.state, held.failureCode], ['accepted', null], 'not marked with nobody told');
+      assert.deepEqual(failureRows(routeId), []);
+      gateway._reset();
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(bridgeStore.routes.get(routeId).failureCode, 'send-unconfirmed');
+      assert.equal(failureRows(routeId).length, 1);
+      assert.equal(hub.fromGateway().length, 0, 'and still never sent again');
+    });
+
+    it('no pass, restart or repeat makes a second notice, before or after the helper has posted the first', async () => {
+      const alpha = liveProject('Alpha');
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      ENDINGS.recipient_retired(alpha);
+      await gateway.tick();
+      assert.equal(failureRows(routeId).length, 1);
+      for (let i = 0; i < 3; i++) { gateway._reset(); later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(failureRows(routeId).length, 1, 'restarts and later passes add none');
+      // The helper posts it. A posted notice is not made again.
+      const claimed = helperClaims().body.items.find((i) => i.kind === 'failure');
+      assert.equal(helperAcks(claimed, 'dn-failure-1').status, 200);
+      assert.deepEqual(failures(), []);
+      for (let i = 0; i < 3; i++) { gateway._reset(); later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(failureRows(routeId).length, 1);
+      assert.deepEqual(failures(), [], 'nothing waits to be posted a second time');
+      // The same failure seen again by the same step is the same request, and is applied once.
+      assert.equal(bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'target-failed' && a.outcome === 'applied').length, 1);
+    });
+
+    it('a message that fails again after the Master routes it again is a new failure, with its own one notice', async () => {
+      const alpha = liveProject('Alpha');
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      ENDINGS.undeliverable();
+      await gateway.tick();
+      const first = bridgeStore.routes.get(routeId);
+      bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-2005', routeId, expectedVersion: first.version, actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      await gateway.advance(routeId);
+      assert.equal(bridgeStore.routes.get(routeId).state, 'routed');
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE hub_id = ? AND origin = 'send'").run(hub.fromGateway()[1].hubId);
+      for (let i = 0; i < 3; i++) await gateway.tick();
+      const keys = failureRows(routeId).map((r) => r.idem_key);
+      assert.equal(keys.length, 2);
+      assert.equal(new Set(keys).size, 2, 'one for each failure, and each only once');
+    });
+
+    it('a route whose second send also goes unlearned is told of that one too', async () => {
+      const alpha = liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      hub.failSend = null;
+      assert.equal(bridgeStore.routes.get(routeId).failureCode, 'send-unconfirmed');
+      // The first send is later proven never to have reached the Hub, so the route goes back to the Master.
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE request_id = ?").run(`bridge:${routeId}:send1`);
+      for (let i = 0; i < 2; i++) await gateway.tick();
+      const back = bridgeStore.routes.get(routeId);
+      assert.deepEqual([back.state, back.failureCode], ['awaiting-master', 'exchange-undeliverable']);
+      // The Master routes it again, and that send is not learned either.
+      bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-2005b', routeId, expectedVersion: back.version, actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      hub.failSend = 'unknown';
+      await gateway.advance(routeId);
+      hub.failSend = null;
+      for (let i = 0; i < 2; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(bridgeStore.routes.get(routeId).failureCode, 'send-unconfirmed');
+      const kinds = failureRows(routeId).map((r) => r.idem_key.replace(`route:${routeId}:`, '').replace(/:v\d+$/, ''));
+      assert.deepEqual(kinds, ['send-unconfirmed', 'failure:exchange-undeliverable', 'send-unconfirmed'], 'each of the three failures has its own notice');
+      assert.equal(new Set(failureRows(routeId).map((r) => r.idem_key)).size, 3);
+      const marks = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed' && a.outcome === 'applied');
+      assert.equal(new Set(marks.map((a) => a.detail.outboundId)).size, 2, 'and each mark names the notice it queued, not an earlier one');
+    });
+
+    it('nothing is reported for a send that has not ended', async () => {
+      liveProject('Alpha');
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      for (const state of ['stored', 'delivered', 'wake_pending', 'read', 'acknowledged']) {
+        store.getDb().prepare("UPDATE medusa_exchanges SET state = ? WHERE hub_id = ? AND origin = 'send'").run(state, hub.fromGateway()[0].hubId);
+        for (let i = 0; i < 2; i++) { gateway._reset(); await gateway.tick(); }
+        assert.deepEqual([bridgeStore.routes.get(routeId).state, failureRows(routeId).length], ['routed', 0], state);
+      }
+    });
+
+    it('a notice carries nothing of the message, the session or any credential: a fixed sentence and where to post it', async () => {
+      const alpha = liveProject('Alpha');
+      const token = gateway.mintHelperToken();
+      const routeId = (await operatorSays('m1', `@alpha the code is ${SECRET}`)).body.routeId;
+      const hubId = hub.fromGateway()[0].hubId;
+      ENDINGS.recipient_retired(alpha);
+      await gateway.tick();
+      const claimed = helperClaims().body.items.filter((i) => i.kind === 'failure');
+      assert.equal(claimed.length, 1);
+      // What the helper is handed: what to post, where, and the lease it posts it under. No field for anything else.
+      assert.deepEqual(Object.keys(claimed[0]).sort(),
+        ['attempts', 'digest', 'expiresAt', 'inReplyTo', 'issuedAt', 'kind', 'leaseId', 'leaseState', 'outboundId', 'partCount', 'postedParts', 'sourceLabel', 'text']);
+      assert.deepEqual(Object.keys(claimed[0].inReplyTo).sort(), ['channelId', 'externalId', 'threadId']);
+      assert.equal(claimed[0].inReplyTo.externalId, 'm1');
+      const row = store.getDb().prepare("SELECT * FROM bridge_outbound WHERE route_id = ? AND kind = 'failure'").get(routeId);
+      const audit = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'target-failed');
+      const everything = JSON.stringify([claimed, row, audit]);
+      for (const [what, value] of [['the message', SECRET], ['the Hub id', hubId], ['the workspace', alpha.workspaceId], ['the launch', alpha.launchId], ['the helper token', token.token || token.tokenId]]) {
+        assert.ok(value && !everything.includes(String(value)), `${what} is not in the notice or its record`);
+      }
+      assert.equal(claimed[0].text, 'Your message did not reach its destination. It is waiting for the Project Master to route it.');
+      assert.equal(row.digest, bridgeStore.digest(claimed[0].text));
     });
   });
 
