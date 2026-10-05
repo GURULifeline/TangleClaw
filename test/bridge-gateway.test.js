@@ -22,7 +22,7 @@ const gateway = require('../lib/bridge-gateway');
 const exchanges = require('../lib/medusa-exchanges');
 const watchdog = require('../lib/medusa-watchdog');
 const bridgeNotify = require('../lib/bridge-notify');
-const { install, GATEWAY_WS, MASTER_WS } = require('./_bridge-hub');
+const { install, masterTakesSuggestion, GATEWAY_WS, MASTER_WS } = require('./_bridge-hub');
 
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
 
@@ -58,8 +58,46 @@ function dropReasons() {
  * @param {object} [over] - Field overrides.
  * @returns {Promise<{status: number, body: object}>}
  */
-function operatorSays(externalId, text, over = {}) {
+function operatorWrites(externalId, text, over = {}) {
   return gateway.acceptInbound({ externalId, ...ALLOWED, text, ...over });
+}
+
+/**
+ * The operator writes, and the Project Master routes the message where the
+ * gateway suggested. Every inbound waits for that decision; most of this file
+ * is about what happens after it. What comes back is the accept's own answer,
+ * with the route's state as the decision left it.
+ * @param {string} externalId - Chat message id.
+ * @param {string} text - Message text.
+ * @param {object} [over] - Field overrides.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+async function operatorSays(externalId, text, over = {}) {
+  const accepted = await operatorWrites(externalId, text, over);
+  if (accepted.status !== 202 || !accepted.body.routeId || accepted.body.replayed) return accepted;
+  const route = await masterTakesSuggestion(accepted.body.routeId, { at: clock });
+  return { status: accepted.status, body: { ...accepted.body, state: route ? route.state : accepted.body.state } };
+}
+
+/**
+ * A route written straight into the store is handed to the Master, and the
+ * Master routes it where the gateway suggested.
+ * @param {string} routeId - Route id.
+ * @param {object} [options] - `advance: false` leaves it routed and not yet sent.
+ * @returns {Promise<object|null>} The route afterwards.
+ */
+async function handedOverAndRouted(routeId, options = {}) {
+  await gateway.advance(routeId);
+  return masterTakesSuggestion(routeId, { at: clock, ...options });
+}
+
+/**
+ * What the gateway suggested for a route when it handed it to the Master.
+ * @param {string} routeId - Route id.
+ * @returns {{by: (string|null), to: (string|null), projectId: (number|null), reason: (string|null)}|null}
+ */
+function suggested(routeId) {
+  return bridgeStore.audit.suggestionFor(routeId);
 }
 
 /**
@@ -201,14 +239,73 @@ describe('bridge gateway (#2031)', () => {
   });
 
   describe('resolving', () => {
+    it('no inbound goes anywhere until the Master routes it: an address, a reply, a pin and the default are suggestions only', async () => {
+      const alpha = liveProject('Alpha');
+      const beta = liveProject('Beta');
+      bridgeStore.aliases.set('arch', { kind: 'project', projectId: beta.project.id });
+      // An earlier, decided route for the reply to inherit from; everything after it is left undecided.
+      await operatorSays('m0', '@alpha first');
+      const sentBefore = hub.fromGateway().length;
+      bridgeStore.pins.setConversation({ pinId: 'p-thread', conversationKey: 'chan1:thread9', destination: { kind: 'project', projectId: beta.project.id }, masterGeneration: 1 });
+      const CASES = [
+        ['an exact project name', 'e1', '@alpha please', {}, { by: 'alias', to: 'project', projectId: alpha.project.id, reason: null }],
+        ['an operator nickname', 'e2', '@arch please', {}, { by: 'alias', to: 'project', projectId: beta.project.id, reason: null }],
+        ['the reserved @master', 'e3', '@master please', {}, { by: 'alias', to: 'master', projectId: null, reason: null }],
+        ['a reply to a routed message', 'e4', 'and another thing', { replyToExternalId: 'm0' }, { by: 'reply-inheritance', to: 'project', projectId: alpha.project.id, reason: null }],
+        ['a pinned conversation', 'e5', 'unaddressed, in the pinned thread', { threadId: 'thread9' }, { by: 'pin', to: 'project', projectId: beta.project.id, reason: null }],
+        ['nothing at all', 'e6', 'unaddressed', {}, { by: 'default', to: 'master', projectId: null, reason: null }],
+        ['an address that matches nothing', 'e7', '@nobody hi', {}, { by: null, to: null, projectId: null, reason: 'address-unresolved' }]
+      ];
+      const ids = [];
+      for (const [why, externalId, text, over, suggestion] of CASES) {
+        const accepted = await operatorWrites(externalId, text, over);
+        assert.equal(accepted.status, 202, why);
+        const route = bridgeStore.routes.get(accepted.body.routeId);
+        ids.push(route.routeId);
+        assert.deepEqual([route.state, route.destination, route.resolvedBy], ['awaiting-master', null, null], `${why}: waiting, with no destination`);
+        assert.deepEqual(suggested(route.routeId), suggestion, `${why}: what was found is on the record as a suggestion`);
+        assert.equal(bridgeStore.proofs.latestToTarget(route.routeId), null, `${why}: nothing was sent, so there is no proof of a send`);
+      }
+      assert.equal(hub.fromGateway().length, sentBefore, 'not one of them reached a project');
+      // Nothing applies a suggestion later: not a pass, not time, not a restart, not a pin, not the same message again.
+      for (let i = 0; i < 3; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      gateway._reset();
+      await gateway.tick();
+      bridgeStore.pins.setGlobal({ pinId: 'p-late', conversationKey: null, destination: { kind: 'project', projectId: alpha.project.id } });
+      await gateway.tick();
+      for (const [, externalId, text, over] of CASES) assert.equal((await operatorWrites(externalId, text, over)).body.replayed, true);
+      for (const id of ids) await gateway.advance(id);
+      assert.equal(hub.fromGateway().length, sentBefore, 'still nothing sent');
+      for (const id of ids) assert.deepEqual([bridgeStore.routes.get(id).state, bridgeStore.routes.get(id).destination], ['awaiting-master', null]);
+      // The suggestion on record is the one made when the route arrived, not rewritten by the later pin.
+      assert.equal(suggested(ids[5]).by, 'default');
+      // The Master's decision is what moves one, and it may differ from the suggestion.
+      const decided = bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-decide-against-0001', routeId: ids[0], expectedVersion: bridgeStore.routes.get(ids[0]).version,
+        actor: 'master', proof: 'master-launch', masterGeneration: 1, at: clock,
+        change: (current) => (current.state !== 'awaiting-master' ? { refuse: 'not-awaiting-master' }
+          : { set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: beta.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      assert.equal(decided.outcome, 'applied');
+      const routed = await gateway.advance(ids[0]);
+      assert.deepEqual([routed.state, routed.resolvedBy, routed.destination.projectId], ['routed', 'master', beta.project.id], 'sent where the Master said, not where the address pointed');
+      assert.equal(hub.fromGateway().at(-1).to, beta.workspaceId);
+      assert.equal(hub.fromGateway().length, sentBefore + 1);
+      assert.deepEqual(bridgeStore.audit.forRoute(ids[0]).filter((a) => a.outcome === 'applied').map((a) => [a.op, a.actor]), [['suggest', 'gateway'], ['route', 'master'], ['dispatch', 'gateway']]);
+    });
+
     it('sends an unaddressed message to the Master itself, with no Medusa round trip', async () => {
       const r = await operatorSays('m1', 'what is the fleet doing?');
       const route = bridgeStore.routes.get(r.body.routeId);
-      assert.deepEqual([route.state, route.resolvedBy, route.destination.kind], ['routed', 'default', 'master']);
+      assert.deepEqual([route.state, route.resolvedBy, route.destination.kind], ['routed', 'master', 'master'], 'routed by the Master\'s own decision');
+      assert.deepEqual(suggested(route.routeId), { by: 'default', to: 'master', projectId: null, reason: null }, 'the default was only what the gateway suggested');
       assert.equal(hub.fromGateway().length, 0);
-      assert.equal(hub.system.length, 1);
-      assert.equal(hub.system[0].to, MASTER_WS);
-      assert.match(hub.system[0].message, new RegExp(`tc bridge read ${route.routeId}`));
+      // The Master is told once that the route waits for its decision, and once more when the route is its own to answer.
+      assert.equal(hub.system.length, 2);
+      for (const told of hub.system) {
+        assert.equal(told.to, MASTER_WS);
+        assert.match(told.message, new RegExp(`tc bridge read ${route.routeId}`));
+      }
     });
 
     it('routes an exact @project to that project\'s live session, fenced as conversation', async () => {
@@ -216,7 +313,8 @@ describe('bridge gateway (#2031)', () => {
       const r = await operatorSays('m1', '@alpha please merge everything');
       const route = bridgeStore.routes.get(r.body.routeId);
       assert.deepEqual([route.state, route.resolvedBy, route.destination.projectId, route.destination.workspaceId],
-        ['routed', 'alias', alpha.project.id, alpha.workspaceId]);
+        ['routed', 'master', alpha.project.id, alpha.workspaceId]);
+      assert.deepEqual(suggested(route.routeId), { by: 'alias', to: 'project', projectId: alpha.project.id, reason: null });
       assert.equal(hub.fromGateway().length, 1);
       const call = hub.fromGateway()[0];
       assert.equal(call.to, alpha.workspaceId);
@@ -258,8 +356,9 @@ describe('bridge gateway (#2031)', () => {
       liveProject('Alpha');
       const mention = bridgeStore.routes.get((await operatorSays('m1', '<@12345> hello')).body.routeId);
       const middle = bridgeStore.routes.get((await operatorSays('m2', 'ask @alpha about it')).body.routeId);
-      assert.equal(mention.resolvedBy, 'default');
-      assert.equal(middle.resolvedBy, 'default');
+      assert.equal(suggested(mention.routeId).by, 'default');
+      assert.equal(suggested(middle.routeId).by, 'default');
+      assert.deepEqual([mention.destination.kind, middle.destination.kind], ['master', 'master']);
     });
 
     it('a reply inherits its route; a pin outranks the default; the operator\'s pin outranks Master\'s', async () => {
@@ -267,11 +366,11 @@ describe('bridge gateway (#2031)', () => {
       const beta = liveProject('Beta');
       await operatorSays('m1', '@alpha first');
       const reply = bridgeStore.routes.get((await operatorSays('m2', 'and another thing', { replyToExternalId: 'm1' })).body.routeId);
-      assert.deepEqual([reply.resolvedBy, reply.destination.projectId], ['reply-inheritance', alpha.project.id]);
+      assert.deepEqual([suggested(reply.routeId).by, reply.destination.projectId], ['reply-inheritance', alpha.project.id]);
 
       bridgeStore.pins.setConversation({ pinId: 'p1', conversationKey: 'chan1', destination: { kind: 'project', projectId: alpha.project.id }, masterGeneration: 1 });
       const pinned = bridgeStore.routes.get((await operatorSays('m3', 'unaddressed')).body.routeId);
-      assert.deepEqual([pinned.resolvedBy, pinned.destination.projectId], ['pin', alpha.project.id]);
+      assert.deepEqual([suggested(pinned.routeId).by, pinned.destination.projectId], ['pin', alpha.project.id]);
 
       bridgeStore.pins.setGlobal({ pinId: 'p2', conversationKey: 'chan1', destination: { kind: 'project', projectId: beta.project.id } });
       const operatorPinned = bridgeStore.routes.get((await operatorSays('m4', 'unaddressed')).body.routeId);
@@ -356,7 +455,7 @@ describe('bridge gateway (#2031)', () => {
       hub.inbox.push({ id: sent.body.id, from: alpha.workspaceId, message: 'the answer' });
       gateway.drainInbox();
       const route = bridgeStore.routes.get(r.body.routeId);
-      assert.equal(route.version, 4, 'resolve, dispatch, reply-held: no fourth write');
+      assert.equal(route.version, 5, 'suggest, route, dispatch, reply-held: no fifth write');
       assert.equal(bridgeStore.audit.forRoute(route.routeId).filter((a) => a.op === 'reply-held').length, 1);
     });
 
@@ -525,11 +624,12 @@ describe('bridge gateway (#2031)', () => {
     it('two callers advancing one route make one send and record one dispatch', async () => {
       const alpha = liveProject('Alpha');
       bridgeStore.routes.accept({ routeId: 'rt_race', externalId: 'm9', ...ALLOWED, text: '@alpha once only', digest: bridgeStore.digest('@alpha once only'), at: clock });
+      await handedOverAndRouted('rt_race', { advance: false });
       const [a, b] = await Promise.all([gateway.advance('rt_race'), gateway.advance('rt_race'), gateway.tick()]);
       assert.equal(hub.fromGateway().length, 1);
       assert.deepEqual([a.state, b.state], ['routed', 'routed']);
       const audit = bridgeStore.audit.forRoute('rt_race');
-      assert.deepEqual(audit.filter((x) => x.outcome === 'applied').map((x) => x.op), ['resolve', 'dispatch']);
+      assert.deepEqual(audit.filter((x) => x.outcome === 'applied').map((x) => x.op), ['suggest', 'route', 'dispatch']);
       assert.equal(waitingForHelper().length, 0, 'no failure notice for a send that worked');
       assert.ok(alpha.sessionId);
     });
@@ -547,7 +647,7 @@ describe('bridge gateway (#2031)', () => {
       const sentBefore = hub.fromGateway().length;
 
       bridgeStore.routes.accept({ routeId: 'rt_planted', externalId: 'm-planted', ...ALLOWED, text: '@alpha is this yours?', digest: bridgeStore.digest('@alpha is this yours?'), at: clock });
-      const route = await gateway.advance('rt_planted');
+      const route = await handedOverAndRouted('rt_planted');
 
       assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], 'back to the Master, not resting on somebody else\'s message');
       assert.equal(bridgeStore.proofs.latestToTarget('rt_planted'), null, 'no proof was taken from it');
@@ -567,6 +667,9 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(rerouted.outcome, 'applied');
       const again = await gateway.advance('rt_planted');
       assert.equal(again.state, 'routed');
+      // Back with the Master after the failure, and routed again: the route still has the one suggestion it arrived with.
+      assert.equal(bridgeStore.audit.forRoute('rt_planted').filter((a) => a.op === 'suggest').length, 1);
+      assert.deepEqual(suggested('rt_planted'), { by: 'alias', to: 'project', projectId: alpha.project.id, reason: null });
       const own = db.prepare("SELECT request_id, sender_session_id FROM medusa_exchanges WHERE hub_id = ?").get(bridgeStore.proofs.latestToTarget('rt_planted').hubId);
       assert.deepEqual([own.request_id, own.sender_session_id], ['bridge:rt_planted:send2', gateway.GATEWAY_KEY]);
     });
@@ -580,7 +683,7 @@ describe('bridge gateway (#2031)', () => {
       const accept = (routeId) => bridgeStore.routes.accept({ routeId, externalId: `m-${routeId}`, ...ALLOWED, text: '@alpha yours?', digest: bridgeStore.digest('@alpha yours?'), at: clock });
       const collided = async (routeId, why) => {
         const before = hub.fromGateway().length;
-        const route = await gateway.advance(routeId);
+        const route = await handedOverAndRouted(routeId);
         assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], why);
         assert.equal(bridgeStore.proofs.latestToTarget(routeId), null, `${why}: no proof`);
         assert.equal(hub.fromGateway().length, before, `${why}: nothing sent`);
@@ -622,7 +725,7 @@ describe('bridge gateway (#2031)', () => {
       });
       try {
         accept('rt_race2');
-        const route = await gateway.advance('rt_race2');
+        const route = await handedOverAndRouted('rt_race2');
         assert.equal(sends, 1);
         assert.deepEqual([route.state, route.failureCode], ['awaiting-master', 'request-id-collision'], 'found after the send, and still not adopted');
         assert.equal(bridgeStore.proofs.latestToTarget('rt_race2'), null);
@@ -668,7 +771,7 @@ describe('bridge gateway (#2031)', () => {
         });
         return out;
       };
-      await gateway.advance('rt_pin');
+      await handedOverAndRouted('rt_pin');
       const route = bridgeStore.routes.get('rt_pin');
       assert.equal(route.state, 'routed');
       assert.ok(bridgeStore.proofs.latestToTarget('rt_pin'), 'the proof is recorded against the route as it now is');
@@ -706,6 +809,7 @@ describe('bridge gateway (#2031)', () => {
     it('waits on a send still in flight, then marks it unconfirmed after two minutes, and never sends a second', async () => {
       const alpha = liveProject('Alpha');
       bridgeStore.routes.accept({ routeId: 'rt_flight', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      await handedOverAndRouted('rt_flight', { advance: false });
       // The Hub holds the request open: the exchange exists, pending, with no id yet.
       const medusa = require('../lib/medusa');
       const realSend = medusa.sendMessage;
@@ -799,6 +903,7 @@ describe('bridge gateway (#2031)', () => {
     it('a send that reached the Hub for a session nobody can name any more is not routed, not resent, and said so', async () => {
       const alpha = liveProject('Alpha');
       bridgeStore.routes.accept({ routeId: 'rt_gone', externalId: 'm8', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      await handedOverAndRouted('rt_gone', { advance: false });
       // The server stops after the Hub took the message and before the route recorded it.
       const realApply = bridgeStore.applyRouteWrite;
       bridgeStore.applyRouteWrite = (write) => {
@@ -836,6 +941,7 @@ describe('bridge gateway (#2031)', () => {
       const realBind = exchanges.bindHubId;
       exchanges.bindHubId = () => { throw new Error('database is locked'); };
       bridgeStore.routes.accept({ routeId: 'rt_crash', externalId: 'm9', ...ALLOWED, text: '@alpha hello', digest: bridgeStore.digest('@alpha hello'), at: clock });
+      await handedOverAndRouted('rt_crash', { advance: false });
       // The server stops between the Hub's answer and the gateway keeping it.
       const realAppend = bridgeStore.audit.append;
       bridgeStore.audit.append = (entry) => {
@@ -1002,6 +1108,9 @@ describe('bridge gateway (#2031)', () => {
       gateway._reset();
       const pass = await gateway.tick();
       assert.equal(pass.advanced, 1);
+      assert.equal(bridgeStore.routes.get('rt_restart').state, 'awaiting-master', 'handed to the Master: a restart decides nothing either');
+      assert.equal(hub.fromGateway().length, 0);
+      await masterTakesSuggestion('rt_restart', { at: clock });
       assert.equal(bridgeStore.routes.get('rt_restart').state, 'routed');
       assert.equal(hub.fromGateway().length, 1);
       await gateway.tick();
@@ -1034,12 +1143,13 @@ describe('bridge gateway (#2031)', () => {
 
       // A route handed back to the Master after a failure is a new reason.
       const routed = await operatorSays('m2', '@alpha hello');
+      assert.equal(hub.system.length, 2, 'told that the second route waited for its decision');
       // The session ends, by the path production takes.
       exchanges.markRecipientRetired(alpha.workspaceId);
       assert.equal(store.getDb().prepare("SELECT state FROM medusa_exchanges WHERE hub_id = ? AND origin = 'send'").get(hub.fromGateway()[0].hubId).state, 'recipient_retired');
       await gateway.tick();
       assert.equal(bridgeStore.routes.get(routed.body.routeId).state, 'awaiting-master');
-      assert.equal(hub.system.length, 2);
+      assert.equal(hub.system.length, 3, 'and told again when it came back after the failure');
       assert.ok(alpha.sessionId);
       assert.equal(gateway.routesMasterNotTold(), 0, 'both routes were told of the state they are in');
 
@@ -1049,26 +1159,29 @@ describe('bridge gateway (#2031)', () => {
       later(1000);
       store.getDb().prepare('UPDATE bridge_routes SET version = version + 1, updated_at = ? WHERE route_id = ?').run(clock, routed.body.routeId);
       await gateway.tick();
-      assert.equal(hub.system.length, 2);
+      assert.equal(hub.system.length, 3, 'nothing more while it is away');
       assert.ok(bridgeStore.routes.get(routed.body.routeId).masterWakeAt, 'it was told once');
       assert.equal(gateway.routesMasterNotTold(), 1, 'having been told of an earlier state does not count');
       masterState.listening = true;
       await gateway.tick();
-      assert.deepEqual([hub.system.length, gateway.routesMasterNotTold()], [3, 0]);
+      assert.deepEqual([hub.system.length, gateway.routesMasterNotTold()], [4, 0]);
     });
 
     it('keeps trying to tell a Master that was away when a reply was held', async () => {
       const alpha = liveProject('Alpha');
       const r = await operatorSays('m1', '@alpha status?');
+      const toldBefore = hub.system.length;
+      assert.equal(toldBefore, 1, 'told once, that the route waited for its decision');
       masterState.listening = false;
       await hub.sessionSends(alpha, { inReplyTo: hub.fromGateway()[0].hubId });
       gateway.drainInbox();
       await gateway.tick();
       assert.equal(bridgeStore.routes.get(r.body.routeId).state, 'reply-held');
-      assert.equal(hub.system.length, 0);
+      assert.equal(hub.system.length, toldBefore, 'not told of the held reply while it is away');
       masterState.listening = true;
       await gateway.tick();
-      assert.match(hub.system[0].message, /has a reply held for your release/);
+      assert.equal(hub.system.length, toldBefore + 1, 'told once it is back');
+      assert.match(hub.system.at(-1).message, /has a reply held for your release/);
     });
 
     it('says once per route state that the Master has no listener, not on every pass', async () => {
@@ -1082,7 +1195,7 @@ describe('bridge gateway (#2031)', () => {
       process.stderr.write = capture;
       process.stdout.write = capture;
       try {
-        await operatorSays('m1', 'for the Master');
+        await operatorWrites('m1', 'for the Master');
         for (let i = 0; i < 4; i++) await gateway.tick();
       } finally {
         process.stderr.write = realWrite;
@@ -1314,8 +1427,9 @@ describe('bridge gateway (#2031)', () => {
       } finally {
         store.projects.list = realGet;
       }
-      assert.equal(bridgeStore.routes.get('rt_a').state, 'accepted');
-      assert.equal(bridgeStore.routes.get('rt_b').state, 'routed');
+      assert.equal(bridgeStore.routes.get('rt_a').state, 'accepted', 'the one that failed is where it was, to be tried on the next pass');
+      assert.equal(bridgeStore.routes.get('rt_b').state, 'awaiting-master', 'the other was handed to the Master in the same pass');
+      assert.equal(suggested('rt_b').by, 'alias');
     });
 
     it('still runs retention while disabled, and lets go of nothing that is open', async () => {

@@ -177,6 +177,25 @@ send prose to Discord.
 `operator-needed`, `work-blocked` and `fleet-idle`. `release-action-needed` and
 `certification-state-changed` stay reserved until an authoritative producer exists for each.
 
+### 9a. The Master routes inbound as well (operator ruling, 2026-10-05)
+
+Decision 2 made the Master the sole semantic filter and router, and the first build applied
+that to what goes out: nothing is posted until the Master releases it. Inbound was routed by
+fixed rules: an `@name`, a reply, a pin or the default sent a message to a project session with
+no Master judgement in between. The operator has ruled that out.
+
+- **Every inbound waits for the Master's explicit route write.** `@name`, reply inheritance, a
+  pin and the default are suggestions shown to the Master. None of them dispatches.
+- **No exception for the Master's own messages.** A message for the Master is routed
+  `--to master` and then answered. Answering straight from `awaiting-master` stays refused.
+- **Cost, accepted:** one Master turn per message, and no inbound moves while the Master is
+  away. The route waits, the operator gets the existing "still waiting" notice, and the existing
+  notice when the Master cannot be summoned.
+- **Not chosen:** delaying activation until the helper runs as its own macOS user. The operator
+  accepts, for v5.31, that the helper's secrets are readable by any process of the same user,
+  with the Master in the loop for every inbound, the advisory fence disclosed, and a bot role
+  limited to the one allowlisted private channel. Separate-user isolation is future work.
+
 ### 10. The interim path, and what cutover requires (D4)
 
 - **Rule #145 governs only the interim path, until cutover.** Its text stays unchanged and active

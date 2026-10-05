@@ -274,6 +274,35 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     assert.match(rule, /permits no other mutating call/);
   });
 
+  it('tc bridge shows the Master what the gateway suggested for a waiting route, as advice, and says nothing is sent', async () => {
+    const { VERB_ROSTER } = require('../lib/tc-verbs');
+    const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
+    const route = (over) => ({
+      routeId: 'rt_1', state: 'awaiting-master', version: 2, destination: null, resolvedBy: null, replyContext: null,
+      createdAt: '2026-10-05T00:00:00.000Z', suggestion: null, ...over
+    });
+    const listed = async (routes) => (await bridge.run({ argv: ['routes'], getJson: async () => ({ routes }), postJson: async () => ({}) })).stdout;
+    const line = async (over) => (await listed([route(over)])).split('\n').slice(1).join('\n');
+
+    assert.match(await line({ suggestion: { by: 'alias', to: 'project', projectId: 12, reason: null } }),
+      /rt_1 {2}awaiting-master {2}v2 {2}unresolved {2}received [^\n]+\n {6}suggested: project #12 \(by alias\)\. Nothing is sent until you route it\.\n$/);
+    assert.match(await line({ suggestion: { by: 'default', to: 'master', projectId: null, reason: null } }), /suggested: master \(by default\)\. Nothing is sent until you route it\./);
+    assert.match(await line({ suggestion: { by: 'pin', to: 'project', projectId: 7, reason: null } }), /suggested: project #7 \(by pin\)\./);
+    assert.match(await line({ suggestion: { by: null, to: null, projectId: null, reason: 'address-ambiguous' } }), /suggested: nothing \(address-ambiguous\)\. Nothing is sent until you route it\./);
+    // No suggestion on record, or a route already decided: nothing is shown as a suggestion.
+    assert.ok(!/suggested:/.test(await line({ suggestion: null })));
+    assert.ok(!/suggested:/.test(await line({
+      state: 'routed', resolvedBy: 'master', destination: { kind: 'project', projectId: 12, workspaceId: 'w' }, suggestion: { by: 'alias', to: 'project', projectId: 3, reason: null }
+    })), 'once the Master has decided, its decision is what is shown, not what the gateway had found');
+    assert.match(await line({ state: 'routed', resolvedBy: 'master', destination: { kind: 'project', projectId: 12, workspaceId: 'w' } }), /routed {2}v2 {2}project #12 \(by master\)/);
+    // `read` shows it too.
+    const read = (await bridge.run({
+      argv: ['read', 'rt_1'], postJson: async () => ({}),
+      getJson: async () => ({ route: route({ suggestion: { by: 'reply-inheritance', to: 'project', projectId: 4, reason: null } }), authority: 'conversation-only', bodies: [], audit: [] })
+    })).stdout;
+    assert.match(read, /suggested: project #4 \(by reply-inheritance\)\. Nothing is sent until you route it\./);
+  });
+
   it('an id typed at tc bridge becomes a path segment only when it has an id\'s exact shape, and nothing is sent otherwise', async () => {
     const { bridgePathSegment, bridgeCredentialHeader, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
@@ -399,6 +428,10 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const md = master.buildMasterClaudeMd(store.config.load());
     for (const text of [md, custom]) {
       assert.match(text, /## Operator bridge/);
+      // Every inbound is the Master's to route; what the gateway found is advice (operator ruling, 2026-10-05).
+      assert.ok(text.includes('- **Every message waits for you to route it.** Nothing the operator writes goes anywhere until you\n  decide.'));
+      assert.ok(text.includes('The suggestion is advice, and you may\n  decide otherwise. `tc bridge route <route-id> --version <n> --to <master|project>` is the decision.'));
+      assert.ok(text.includes('A message meant for you needs `--to master` first, and only then `tc bridge answer`.'));
       // Disabled is not "nothing to do": a rollback has the Master close what is still open.
       assert.ok(text.includes('`tc bridge status` says whether it is enabled. While it is not, nothing is sent or routed;\n'
         + 'what is left is to wind it down: close routes still open (`tc bridge routes`, then\n'

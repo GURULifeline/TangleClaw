@@ -119,8 +119,28 @@ function masterWrites(routeId, op, body) {
  * @param {string} text - Message.
  * @returns {Promise<{status: number, body: object}>}
  */
-function operatorSays(externalId, text) {
+function operatorWrites(externalId, text) {
   return call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId, ...ALLOWED, text } });
+}
+
+/**
+ * The operator writes, and the Project Master routes the message where the
+ * gateway suggested, with its own route write over HTTP. Every inbound waits
+ * for that decision; most of this file is about what happens after it.
+ * @param {string} externalId - Chat message id.
+ * @param {string} text - Message.
+ * @returns {Promise<{status: number, body: object}>} The accept's answer, with the route's state as the decision left it.
+ */
+async function operatorSays(externalId, text) {
+  const accepted = await operatorWrites(externalId, text);
+  if (accepted.status !== 202 || accepted.body.replayed) return accepted;
+  const routeId = accepted.body.routeId;
+  const route = bridgeStore.routes.get(routeId);
+  const suggestion = bridgeStore.audit.suggestionFor(routeId);
+  if (!route || route.state !== 'awaiting-master' || !suggestion || !suggestion.to) return accepted;
+  const routed = await masterWrites(routeId, 'route', { expectedVersion: route.version, to: suggestion.to === 'master' ? 'master' : suggestion.projectId });
+  assert.equal(routed.status, 200, `the Master's route write: ${JSON.stringify(routed.body)}`);
+  return { status: accepted.status, body: { ...accepted.body, state: routed.body.route.state } };
 }
 
 /**
@@ -249,7 +269,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([done.state, done.closedBy], ['closed', 'gateway']);
     assert.ok(bridgeStore.routes.bodies(routeId).every((b) => b.text === null), 'every body is cleared once the chat has the answer');
     assert.deepEqual(bridgeStore.audit.forRoute(routeId).map((a) => `${a.op}:${a.actor}`),
-      ['inbound:helper', 'resolve:gateway', 'dispatch:gateway', 'reply-held:session', 'release:master', 'delivered:helper']);
+      ['inbound:helper', 'suggest:gateway', 'route:master', 'dispatch:gateway', 'reply-held:session', 'release:master', 'delivered:helper']);
     assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'release').masterGeneration, masterGeneration);
   });
 
@@ -304,7 +324,8 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.deepEqual([pin.scope, pin.destination.projectId], ['conversation', alpha.project.id]);
 
     const next = await operatorSays(`m${++seq}`, 'and this');
-    assert.deepEqual([bridgeStore.routes.get(next.body.routeId).resolvedBy, hub.fromGateway().length], ['pin', 1]);
+    assert.deepEqual([bridgeStore.audit.suggestionFor(next.body.routeId).by, bridgeStore.routes.get(next.body.routeId).resolvedBy, hub.fromGateway().length], ['pin', 'master', 1],
+      'the pin is what the gateway suggested; the Master routed it');
     assert.equal((await asOperator('DELETE', '/api/bridge/operator/pins/:pinId', { params: { pinId: pin.pinId } })).status, 200);
   });
 
@@ -693,7 +714,13 @@ describe('bridge API: the round trip (#2031)', () => {
     const reply = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: replyId, ...ALLOWED, replyToExternalId: parts[1], text: 'who needs me?' } });
     assert.equal(reply.status, 202);
     const read = await call('GET', `/api/bridge/master/routes/${reply.body.routeId}`, { headers: asMaster() });
-    assert.deepEqual([read.body.route.resolvedBy, read.body.route.destination.kind], ['outbound-correlation', 'master']);
+    assert.deepEqual([read.body.route.state, read.body.route.destination, read.body.route.suggestion],
+      ['awaiting-master', null, { by: 'outbound-correlation', to: 'master', projectId: null, reason: null }], 'the Master is shown what it answers as a suggestion, and decides');
+    // The list of waiting routes shows the same, for every route on it.
+    const waitingList = await call('GET', '/api/bridge/master/routes?states=awaiting-master', { headers: asMaster() });
+    const listedRoute = waitingList.body.routes.find((r) => r.routeId === reply.body.routeId);
+    assert.deepEqual(listedRoute.suggestion, read.body.route.suggestion);
+    assert.ok(waitingList.body.routes.every((r) => 'suggestion' in r), 'each listed route says what was suggested, or null');
     assert.deepEqual(read.body.route.replyContext, {
       repliedExternalId: parts[1], canonicalExternalId: parts[0], outboundId: id, partIndex: 1, partCount: 3,
       kind: 'notification', notifyType: 'operator-needed', routeId: null, candidateId: null, candidateKind: null

@@ -22,7 +22,7 @@ const store = require('../lib/store');
 const bridgeStore = require('../lib/bridge-store');
 const gateway = require('../lib/bridge-gateway');
 const exchanges = require('../lib/medusa-exchanges');
-const { install, MASTER_WS } = require('./_bridge-hub');
+const { install, masterTakesSuggestion, MASTER_WS } = require('./_bridge-hub');
 const { bindProject } = require('./_shared-docs-callers');
 
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
@@ -52,8 +52,33 @@ function later(ms) {
  * @param {object} [over] - Field overrides.
  * @returns {Promise<{status: number, body: object}>}
  */
-function operatorSays(externalId, text, over = {}) {
+/**
+ * How the gateway came by the destination it suggested for a route. The route itself is routed by the Master.
+ * @param {object} route - A route.
+ * @returns {string|null}
+ */
+function suggestedBy(route) {
+  return bridgeStore.audit.suggestionFor(route.routeId).by;
+}
+
+function operatorWrites(externalId, text, over = {}) {
   return gateway.acceptInbound({ externalId, ...ALLOWED, text, ...over });
+}
+
+/**
+ * The operator writes, and the Project Master routes the message where the
+ * gateway suggested. Every inbound waits for that decision; this file is
+ * about what a reply answers, which begins after it.
+ * @param {string} externalId - Chat message id.
+ * @param {string} text - Message text.
+ * @param {object} [over] - Field overrides.
+ * @returns {Promise<{status: number, body: object}>}
+ */
+async function operatorSays(externalId, text, over = {}) {
+  const accepted = await operatorWrites(externalId, text, over);
+  if (accepted.status !== 202 || !accepted.body.routeId || accepted.body.replayed) return accepted;
+  const route = await masterTakesSuggestion(accepted.body.routeId, { at: clock });
+  return { status: accepted.status, body: { ...accepted.body, state: route ? route.state : accepted.body.state } };
 }
 
 /**
@@ -259,7 +284,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
 
       for (const [index, part] of [[0, 'd100'], [1, 'd101'], [2, 'd102']]) {
         const route = await carried(await operatorSays(`m${index}`, 'good, what is next?', { replyToExternalId: part }));
-        assert.deepEqual([route.resolvedBy, route.destination.kind, route.destination.projectId], ['outbound-correlation', 'master', null], part);
+        assert.deepEqual([suggestedBy(route), route.destination.kind, route.destination.projectId], ['outbound-correlation', 'master', null], part);
         assert.deepEqual(route.replyContext, {
           repliedExternalId: part, canonicalExternalId: 'd100', outboundId: id, partIndex: index, partCount: 3,
           kind: 'candidate', notifyType: null, routeId: null, candidateId: 'c1', candidateKind: 'milestone'
@@ -277,13 +302,13 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       posted(approvedCandidate('c1'), ['d100']);
 
       const plain = await carried(await operatorSays('m1', 'hello'));
-      assert.deepEqual([plain.resolvedBy, plain.destination.kind, plain.replyContext], ['pin', 'project', null]);
+      assert.deepEqual([suggestedBy(plain), plain.destination.kind, plain.replyContext], ['pin', 'project', null]);
       const reply = await carried(await operatorSays('m2', 'hello', { replyToExternalId: 'd100' }));
-      assert.deepEqual([reply.resolvedBy, reply.destination.kind, reply.replyContext.candidateId], ['outbound-correlation', 'master', 'c1']);
+      assert.deepEqual([suggestedBy(reply), reply.destination.kind, reply.replyContext.candidateId], ['outbound-correlation', 'master', 'c1']);
 
       // An explicit address still wins, and what the message answers is still on record.
       const addressed = await carried(await operatorSays('m3', '@alpha look at this', { replyToExternalId: 'd100' }));
-      assert.deepEqual([addressed.resolvedBy, addressed.destination.projectId, addressed.replyContext.candidateId], ['alias', alpha.project.id, 'c1']);
+      assert.deepEqual([suggestedBy(addressed), addressed.destination.projectId, addressed.replyContext.candidateId], ['alias', alpha.project.id, 'c1']);
     });
 
     it('an explicit address that names nothing, or more than one thing, is not guessed at: the reply waits for the Master, still knowing what it answers', async () => {
@@ -294,7 +319,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
 
       for (const [id, text, code] of [['m1', '@nobody look at this', 'address-unresolved'], ['m2', '@beta look at this', 'address-ambiguous']]) {
         const route = await carried(await operatorSays(id, text, { replyToExternalId: 'd100' }));
-        assert.deepEqual([route.state, route.failureCode, route.resolvedBy, route.destination], ['awaiting-master', code, null, null], text);
+        assert.deepEqual([route.state, route.failureCode, suggestedBy(route), route.destination], ['awaiting-master', code, null, null], text);
         assert.equal(route.replyContext.candidateId, 'c1', 'what it answers is kept either way');
       }
       assert.deepEqual(hub.fromGateway(), [], 'nothing was sent anywhere on a guess');
@@ -306,9 +331,12 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       const accepted = await operatorSays('m1', 'thanks', { replyToExternalId: 'd100' });
       await gateway.tick();
       const told = hub.system.filter((m) => m.message.includes(accepted.body.routeId));
-      assert.equal(told.length, 1);
-      assert.match(told[0].message, /It is the operator's reply to a posted milestone\./);
-      assert.ok(!told[0].message.includes('thanks'), 'the notice carries no text of the message');
+      // Told when the route waited for its decision, and again when it was the Master's own to answer: both say what it answers.
+      assert.equal(told.length, 2);
+      for (const notice of told) {
+        assert.match(notice.message, /It is the operator's reply to a posted milestone\./);
+        assert.ok(!notice.message.includes('thanks'), 'the notice carries no text of the message');
+      }
     });
 
     it('the same holds for a notification, which has no candidate either', async () => {
@@ -332,12 +360,12 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
 
       for (const [index, part] of [[0, 'd100'], [1, 'd101'], [2, 'd102']]) {
         const route = await carried(await operatorSays(`r${index}`, 'and then?', { replyToExternalId: part }));
-        assert.deepEqual([route.resolvedBy, route.destination.kind, route.destination.projectId], ['reply-inheritance', 'project', alpha.project.id], part);
+        assert.deepEqual([suggestedBy(route), route.destination.kind, route.destination.projectId], ['reply-inheritance', 'project', alpha.project.id], part);
         assert.deepEqual([route.replyContext.routeId, route.replyContext.kind, route.replyContext.partIndex, route.replyContext.candidateId], [routeId, 'reply', index, null]);
       }
       // And a reply to the operator's own earlier message, as before.
       const own = await carried(await operatorSays('r9', 'one more thing', { replyToExternalId: 'm1' }));
-      assert.deepEqual([own.resolvedBy, own.destination.projectId, own.replyContext], ['reply-inheritance', alpha.project.id, null]);
+      assert.deepEqual([suggestedBy(own), own.destination.projectId, own.replyContext], ['reply-inheritance', alpha.project.id, null]);
     });
   });
 
@@ -345,7 +373,7 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
     it('is an unaddressed message, as before, with nothing invented about what it answers', async () => {
       posted(approvedCandidate('c1'), ['d100']);
       const route = await carried(await operatorSays('m1', 'hello', { replyToExternalId: 'd999' }));
-      assert.deepEqual([route.resolvedBy, route.destination.kind, route.replyContext], ['default', 'master', null]);
+      assert.deepEqual([suggestedBy(route), route.destination.kind, route.replyContext], ['default', 'master', null]);
       assert.equal(route.context.replyToExternalId, 'd999', 'the reference itself is kept');
       assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_route_reply_context').get().n, 0);
     });
@@ -394,11 +422,11 @@ describe('bridge: what an operator\'s reply answers (#2031)', () => {
       assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_outbound_parts').get().n, 4, 'the record of what was posted is still whole');
 
       const late = await carried(await operatorSays('m9', 'about that milestone', { replyToExternalId: 'd201' }));
-      assert.deepEqual([late.resolvedBy, late.destination.kind, late.replyContext.candidateId, late.replyContext.candidateKind, late.replyContext.partIndex],
+      assert.deepEqual([suggestedBy(late), late.destination.kind, late.replyContext.candidateId, late.replyContext.candidateKind, late.replyContext.partIndex],
         ['outbound-correlation', 'master', 'c1', 'milestone', 1]);
       // The answer's route is no longer held, so there is nowhere to inherit: the Master gets it, knowing what it answered.
       const stale = await carried(await operatorSays('m10', 'about that answer', { replyToExternalId: 'd101' }));
-      assert.deepEqual([stale.resolvedBy, stale.destination.kind, stale.replyContext.routeId, stale.replyContext.kind], ['outbound-correlation', 'master', routeId, 'reply']);
+      assert.deepEqual([suggestedBy(stale), stale.destination.kind, stale.replyContext.routeId, stale.replyContext.kind], ['outbound-correlation', 'master', routeId, 'reply']);
     });
 
     it('what a message answers leaves with the message\'s own route, and not before', async () => {

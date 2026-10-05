@@ -127,4 +127,43 @@ function install() {
   return hub;
 }
 
-module.exports = { install, GATEWAY_WS, MASTER_WS };
+let decided = 0;
+
+/**
+ * The Project Master routes a waiting route where the gateway suggested, as
+ * its own decision: the same write `tc bridge route` makes, then the gateway
+ * carries the route on. Every inbound waits for this; a suite that is not
+ * about the decision itself makes it here, so the decision is still made and
+ * still on the record.
+ *
+ * A route with no suggestion, or one not waiting for the Master, is left
+ * exactly as it is.
+ * @param {string} routeId - The route.
+ * @param {object} [options]
+ * @param {number} [options.generation=1] - The Master generation deciding.
+ * @param {string} [options.at] - Timestamp override.
+ * @param {boolean} [options.advance=true] - Whether the gateway then carries the route on; false leaves it routed and not yet sent.
+ * @returns {Promise<object|null>} The route afterwards.
+ */
+async function masterTakesSuggestion(routeId, options = {}) {
+  const bridgeStore = require('../lib/bridge-store');
+  const route = bridgeStore.routes.get(routeId);
+  const suggestion = route ? bridgeStore.audit.suggestionFor(routeId) : null;
+  if (!route || route.state !== 'awaiting-master' || !suggestion || !suggestion.to) return route;
+  const generation = options.generation || 1;
+  const result = bridgeStore.applyRouteWrite({
+    op: 'route', requestId: `test-master-route-${++decided}-${routeId}`.slice(0, 120), routeId, expectedVersion: route.version,
+    actor: 'master', proof: 'master-launch', masterGeneration: generation, at: options.at,
+    change: (current) => (current.state !== 'awaiting-master' ? { refuse: 'not-awaiting-master' } : {
+      set: {
+        state: 'accepted', resolved_by: 'master', destination_kind: suggestion.to,
+        destination_project_id: suggestion.to === 'project' ? suggestion.projectId : null, resolved_generation: generation, failure_code: null
+      },
+      detail: { to: suggestion.to, projectId: suggestion.projectId }
+    })
+  });
+  if (result.outcome !== 'applied' || options.advance === false) return result.route;
+  return gateway.advance(routeId);
+}
+
+module.exports = { install, masterTakesSuggestion, GATEWAY_WS, MASTER_WS };

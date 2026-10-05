@@ -831,6 +831,12 @@ describe('the operator bridge runbooks (#2031)', () => {
         'the rule, then the relaunch, then enable');
       assert.match(text, /A refusal, or the Master declines to run it: the rule or the relaunch did not take\. Repeat steps 6 and 7\. Do not enable the bridge\./);
       assert.match(text, /then `tc bridge close <route-id> --version <n>` for the Operator's route/);
+      // Every inbound waits for the Master's route decision: the steps show it waiting, and the final one routes before it answers.
+      assert.match(text, /shown as `awaiting-master` with `suggested: master \(by default\)\. Nothing is sent until you route it\.`/);
+      assert.match(text, /takes it with `tc bridge route <route-id> --version <n> --to master`, and answers with `tc bridge answer <route-id> --version <n> --text "<text>"`/);
+      assert.match(text, /`suggested: master \(by outbound-correlation\)`/);
+      assert.ok(text.indexOf('--to master`, and answers') > text.indexOf('18. Final acceptance'));
+      assert.ok(read('lib/tc-verbs.js').includes("'. Nothing is sent until you route it.'") && read('lib/tc-verbs.js').includes('suggested: ${s.to ?'));
       assert.match(text, /Other posts headed `TangleClaw` may appear: those are the server's own notices\./);
       assert.match(text, /Message Content Intent on, and the bot in the server with View Channel, Send Messages, Read Message History and Add Reactions/);
       assert.match(text, /The \*\*Master\*\* runs `tc bridge candidates`, then `tc bridge approve <candidate-id> --version <n>`/);

@@ -45,7 +45,7 @@ implementation, assigns no schema number and does not activate cutover.
 ## How a message travels
 
 ```
-inbound    helper ──▶ gateway ──▶ destination session        (or the Master itself)
+inbound    helper ──▶ gateway (held, with a suggestion) ──▶ Master routes ──▶ destination session   (or the Master itself)
 outbound   destination session ──▶ gateway (held) ──▶ Master releases ──▶ gateway ──▶ helper
 ```
 
@@ -55,13 +55,23 @@ outbound   destination session ──▶ gateway (held) ──▶ Master release
 2. **The gateway stores it as a route**, keyed on the chat's own message id. A replay of the
    same message returns the same route. The same id with different text, or from a different
    place, is refused.
-3. **The gateway resolves the destination mechanically**, in this order:
+3. **The gateway works out where the message looks to be going, and sends it nowhere.** It
+   looks, in this order, at:
    1. a leading `@name`;
    2. the route of the message this one replies to, or the Project Master when it replies to a
       posted message that has no route (see "What a reply answers");
    3. a pin on the conversation: the operator's for that conversation, then the operator's for
       every conversation, then the Master's;
    4. the default, which is the Project Master itself.
+
+   What it finds is recorded beside the route as a **suggestion**, and the route waits
+   (`awaiting-master`). An address, a reply, a pin and the default never send a message
+   anywhere.
+3a. **The Master routes it.** `tc bridge routes` shows each waiting route with its suggestion.
+   `tc bridge route <route-id> --version <n> --to <master|project>` is the decision, and the
+   Master may decide otherwise than the suggestion. Nothing applies a suggestion later: not a
+   pass, not time, not a restart, not a pin made afterwards. This is the operator's ruling of
+   2026-10-05: the Project Master is the router in both directions.
 4. **A project destination gets a tracked Medusa message** from the gateway, reply required,
    normal priority. Its first line says it is operator conversation and approves nothing. The
    gateway records exactly who it was sent to: the project, workspace, session and launch.
@@ -73,8 +83,9 @@ outbound   destination session ──▶ gateway (held) ──▶ Master release
 7. **The helper posts it and acknowledges** with the chat's id for the post. The text is then
    dropped, the route is closed and every body held for it is cleared.
 
-When the Master is the destination there is no Medusa round trip: the route waits, the Master is
-told, and it answers with `tc bridge answer`.
+When the Master is the destination there is no Medusa round trip. It still routes the message
+to itself first, with `--to master`, and then answers with `tc bridge answer`: one rule, with no
+exception for the commonest case.
 
 ### Telling the Master
 
@@ -127,12 +138,15 @@ An address is a leading `@name` that names **exactly one** destination:
 - a project's exact name, without regard to case;
 - a project's id.
 
-An `@name` that matches nothing, or more than one destination, is never guessed at. The route
-waits for the Master (`awaiting-master`). A chat application's own mention syntax, such as
-`<@123>`, is not an address, and neither is an `@name` in the middle of a sentence.
+An address is a suggestion to the Master, like every other way a destination is found: it
+names where the operator meant the message to go, and the Master's route write is what sends
+it. An `@name` that matches nothing, or more than one destination, is never guessed at: the
+route waits with no suggestion and the reason (`address-unresolved`, `address-ambiguous`). A
+chat application's own mention syntax, such as `<@123>`, is not an address, and neither is an
+`@name` in the middle of a sentence.
 
-A destination, once fixed on a route, does not move: a later change to pins, aliases or the
-default does not redirect a message that is still waiting.
+A suggestion is made once, when the route arrives. A later change to pins, aliases or the
+default does not rewrite it, and a destination the Master has fixed on a route does not move.
 
 ### When something does not arrive
 

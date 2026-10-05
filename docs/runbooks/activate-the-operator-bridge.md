@@ -281,9 +281,10 @@ If any step's expected result does not appear, stop and go to
     not answer it. Then the **Operator** writes one message in the channel, and the second
     account writes one. The **Master** runs `tc bridge routes`, then
     `tc bridge close <route-id> --version <n>` for the Operator's route.
-    → Expected: a ✅ on the Operator's message and exactly one new route. Nothing at all for the
-    second account's message: no reaction, no route. After the close, `tc bridge routes` prints
-    `No routes in those states.`
+    → Expected: a ✅ on the Operator's message and exactly one new route, shown as
+    `awaiting-master` with `suggested: master (by default). Nothing is sent until you route it.`
+    Nothing at all for the second account's message: no reaction, no route. After the close,
+    `tc bridge routes` prints `No routes in those states.`
     Why close it: a route left open posts "Still waiting on an answer to your message…" after
     five minutes, and would be mistaken for step 14's post.
 
@@ -340,10 +341,14 @@ If any step's expected result does not appear, stop and go to
 
 18. Final acceptance. The **Architect** sends the final milestone through the Master: a session
     submits it and the **Master** approves it, as in step 14. The **Operator** replies to that
-    exact Discord message. The **Master** runs `tc bridge routes`, `tc bridge read <route-id>` on
-    the new route, and answers with `tc bridge answer <route-id> --version <n> --text "<text>"`.
-    → Expected: `read` shows `answers posted milestone <candidate-id>`; the answer appears in the
-    same Discord conversation.
+    exact Discord message. The **Master** runs `tc bridge routes` and `tc bridge read <route-id>` on
+    the new route, takes it with `tc bridge route <route-id> --version <n> --to master`, and
+    answers with `tc bridge answer <route-id> --version <n> --text "<text>"`.
+    → Expected: `read` shows `answers posted milestone <candidate-id>` and
+    `suggested: master (by outbound-correlation)`; the answer appears in the same Discord
+    conversation.
+    → `answer` is refused before the `route`: every message waits for the Master's route
+    decision, its own included. Run the `route` line, then answer with the version it gives.
 
 ## Done when
 
