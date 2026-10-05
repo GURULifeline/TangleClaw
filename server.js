@@ -268,7 +268,6 @@ const projects = require('./lib/projects');
 const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
 const launchSequence = require('./lib/launch-sequence');
-const ciStatus = require('./lib/ci-status');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
@@ -298,6 +297,7 @@ const serverInfo = require('./lib/server-info');
 const behindOrigin = require('./lib/behind-origin');
 const checkoutState = require('./lib/checkout-state');
 const checkoutFreshness = require('./lib/checkout-freshness');
+const launchWarmup = require('./lib/launch-warmup');
 const checkoutFleet = require('./lib/checkout-fleet');
 const bindPolicy = require('./lib/bind-policy');
 const wrapRunRegistry = require('./lib/wrap-run-registry');
@@ -7051,15 +7051,10 @@ route('POST', '/api/sessions/:project', async (_req, res, params, body) => {
   // required. The TangleClaw session is the only identity source (ADR 0016 OQ2).
   const owner = (_req.tcSession && _req.tcSession.username) || null;
 
-  // #991: warm the base-branch CI verdict OFF the event loop before the
-  // synchronous launch reads it for the prime. Never rejects; a failed probe
-  // is an honest unknown in the prime, not a failed launch.
-  // #1678: the checkout line reads cached facts too; measure them now, bounded,
-  // so the prime says what the clone is on rather than "pending". Concurrent
-  // with the CI probe, so a hung network costs one wait, not two.
-  const checkoutWarm = checkoutFreshness.refreshForLaunch(project, store.config.load());
-  await ciStatus.refresh(project.path);
-  await checkoutWarm;
+  // #991, #1678: warm the CI verdict and the checkout facts OFF the event loop
+  // before the synchronous launch reads them for the prime. Shared with the
+  // operator bridge's consented launch, which must start a session the same way.
+  await launchWarmup.warmForLaunch(project);
 
   // The operator's own request carries the host they actually reached this
   // server on — better evidence than probing this machine, which names the box

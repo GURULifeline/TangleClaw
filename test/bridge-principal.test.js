@@ -377,7 +377,7 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
     const { BRIDGE_SUBVERBS, BRIDGE_USAGE, VERB_ROSTER } = require('../lib/tc-verbs');
     const bridge = VERB_ROSTER.find((v) => v.id === 'bridge');
     const identity = master.buildMasterClaudeMd(store.config.load());
-    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'ask', 'answer', 'release', 'pin', 'close',
+    assert.deepEqual([...BRIDGE_SUBVERBS], ['status', 'routes', 'read', 'route', 'ask', 'ask-launch', 'launch', 'decline', 'answer', 'release', 'pin', 'close',
       'candidates', 'candidate', 'approve', 'reject', 'merge', 'blocked', 'requeue', 'withdraw', 'circuit ack', 'reset']);
     /**
      * Whether a usage text names a subverb as a word of its own.
@@ -402,7 +402,8 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       postJson: async (p) => { asked.push(`POST ${p}`); throw Object.assign(new Error('no server'), { body: { code: 'STUB', error: 'stub' } }); }
     });
     const args = {
-      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], answer: ['rt_1', '--version', '1', '--text', 'x'],
+      status: [], routes: [], read: ['rt_1'], route: ['rt_1', '--version', '1', '--to', 'master'], ask: ['rt_1', '--version', '1', '--text', 'which?'], 'ask-launch': ['rt_1', '--version', '1', '--project', 'Alpha'],
+      launch: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], decline: ['rt_1', '--version', '1', '--answered-by', 'rt_2'], answer: ['rt_1', '--version', '1', '--text', 'x'],
       release: ['rt_1', '--version', '1'], pin: ['rt_1', '--version', '1', '--to', 'master'], close: ['rt_1', '--version', '1'],
       candidates: [], candidate: ['cand_1'], approve: ['cand_1', '--version', '1'], reject: ['cand_1', '--version', '1'],
       merge: ['cand_1', '--version', '1', '--into', 'cand_2'], blocked: [], requeue: ['7'], withdraw: ['7'], 'circuit ack': ['3'], reset: ['--requeue']
@@ -446,6 +447,11 @@ describe('the Master\'s standing instructions for the bridge (#2031)', () => {
       assert.ok(text.includes('- **When you cannot tell where a message goes, ask.** `tc bridge ask <route-id> --version <n> --text "<question>"`'));
       assert.match(text.replace(/\n\s+/g, ' '), /The message stays held and nothing is sent on\./);
       assert.match(text.replace(/\n\s+/g, ' '), /`tc bridge route <route-id> --version <n> --to <destination> --answered-by <the reply's route-id>`/);
+      // A project that is not running is never started by routing to it, and never by the Master: it asks, and the server launches.
+      assert.ok(text.includes('- **A project that is not running is never launched without the operator saying so.**'));
+      assert.match(text.replace(/\n\s+/g, ' '), /`tc bridge route` to it is refused \(`TARGET_OFFLINE`\) and the message stays held\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /You never start a session yourself, by any route or command: you record the operator's consent, and the server launches\./);
+      assert.match(text.replace(/\n\s+/g, ' '), /If the operator says no or cancel, `tc bridge decline <route-id> --version <n> --answered-by <the reply's route-id>` closes the message/);
       assert.match(text.replace(/\n\s+/g, ' '), /Only a reply to that very question counts\. A new message that happens to say yes, a reply to another question, a second reply, and one that comes after the question has run out \(a day\) are answers to nothing/);
       assert.ok(text.includes('The suggestion is advice, and you may\n  decide otherwise. `tc bridge route <route-id> --version <n> --to <master|project>` is the decision.'));
       assert.ok(text.includes('A message meant for you needs `--to master` first, and only then `tc bridge answer`.'));

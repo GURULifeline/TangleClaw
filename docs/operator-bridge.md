@@ -242,6 +242,63 @@ What ends an open question without an answer:
 The Master being away does not end one. A message queued because the Master is unavailable is
 still held, and what was asked about it stands when the Master is back.
 
+### Launching a project that is not running
+
+A message for a project with no live session is never sent anywhere by routing it, and a
+session is never started without the operator saying so.
+
+1. `tc bridge route` to such a project is refused `409 TARGET_OFFLINE`. The message stays held.
+2. The Master asks: `tc bridge ask-launch <route-id> --version <n> --project <project>`. The
+   server writes the question, in fixed words: "<project> is not running. Would you like me to
+   launch it?" Nothing is launched by asking. Refused for a project that is running
+   (`409 TARGET_LIVE`), one the operator has opted out (`409 DESTINATION_OPTED_OUT`), and a
+   message that already has a launch under way (`409 LAUNCH_IN_PROGRESS`).
+3. The operator replies to that question in the chat.
+4. On a yes, `tc bridge launch <route-id> --version <n> --answered-by <the reply's route-id>`
+   records the consent. The same correlation rules apply as for any question, and only a reply
+   to a launch question is consent to launch (`409 QUESTION_PURPOSE` otherwise). The write
+   launches nothing: the message stays held, with a launch `queued` for it.
+   On a no or a cancel, `tc bridge decline <route-id> --version <n> --answered-by <the reply's
+   route-id>` closes the message and clears its text. Nothing is launched and nothing is sent.
+5. **The server launches.** On its next pass the gateway takes the oldest queued launch, if
+   none is in flight, and starts a session for the project through the same function the
+   launch route uses, with the project's saved settings and no override of engine, mode, prompt
+   or permission. One launch is in flight on the install at a time; the rest wait in the order
+   consent was adopted. If a session for the project is already live, because someone started
+   it by hand in the meantime, nothing is launched and that session is the one waited for.
+6. **The message is sent on only when all of this holds at once:** the session the launch
+   named is still the project's active one; its launch sequence carries the launch id recorded
+   and has attested READY; its recovery gate is not withheld; the server itself holds a Medusa
+   listener for it; and the project's control lane is neither held nor stopped. READY is an
+   unauthenticated attestation, so it is one condition and never the proof alone. Then the
+   original message goes to that session, as the operator wrote it.
+
+A launch question can be answered for an hour. No answer, an answer after the hour, a second
+answer, and anything that is not a reply to that question launch nothing.
+
+Before launching, and on every pass while waiting, the gateway asks again whether anything
+stands in the way. Each of these ends the launch with a closed code and launches or sends
+nothing more:
+
+| Code | Why |
+|---|---|
+| `project-gone`, `project-archived`, `project-opted-out` | The project is no longer one the bridge may reach. |
+| `held`, `stopped`, `control-unavailable` | The project's control lane is held or stopped, or could not be read. The launch route itself refuses only a stopped lane; the bridge refuses both. |
+| `wrap-running` | A wrap is running for the project. |
+| `launch-refused:<CODE>`, `launch-error` | The launch function refused or failed. Only its own closed code is passed on. |
+| `identity-unknown`, `identity-changed` | The session has no launch record, or is no longer the session the launch named. |
+| `ready-not-applicable` | The session's launch has nothing to attest, so it can never say it is READY. Said at once. |
+| `ready-timeout` | Ten minutes passed without every condition of step 6 holding. |
+
+On any of them the operator is sent one fixed sentence carrying the code, the message goes back
+to waiting for the Master with the code on it, and the Master is told. No other target is
+tried and nothing is retried: another launch needs another consent. A session that did start
+is left running; the bridge never ends one. `tc bridge read` shows where a launch stands.
+
+Closing the message abandons its launch. Disabling the bridge abandons every launch not yet
+settled, and enabling it again revives none. Nothing about a launch is kept in memory: after a
+restart the gateway reads the same rows and carries on, and a launch is never made twice.
+
 ## The Project Master's credential
 
 The Project Master has no project and no session row, so nothing TangleClaw records at a
@@ -299,6 +356,9 @@ the bridge's own routes and nowhere else, so it is never typed.
 | `tc bridge read <route-id>` | Shows one route with the text still held for it. |
 | `tc bridge route <route-id> --version <n> --to <dest>` | Names the destination of a route that is waiting for the Master. The gateway then sends it. With `--answered-by <route-id>`, also adopts that operator reply as the answer to the question asked about it. |
 | `tc bridge ask <route-id> --version <n> --text "<question>"` | Asks the operator one question about a message that is waiting for the Master. The message stays held. `--text-file <file>` reads the question from a file. |
+| `tc bridge ask-launch <route-id> --version <n> --project <project>` | Asks the operator, in the server's fixed words, whether to launch a session for a project that is not running. Launches nothing. |
+| `tc bridge launch <route-id> --version <n> --answered-by <route-id>` | Records the operator's reply as consent to that launch. The server then launches, waits for the session to be ready, and sends the message on. |
+| `tc bridge decline <route-id> --version <n> --answered-by <route-id>` | Closes the message on the operator's no or cancel. Nothing is launched or sent. |
 | `tc bridge answer <route-id> --version <n> --text "<text>"` | Answers the operator in the Master's own words. `--text-file <file>` reads the answer from a file. |
 | `tc bridge release <route-id> --version <n>` | Sends on, unchanged, the reply the gateway is holding. |
 | `tc bridge pin <route-id> --version <n> --to <dest>` | Pins the route's conversation to a destination. Conversation-scoped only. |
@@ -741,8 +801,9 @@ v54 also carries what the Master's questions rest on. `bridge_questions` holds e
 standing; `bridge_outbound`, `bridge_outbound_parts` and `bridge_route_reply_context` gain the
 `question` kind and the id of the question an item asks. `bridge_aliases` has columns for who
 last changed a nickname, when, and on which operator message; nothing writes them yet, and
-rows from an earlier store come through with them empty. `bridge_launches` and
-`bridge_project_optouts` exist and are not yet used. The store itself holds the rules that must not depend on a caller: one open
+rows from an earlier store come through with them empty. `bridge_launches` holds each
+consented launch and how it stands. `bridge_project_optouts` is read before a launch is asked
+about or made; nothing writes it yet. The store itself holds the rules that must not depend on a caller: one open
 question per message, one use of an operator's reply, and a settled question never reopened.
 
 "Superset" is a statement about shape: every object an earlier version required is still there

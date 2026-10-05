@@ -205,6 +205,14 @@ no Master judgement in between. The operator has ruled that out.
   nothing is dispatched. Only an operator reply recorded as a reply to that very question can
   be adopted as its answer, once, with the route decision it supports. A denial, a timeout, an
   unrelated or a second reply grants nothing. A question that runs out closes nothing.
+- **A stopped session is never launched automatically** (operator ruling, 2026-10-05). The
+  Master asks, in the server's fixed words, and records the operator's correlated yes; the
+  server launches, and the Master never calls a launch route. Limits as ruled: the question
+  can be answered for 60 minutes; one launch is in flight on the install, the rest in the
+  order consent was adopted; a held or stopped lane refuses; the session has 10 minutes to be
+  READY and to be the session that was launched, with the server's own listener for it; then
+  the original is sent on unchanged. A failure is told and never retried, no other target is
+  tried, and the bridge never ends a session.
 
 ### 10. The interim path, and what cutover requires (D4)
 

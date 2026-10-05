@@ -26,6 +26,8 @@ const { install } = require('./_bridge-hub');
 const { execFile } = require('node:child_process');
 
 const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
+/** A tracked file's text. */
+const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 const ALLOWED = { authorId: 'author1', spaceId: 'space1', channelId: 'chan1' };
 
 let tmpDir;
@@ -139,6 +141,9 @@ async function operatorSays(externalId, text) {
   const suggestion = bridgeStore.audit.suggestionFor(routeId);
   if (!route || route.state !== 'awaiting-master' || !suggestion || !suggestion.to) return accepted;
   const routed = await masterWrites(routeId, 'route', { expectedVersion: route.version, to: suggestion.to === 'master' ? 'master' : suggestion.projectId });
+  // A suggested project that is not running is not routed to: the message stays held, as it would with a real Master.
+  // (This file's one store keeps an earlier test's conversation pin, which suggests its long-gone project.)
+  if (routed.status === 409 && routed.body.code === 'TARGET_OFFLINE') return accepted;
   assert.equal(routed.status, 200, `the Master's route write: ${JSON.stringify(routed.body)}`);
   return { status: accepted.status, body: { ...accepted.body, state: routed.body.route.state } };
 }
@@ -1398,6 +1403,521 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal(bridgeStore.routes.get(reply).state, 'closed');
       const second = await tc(['bridge', 'ask', routeId, '--version', String(version(routeId)), '--text', 'Again?']);
       assert.deepEqual([second.code, /refused \[NOT_AWAITING_MASTER\]/.test(second.stderr)], [2, true]);
+    });
+  });
+
+  describe('launching a stopped project, on the operator\'s consent and nothing less', () => {
+    const MIN = 60 * 1000;
+    const version = (id) => bridgeStore.routes.get(id).version;
+    const db = () => store.getDb();
+    const launchOf = (routeId) => bridgeStore.launches.latestFor(routeId);
+    const questionOf = (routeId) => ({ ...db().prepare('SELECT question_id, purpose, target_project_id, state, adopted_route_id, adopted_for, asked_at, expires_at FROM bridge_questions WHERE route_id = ? ORDER BY asked_at DESC, question_id DESC LIMIT 1').get(routeId) });
+    const sentTo = (workspaceId) => hub.fromGateway().filter((m) => m.to === workspaceId);
+    const about = (items, routeId) => items.filter((i) => i.inReplyTo && i.inReplyTo.externalId === bridgeStore.routes.get(routeId).externalId);
+    const claimAll = async () => {
+      const all = [];
+      for (let pass = 0; pass < 10; pass++) {
+        const { items } = (await claim()).body;
+        if (!items.length) break;
+        all.push(...items);
+      }
+      return all;
+    };
+    let launched;
+    let realLaunch;
+    let realSessions;
+    let realControl;
+    let launchBehaviour;
+
+    beforeEach(() => {
+      // One launch is in flight on the install at a time, and this file has one store: what an earlier test left
+      // unsettled would hold up every launch after it.
+      for (const left of bridgeStore.launches.unsettled()) bridgeStore.launches.end(left.launchSeq, 'abandoned', 'test-reset', new Date().toISOString());
+      launched = [];
+      launchBehaviour = null;
+      realLaunch = gateway._deps.launchProject;
+      realSessions = gateway._deps.sessions;
+      realControl = gateway._deps.controlState;
+      // The server's launch, stood in for: a session row, its launch sequence and its listener, as a real launch leaves them.
+      gateway._deps.launchProject = async (...args) => {
+        launched.push(args);
+        if (launchBehaviour) return launchBehaviour(...args);
+        const session = hub.anotherSession(args[0]);
+        db().prepare("UPDATE launch_sequences SET applicability = 'applicable' WHERE session_id = ?").run(session.sessionId);
+        // The shape `sessions.launchSession` really answers with: the session row under `session`.
+        return { session: store.sessions.getActive(args[0].id), primePrompt: null, ttydUrl: null, error: null };
+      };
+    });
+
+    // Restored by the file's own `beforeEach` for `gateway._deps.master`; these three are this suite's.
+    const restore = () => Object.assign(gateway._deps, { launchProject: realLaunch, sessions: realSessions, controlState: realControl });
+
+    /** A project that exists and is not running. */
+    const stopped = () => store.projects.create({ name: `Stopped${++seq}`, path: path.join(tmpDir, `Stopped${seq}`) });
+    /** The session a launch waits for says it is READY, as `tc start ready` records it. */
+    const becomesReady = (sessionId) => db().prepare("UPDATE launch_sequences SET ready_at = datetime('now'), ready_artifact = 'attested', ready_digest = ? WHERE session_id = ?").run('d'.repeat(64), sessionId);
+    /** A message for a stopped project, held; the Master has asked whether to launch, and the question is posted. */
+    const asked = async (project = stopped()) => {
+      const accepted = await operatorWrites(`m${++seq}`, `@${project.name} please run the nightly`);
+      const routeId = accepted.body.routeId;
+      assert.equal(bridgeStore.routes.get(routeId).state, 'awaiting-master');
+      const res = await masterWrites(routeId, 'ask-launch', { expectedVersion: version(routeId), project: project.id });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      const items = about(await claimAll(), routeId).filter((i) => i.kind === 'question');
+      assert.equal(items.length, 1);
+      const posted = `dl${++seq}`;
+      assert.equal((await ackItem(items[0], posted)).status, 200);
+      return { project, routeId, posted, question: items[0] };
+    };
+    const operatorReplies = async (to, text) => {
+      const res = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, replyToExternalId: to, text } });
+      assert.equal(res.status, 202, JSON.stringify(res.body));
+      return res.body.routeId;
+    };
+    /** Asked, answered yes, and the Master has adopted that answer as consent. */
+    const consented = async (project) => {
+      const a = await asked(project);
+      const reply = await operatorReplies(a.posted, 'yes');
+      const res = await masterWrites(a.routeId, 'launch', { expectedVersion: version(a.routeId), answeredBy: reply });
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      return { ...a, reply };
+    };
+    /** Run `fn` with the gateway's clock `ms` past the real one. */
+    const later = async (ms, fn) => {
+      const realNow = gateway._deps.now;
+      const at = new Date(Date.parse(realNow()) + ms).toISOString();
+      gateway._deps.now = () => at;
+      try { return await fn(); } finally { gateway._deps.now = realNow; }
+    };
+
+    it('routing to a project that is not running is refused, the message stays held, and nothing is launched', async () => {
+      try {
+        const project = stopped();
+        const routeId = (await operatorWrites(`m${++seq}`, `@${project.name} hello`)).body.routeId;
+        const before = JSON.stringify(bridgeStore.routes.get(routeId));
+        const res = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: project.id });
+        assert.deepEqual([res.status, res.body.code], [409, 'TARGET_OFFLINE']);
+        assert.equal(JSON.stringify(bridgeStore.routes.get(routeId)), before);
+        await gateway.tick();
+        assert.deepEqual(launched, [], 'routing launches nothing');
+        assert.equal(store.sessions.getActive(project.id), null);
+      } finally { restore(); }
+    });
+
+    it('asking launches nothing: the question is the server\'s fixed sentence, answerable for an hour', async () => {
+      try {
+        const a = await asked();
+        assert.equal(a.question.text, `${a.project.name} is not running. Would you like me to launch it?`);
+        const q = questionOf(a.routeId);
+        assert.deepEqual([q.purpose, q.target_project_id, q.state], ['launch', a.project.id, 'open']);
+        assert.equal(Date.parse(q.expires_at) - Date.parse(q.asked_at), 60 * MIN);
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.deepEqual(launched, [], 'no launch before consent, however many passes run');
+        assert.equal(launchOf(a.routeId), null);
+        assert.equal(bridgeStore.routes.get(a.routeId).state, 'awaiting-master');
+
+        // What cannot be asked: a second question, a project that is running, the Master, a name that is nobody's, an opted-out project.
+        const again = await masterWrites(a.routeId, 'ask-launch', { expectedVersion: version(a.routeId), project: a.project.id });
+        assert.deepEqual([again.status, again.body.code], [409, 'QUESTION_OPEN']);
+        const other = (await operatorWrites(`m${++seq}`, '@nobody-at-all hello')).body.routeId;
+        const live = liveProject(`Alpha${++seq}`);
+        for (const [project, status, code] of [[live.project.id, 409, 'TARGET_LIVE'], ['master', 400, 'UNKNOWN_DESTINATION'], ['No Such Project', 400, 'UNKNOWN_DESTINATION'], [undefined, 400, 'UNKNOWN_DESTINATION']]) {
+          const res = await masterWrites(other, 'ask-launch', { expectedVersion: version(other), project });
+          assert.deepEqual([res.status, res.body.code], [status, code], String(project));
+        }
+        const out = stopped();
+        db().prepare("INSERT INTO bridge_project_optouts (project_id, set_by, set_at) VALUES (?, 'operator', ?)").run(out.id, new Date().toISOString());
+        const refused = await masterWrites(other, 'ask-launch', { expectedVersion: version(other), project: out.id });
+        assert.deepEqual([refused.status, refused.body.code], [409, 'DESTINATION_OPTED_OUT']);
+        assert.equal(db().prepare('SELECT COUNT(*) AS n FROM bridge_questions WHERE route_id = ?').get(other).n, 0);
+      } finally { restore(); }
+    });
+
+    it('a yes, adopted: the server launches once with the saved settings, waits for READY, and sends the original on as written', async () => {
+      try {
+        const c = await consented();
+        assert.equal(bridgeStore.routes.get(c.routeId).state, 'awaiting-master', 'recording consent sends nothing: the message is still held');
+        assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).projectId], ['queued', c.project.id], 'and the launch it recorded is not undone by its own write');
+        assert.deepEqual(launched, [], 'the Master\'s write launched nothing itself');
+        const twice = await masterWrites(c.routeId, 'ask-launch', { expectedVersion: version(c.routeId), project: c.project.id });
+        assert.deepEqual([twice.status, twice.body.code], [409, 'LAUNCH_IN_PROGRESS'], 'a message with a launch under way is not asked about launching again');
+        assert.deepEqual([bridgeStore.routes.get(c.reply).state, questionOf(c.routeId).state, questionOf(c.routeId).adopted_for], ['closed', 'adopted', 'launch']);
+
+        await gateway.tick();
+        assert.equal(launched.length, 1);
+        assert.deepEqual([launched[0].length, launched[0][0].id], [1, c.project.id], 'the project, and nothing else: no engine, mode, prompt or permission is passed');
+        const flying = launchOf(c.routeId);
+        assert.deepEqual([flying.state, flying.startedSession], ['waiting-ready', true]);
+        const session = store.sessions.getActive(c.project.id);
+        assert.deepEqual([flying.sessionId, flying.launchId], [session.id, store.launchSequences.getBySession(session.id).launchId]);
+        const workspace = hub.workspaces.get(String(session.id));
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.deepEqual(sentTo(workspace), [], 'nothing is sent before the session says it is READY');
+        assert.equal(launched.length, 1, 'and the launch is not repeated');
+
+        becomesReady(session.id);
+        await gateway.tick();
+        const sent = sentTo(workspace);
+        assert.equal(sent.length, 1);
+        assert.ok(sent[0].message.includes(`@${c.project.name} please run the nightly`), 'the original message, as the operator wrote it');
+        assert.ok(!sent[0].message.includes('yes'));
+        assert.deepEqual([bridgeStore.routes.get(c.routeId).state, launchOf(c.routeId).state], ['routed', 'dispatched']);
+        const route = bridgeStore.routes.get(c.routeId);
+        assert.deepEqual([route.resolvedBy, route.destination.projectId], ['master', c.project.id], 'sent on the Master\'s decision, to the project consent was given for');
+        for (let i = 0; i < 2; i++) await gateway.tick();
+        assert.deepEqual([launched.length, sentTo(workspace).length], [1, 1], 'once');
+        const trail = db().prepare("SELECT op, outcome FROM bridge_audit WHERE route_id = ? AND op IN ('ask-launch','launch','launch-dispatch') ORDER BY audit_seq").all(c.routeId).map((r) => `${r.op}:${r.outcome}`);
+        assert.deepEqual(trail, ['ask-launch:applied', 'launch:applied', 'ask-launch:launch-in-progress', 'launch:waiting-ready', 'launch-dispatch:applied'], 'the question, the decision, the refused second question and the action are all on the record');
+      } finally { restore(); }
+    });
+
+    it('no, or cancel: the message is closed with the reply, and nothing is launched or sent', async () => {
+      try {
+        const a = await asked();
+        const reply = await operatorReplies(a.posted, 'no, leave it');
+        const res = await masterWrites(a.routeId, 'decline', { expectedVersion: version(a.routeId), answeredBy: reply });
+        assert.equal(res.status, 200, JSON.stringify(res.body));
+        assert.deepEqual([bridgeStore.routes.get(a.routeId).state, bridgeStore.routes.get(reply).state], ['closed', 'closed']);
+        assert.equal(bridgeStore.routes.body(a.routeId, 'inbound').text, null, 'its text is cleared');
+        assert.deepEqual([questionOf(a.routeId).state, questionOf(a.routeId).adopted_for], ['declined', 'decline']);
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.deepEqual([launched.length, launchOf(a.routeId), store.sessions.getActive(a.project.id)], [0, null, null]);
+        // A clarifying question can be declined the same way: the operator says to drop it.
+        const plain = (await operatorWrites(`m${++seq}`, '@nobody-known do the thing')).body.routeId;
+        assert.equal((await masterWrites(plain, 'ask', { expectedVersion: version(plain), text: 'Which project?' })).status, 200);
+        const item = about(await claimAll(), plain).find((i) => i.kind === 'question');
+        assert.equal((await ackItem(item, `dl${++seq}`)).status, 200);
+        const never = await operatorReplies(`dl${seq}`, 'never mind, cancel');
+        const dropped = await masterWrites(plain, 'decline', { expectedVersion: version(plain), answeredBy: never });
+        assert.deepEqual([dropped.status, bridgeStore.routes.get(plain).state, bridgeStore.routes.get(never).state], [200, 'closed', 'closed']);
+        // A decline needs the reply it rests on, like a launch.
+        const b = await asked();
+        for (const answeredBy of [undefined, '', 'not a route']) {
+          const bad = await masterWrites(b.routeId, 'decline', { expectedVersion: version(b.routeId), answeredBy });
+          assert.deepEqual([bad.status, bad.body.code], [400, 'BAD_ANSWERED_BY']);
+        }
+        const unrelated = (await operatorWrites(`m${++seq}`, 'no')).body.routeId;
+        const wrong = await masterWrites(b.routeId, 'decline', { expectedVersion: version(b.routeId), answeredBy: unrelated });
+        assert.deepEqual([wrong.status, wrong.body.code, bridgeStore.routes.get(b.routeId).state], [409, 'NOT_AN_ANSWER', 'awaiting-master']);
+      } finally { restore(); }
+    });
+
+    it('no answer in an hour launches nothing: the message stays held and the operator is told so', async () => {
+      try {
+        const a = await asked();
+        const late = await operatorReplies(a.posted, 'yes');
+        await later(60 * MIN + 1000, async () => {
+          const res = await masterWrites(a.routeId, 'launch', { expectedVersion: version(a.routeId), answeredBy: late });
+          assert.deepEqual([res.status, res.body.code], [409, 'QUESTION_EXPIRED'], 'a yes adopted after the hour is consent to nothing');
+          await gateway.tick();
+          assert.equal(questionOf(a.routeId).state, 'expired');
+          assert.deepEqual([launched.length, launchOf(a.routeId)], [0, null]);
+          assert.equal(bridgeStore.routes.get(a.routeId).state, 'awaiting-master');
+          assert.equal(bridgeStore.routes.body(a.routeId, 'inbound').text, `@${a.project.name} please run the nightly`);
+          assert.deepEqual(about(await claimAll(), a.routeId).filter((i) => i.kind === 'failure').map((i) => i.text), [bridgeStore.QUESTION_EXPIRED_TEXT.launch]);
+          const settled = await masterWrites(a.routeId, 'launch', { expectedVersion: version(a.routeId), answeredBy: late });
+          assert.deepEqual([settled.status, settled.body.code], [409, 'QUESTION_SETTLED']);
+          for (let i = 0; i < 2; i++) await gateway.tick();
+          assert.equal(launched.length, 0);
+        });
+      } finally { restore(); }
+    });
+
+    it('only the reply to that launch question is consent: not a second yes, an unrelated yes, or an answer to another kind of question', async () => {
+      try {
+        const c = await consented();
+        const second = await operatorReplies(c.posted, 'yes yes');
+        const dup = await masterWrites(c.routeId, 'launch', { expectedVersion: version(c.routeId), answeredBy: second });
+        assert.deepEqual([dup.status, dup.body.code], [409, 'QUESTION_SETTLED'], 'a duplicate yes finds the question already answered');
+        assert.equal(db().prepare('SELECT COUNT(*) AS n FROM bridge_launches WHERE route_id = ?').get(c.routeId).n, 1);
+
+        const a = await asked();
+        const unrelated = (await operatorWrites(`m${++seq}`, 'yes')).body.routeId;
+        const other = await asked();
+        const crossed = await operatorReplies(other.posted, 'yes');
+        for (const [answeredBy, why] of [[unrelated, 'a yes that replies to nothing'], [crossed, 'a yes to a question about another message'], [a.routeId, 'the message itself']]) {
+          const res = await masterWrites(a.routeId, 'launch', { expectedVersion: version(a.routeId), answeredBy });
+          assert.deepEqual([res.status, res.body.code], [409, 'NOT_AN_ANSWER'], why);
+        }
+        // A yes to a launch question is not an answer for an ordinary route write, and a clarifying answer is not consent to launch.
+        const yes = await operatorReplies(a.posted, 'yes');
+        const asRoute = await masterWrites(a.routeId, 'route', { expectedVersion: version(a.routeId), to: 'master', answeredBy: yes });
+        assert.deepEqual([asRoute.status, asRoute.body.code], [409, 'QUESTION_PURPOSE']);
+        const plain = (await operatorWrites(`m${++seq}`, '@nobody-known which?')).body.routeId;
+        assert.equal((await masterWrites(plain, 'ask', { expectedVersion: version(plain), text: 'Which project?' })).status, 200);
+        const item = about(await claimAll(), plain).find((i) => i.kind === 'question');
+        assert.equal((await ackItem(item, `dl${++seq}`)).status, 200);
+        const clarified = await operatorReplies(db().prepare('SELECT part_external_id AS id FROM bridge_outbound_parts WHERE outbound_id = ?').get(item.outboundId).id, 'yes, launch it');
+        const asLaunch = await masterWrites(plain, 'launch', { expectedVersion: version(plain), answeredBy: clarified });
+        assert.deepEqual([asLaunch.status, asLaunch.body.code], [409, 'QUESTION_PURPOSE']);
+        for (let i = 0; i < 2; i++) await gateway.tick();
+        assert.equal(launched.length, 1, 'only the one consented launch ever ran');
+        assert.equal(launchOf(a.routeId), null);
+      } finally { restore(); }
+    });
+
+    it('a session started by hand in the meantime is waited on, and nothing is launched', async () => {
+      try {
+        const c = await consented();
+        const manual = hub.anotherSession(c.project);
+        db().prepare("UPDATE launch_sequences SET applicability = 'applicable' WHERE session_id = ?").run(manual.sessionId);
+        await gateway.tick();
+        assert.deepEqual(launched, [], 'asked immediately before launching: one is already live');
+        assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).sessionId, launchOf(c.routeId).startedSession], ['waiting-ready', manual.sessionId, false]);
+        becomesReady(manual.sessionId);
+        await gateway.tick();
+        assert.equal(sentTo(manual.workspaceId).length, 1);
+        assert.equal(launchOf(c.routeId).state, 'dispatched');
+      } finally { restore(); }
+    });
+
+    it('a launch that is refused, fails, or throws is not retried and tries no other target; the operator and the Master are told the code', async () => {
+      try {
+        const CASES = [
+          [() => ({ session: null, error: 'stranded', code: 'STRANDED_WRAPS' }), 'launch-refused:STRANDED_WRAPS'],
+          [() => ({ session: null, error: 'Engine "x" not available (binary not found)' }), 'launch-refused:REFUSED'],
+          [() => ({ session: null, error: null, webui: true }), 'launch-refused:WEBUI_ENGINE'],
+          [() => ({ session: null, error: null }), 'launch-refused:REFUSED'],
+          [() => { throw new Error('tmux went away'); }, 'launch-error']
+        ];
+        for (const [behaviour, code] of CASES) {
+          launched = [];
+          launchBehaviour = behaviour;
+          const c = await consented();
+          const heldVersion = version(c.routeId);
+          await gateway.tick();
+          const launch = launchOf(c.routeId);
+          assert.deepEqual([launch.state, launch.failureCode], ['failed', code]);
+          const route = bridgeStore.routes.get(c.routeId);
+          assert.deepEqual([route.state, route.failureCode, route.destination], ['awaiting-master', code.slice(0, 40), null], `${code}: the message goes back to waiting, saying why`);
+          assert.ok(route.version > heldVersion, 'its version moves, so the Master is told');
+          assert.equal(bridgeStore.routes.body(c.routeId, 'inbound').text, `@${c.project.name} please run the nightly`);
+          const notices = about(await claimAll(), c.routeId).filter((i) => i.kind === 'failure').map((i) => i.text);
+          assert.deepEqual(notices, [`I could not get a session ready for your message (${code}). Your message is still held, and nothing was sent on.`]);
+          for (let i = 0; i < 3; i++) await gateway.tick();
+          assert.equal(launched.length, 1, `${code}: launched once, and never again without a new consent`);
+          assert.equal(hub.fromGateway().filter((m) => m.message.includes(c.project.name)).length, 0, 'and sent to nobody');
+        }
+      } finally { restore(); }
+    });
+
+    it('READY that never comes, or comes from another session, sends nothing: the launch ends after ten minutes and the session is left running', async () => {
+      try {
+        // Never READY.
+        const slow = await consented();
+        await gateway.tick();
+        const session = store.sessions.getActive(slow.project.id);
+        await later(gateway.READY_WAIT_MS - 1000, async () => {
+          await gateway.tick();
+          assert.equal(launchOf(slow.routeId).state, 'waiting-ready', 'inside the wait it is still waited for');
+        });
+        await later(gateway.READY_WAIT_MS + 5000, async () => {
+          await gateway.tick();
+          assert.deepEqual([launchOf(slow.routeId).state, launchOf(slow.routeId).failureCode], ['failed', 'ready-timeout']);
+          assert.equal(store.sessions.getActive(slow.project.id).id, session.id, 'the session that did start is not ended');
+          becomesReady(session.id);
+          await gateway.tick();
+          assert.deepEqual(sentTo(hub.workspaces.get(String(session.id))), [], 'a READY that arrives after the launch was given up sends nothing');
+          assert.equal(bridgeStore.routes.get(slow.routeId).state, 'awaiting-master');
+        });
+
+        // The session is replaced before it is READY: the new one is not the one consent launched.
+        const swapped = await consented();
+        await gateway.tick();
+        const first = store.sessions.getActive(swapped.project.id);
+        const usurper = hub.anotherSession(swapped.project);
+        db().prepare("UPDATE launch_sequences SET applicability = 'applicable' WHERE session_id = ?").run(usurper.sessionId);
+        becomesReady(usurper.sessionId);
+        becomesReady(first.id);
+        await gateway.tick();
+        assert.deepEqual([launchOf(swapped.routeId).state, launchOf(swapped.routeId).failureCode], ['failed', 'identity-changed']);
+        assert.deepEqual(sentTo(usurper.workspaceId), [], 'READY alone, from whichever session is newest, is not enough');
+
+        // READY, but the server holds no listener for that session: not sent.
+        const deaf = await consented();
+        await gateway.tick();
+        const quiet = store.sessions.getActive(deaf.project.id);
+        const workspace = hub.workspaces.get(String(quiet.id));
+        hub.workspaces.delete(String(quiet.id));
+        becomesReady(quiet.id);
+        await gateway.tick();
+        assert.equal(launchOf(deaf.routeId).state, 'waiting-ready', 'READY with no listener is still waiting');
+        assert.deepEqual(sentTo(workspace), []);
+        hub.workspaces.set(String(quiet.id), workspace);
+        await gateway.tick();
+        assert.deepEqual([launchOf(deaf.routeId).state, sentTo(workspace).length], ['dispatched', 1]);
+
+        // READY, but its recovery gate is withheld: not sent until the operator has cleared it.
+        const gated = await consented();
+        await gateway.tick();
+        const guarded = store.sessions.getActive(gated.project.id);
+        db().prepare("UPDATE launch_sequences SET recovery = 'required', recovery_mode = 'operator' WHERE session_id = ?").run(guarded.id);
+        becomesReady(guarded.id);
+        await gateway.tick();
+        assert.equal(launchOf(gated.routeId).state, 'waiting-ready', 'a withheld recovery gate holds the message back');
+        assert.deepEqual(sentTo(hub.workspaces.get(String(guarded.id))), []);
+        db().prepare("UPDATE launch_sequences SET recovery = 'cleared' WHERE session_id = ?").run(guarded.id);
+        await gateway.tick();
+        assert.equal(launchOf(gated.routeId).state, 'dispatched');
+
+        // The session is replaced in the instant between the decision to send and the send: it does not go to the newcomer.
+        const raced = await consented();
+        await gateway.tick();
+        const original = store.sessions.getActive(raced.project.id);
+        const launch = launchOf(raced.routeId);
+        const sentOn = bridgeStore.applyRouteWrite({
+          op: 'launch-dispatch', requestId: `req-race-${++seq}-0000`, routeId: raced.routeId, expectedVersion: version(raced.routeId), actor: 'gateway', proof: 'gateway',
+          change: () => ({
+            set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: raced.project.id, resolved_generation: launch.masterGeneration, failure_code: null },
+            settleLaunch: { launchSeq: launch.launchSeq }
+          })
+        });
+        assert.equal(sentOn.outcome, 'applied');
+        const newcomer = hub.anotherSession(raced.project);
+        await gateway.advance(raced.routeId);
+        const bounced = bridgeStore.routes.get(raced.routeId);
+        assert.deepEqual([bounced.state, bounced.failureCode], ['awaiting-master', 'identity-changed']);
+        assert.deepEqual([sentTo(newcomer.workspaceId), sentTo(hub.workspaces.get(String(original.id)))], [[], []], 'sent to neither: the Master decides again');
+
+        // A session whose launch can never attest is said to be that at once.
+        launchBehaviour = (project) => { hub.anotherSession(project); return { session: store.sessions.getActive(project.id), error: null }; };
+        const mute = await consented();
+        await gateway.tick();
+        await gateway.tick();
+        assert.deepEqual([launchOf(mute.routeId).state, launchOf(mute.routeId).failureCode], ['failed', 'ready-not-applicable']);
+      } finally { restore(); }
+    });
+
+    it('every condition is asked again immediately before launching, and while waiting', async () => {
+      try {
+        const lane = (blocked, stopped) => () => ({ ...realControl(), blockingOf: () => ({ blocked, stopped, code: stopped ? 'CONTROL_STOPPED' : 'CONTROL_HELD' }) });
+        const BEFORE = [
+          ['project-archived', (c) => store.projects.archive(c.project.id), () => {}],
+          ['project-opted-out', (c) => db().prepare("INSERT INTO bridge_project_optouts (project_id, set_by, set_at) VALUES (?, 'operator', ?)").run(c.project.id, new Date().toISOString()), () => {}],
+          ['held', () => { gateway._deps.controlState = lane(true, false); }, () => { gateway._deps.controlState = realControl; }],
+          ['stopped', () => { gateway._deps.controlState = lane(true, true); }, () => { gateway._deps.controlState = realControl; }],
+          ['control-unavailable', () => { gateway._deps.controlState = () => ({ blockingOf: () => { throw new Error('locked'); } }); }, () => { gateway._deps.controlState = realControl; }],
+          ['wrap-running', () => { gateway._deps.sessions = () => ({ ...realSessions(), getWrapRunStatus: () => ({ running: true }) }); }, () => { gateway._deps.sessions = realSessions; }]
+        ];
+        for (const [code, arrange, undo] of BEFORE) {
+          launched = [];
+          const c = await consented();
+          arrange(c);
+          try {
+            await gateway.tick();
+            assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode, launched.length], ['failed', code, 0], `${code}: refused before anything is launched`);
+            assert.equal(store.sessions.getActive(c.project.id), null);
+          } finally { undo(); }
+        }
+        // While waiting: a lane held after the launch stops the message being sent, READY or not.
+        launched = [];
+        const c = await consented();
+        await gateway.tick();
+        const session = store.sessions.getActive(c.project.id);
+        becomesReady(session.id);
+        gateway._deps.controlState = lane(true, false);
+        await gateway.tick();
+        gateway._deps.controlState = realControl;
+        assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode], ['failed', 'held']);
+        assert.deepEqual(sentTo(hub.workspaces.get(String(session.id))), []);
+      } finally { restore(); }
+    });
+
+    it('one launch is in flight on the install: the rest wait in the order consent was adopted, and each is judged when its turn comes', async () => {
+      try {
+        const first = await consented();
+        const second = await consented();
+        const third = await consented();
+        await gateway.tick();
+        assert.deepEqual([first, second, third].map((c) => launchOf(c.routeId).state), ['waiting-ready', 'queued', 'queued']);
+        assert.equal(launched.length, 1);
+        const read = await tc(['bridge', 'read', second.routeId]);
+        assert.match(read.stdout, new RegExp(`launch of project #${second.project.id}: consented, waiting its turn`), 'a waiting launch is shown as that');
+        for (let i = 0; i < 3; i++) await gateway.tick();
+        assert.equal(launched.length, 1, 'nothing overtakes the one in flight');
+        // The third's project is archived while it waits: judged when its turn comes, not before.
+        store.projects.archive(third.project.id);
+        becomesReady(store.sessions.getActive(first.project.id).id);
+        await gateway.tick();
+        assert.deepEqual([first, second, third].map((c) => launchOf(c.routeId).state), ['dispatched', 'waiting-ready', 'queued']);
+        assert.deepEqual(launched.map((args) => args[0].id), [first.project.id, second.project.id], 'in the order consent was adopted');
+        becomesReady(store.sessions.getActive(second.project.id).id);
+        await gateway.tick();
+        assert.deepEqual([first, second, third].map((c) => [launchOf(c.routeId).state, launchOf(c.routeId).failureCode]), [['dispatched', null], ['dispatched', null], ['failed', 'project-archived']]);
+        assert.equal(launched.length, 2);
+      } finally { restore(); }
+    });
+
+    it('closing the message, a restart, or the bridge being switched off never leaves a launch that runs later', async () => {
+      try {
+        // Closed while queued behind another: abandoned, never launched.
+        const ahead = await consented();
+        const closed = await consented();
+        await gateway.tick();
+        const res = await masterWrites(closed.routeId, 'close', { expectedVersion: version(closed.routeId) });
+        assert.equal(res.body.route.state, 'closed');
+        assert.equal(launchOf(closed.routeId).state, 'abandoned');
+        // A restart in the middle: nothing the gateway remembered matters, and nothing is launched twice.
+        gateway._reset();
+        await gateway.tick();
+        assert.equal(launched.length, 1);
+        assert.equal(launchOf(ahead.routeId).state, 'waiting-ready');
+        // The bridge is switched off with a launch in flight and another consented.
+        const waiting = await consented();
+        assert.equal((await asOperator('POST', '/api/bridge/operator/disable')).status, 200);
+        await gateway.tick();
+        assert.deepEqual([launchOf(ahead.routeId).state, launchOf(waiting.routeId).state], ['abandoned', 'abandoned']);
+        const session = store.sessions.getActive(ahead.project.id);
+        assert.ok(session, 'the session already started is left as it is');
+        assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
+        becomesReady(session.id);
+        for (let i = 0; i < 2; i++) await gateway.tick();
+        assert.deepEqual(sentTo(hub.workspaces.get(String(session.id))), [], 'switching it back on revives nothing');
+        assert.equal(launched.length, 1);
+        assert.equal(store.sessions.getActive(waiting.project.id), null);
+      } finally { restore(); }
+    });
+
+    it('reads what the real launch function answers: a session under `session`, or an `error`', () => {
+      // The stand-in above is only as good as this: what `sessions.launchSession` really returns, here for a refusal.
+      const refused = require('../lib/sessions').launchSession(`No Such Project ${++seq}`, { primePrompt: true, owner: null });
+      assert.deepEqual([refused.session, typeof refused.error], [null, 'string']);
+      assert.ok(!('sessionId' in refused), 'there is no sessionId at the top of its answer');
+      assert.match(read('lib/bridge-gateway.js'), /const sessionId = result && result\.session \? result\.session\.id : null;/);
+      assert.match(read('server.js'), /sessionId: result\.session\.id,/, 'which is how the launch route reads it too');
+      // And both launch a session after the same warm-up, by the same function.
+      assert.match(read('server.js'), /await launchWarmup\.warmForLaunch\(project\);/);
+      assert.match(read('lib/bridge-gateway.js'), /await require\('\.\/launch-warmup'\)\.warmForLaunch\(project\);\n\s+return require\('\.\/sessions'\)\.launchSession\(project\.name, \{ primePrompt: true, owner: null \}\);/);
+    });
+
+    it('the three verbs over the command line', async () => {
+      try {
+        const project = stopped();
+        const routeId = (await operatorWrites(`m${++seq}`, `@${project.name} please run the nightly`)).body.routeId;
+        const offline = await tc(['bridge', 'route', routeId, '--version', String(version(routeId)), '--to', String(project.id)]);
+        assert.deepEqual([offline.code, /refused \[TARGET_OFFLINE\]/.test(offline.stderr)], [2, true]);
+        const ask = await tc(['bridge', 'ask-launch', routeId, '--version', String(version(routeId)), '--project', project.name]);
+        assert.equal(ask.code, 0, ask.stderr);
+        assert.match(ask.stdout, /The operator is being asked whether to launch a session for route .*; the message stays held and nothing is launched; now v\d+\./);
+        assert.match((await tc(['bridge', 'read', routeId])).stdout, new RegExp(`you asked the operator whether to launch project #${project.id} for it`));
+        const item = about(await claimAll(), routeId).find((i) => i.kind === 'question');
+        assert.equal((await ackItem(item, 'dl-cli')).status, 200);
+        const reply = await operatorReplies('dl-cli', 'yes');
+        const bare = await tc(['bridge', 'launch', routeId, '--version', String(version(routeId))]);
+        assert.deepEqual([bare.code, /needs --answered-by/.test(bare.stderr)], [1, true], 'a launch names the reply it rests on');
+        const go = await tc(['bridge', 'launch', routeId, '--version', String(version(routeId)), '--answered-by', reply]);
+        assert.equal(go.code, 0, go.stderr);
+        assert.match(go.stdout, /the server will launch the session in turn, wait until it is ready, and then send the message on\. Nothing is sent yet/);
+        assert.deepEqual(launched, [], 'the command line launched nothing either');
+
+        const other = await asked();
+        const no = await operatorReplies(other.posted, 'cancel');
+        const declined = await tc(['bridge', 'decline', other.routeId, '--version', String(version(other.routeId)), '--answered-by', no]);
+        assert.equal(declined.code, 0, declined.stderr);
+        assert.match(declined.stdout, /is closed on the operator's answer: nothing was launched and nothing was sent on/);
+        const stray = await tc(['bridge', 'ask', routeId, '--version', '1', '--text', 'x', '--project', 'y']);
+        assert.deepEqual([stray.code, /unexpected --project/.test(stray.stderr)], [1, true]);
+      } finally { restore(); }
     });
   });
 
