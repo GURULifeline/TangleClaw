@@ -149,8 +149,9 @@ credential or permission; and it grants nothing.
 
 **They are managed by asking the Master in the chat.** The operator writes to `@master`:
 "remember @TC-ARC means TangleClaw Architect", "list nicknames", "what is @tc-arc?", "rename
-@tc-arc to @arch", "forget @tc-arc". The Master routes the message to itself, makes the change
-with `tc bridge nickname`, and answers in the same conversation with `tc bridge answer`.
+@tc-arc to @arch", "forget @tc-arc". When the message says exactly one thing, the Master routes
+it to itself, makes the change with `tc bridge nickname`, and answers in the same conversation
+with `tc bridge answer`. When it does not, the Master asks first, as set out below.
 
 **Every change rests on one operator message,** named by `--answered-by`, and the check is
 mechanical:
@@ -909,7 +910,7 @@ request.
 | `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Switching it on is refused `409 BRIDGE_DISABLED` while the bridge is off; switching it off is always taken. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
-| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a nickname, for putting right what was set in conversation. `master` is reserved, the destination must be one the bridge may reach, and a new name may not be a reachable project's name, slug or id (`409 NICKNAME_COLLIDES`). Recorded as the operator's. |
+| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a nickname, for putting right what was set in conversation. The name may be written with its `@` or without. `master`, `set`, `rename` and `forget` are reserved (`409 ALIAS_RESERVED`), the destination must be one the bridge may reach, and a new name may not be a number or a reachable project's name or slug (`409 NICKNAME_COLLIDES`). Recorded as the operator's. |
 | `POST /api/bridge/operator/optouts`, `DELETE .../optouts/:projectId` | Takes a project out of reach of the bridge, or puts it back. `{project}` is a project id (`400 UNKNOWN_PROJECT` otherwise); putting back one that is not out is `404 OPTOUT_NOT_FOUND`. Audited. |
 | `POST /api/bridge/operator/pins`, `DELETE .../pins/:pinId` | Sets a pin for one conversation, or for every conversation when no `conversationKey` is given; revokes any active pin, the Master's included. |
 

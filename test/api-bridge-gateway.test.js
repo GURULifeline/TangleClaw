@@ -2626,6 +2626,7 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.deepEqual([out.status, out.body.code], [409, 'DESTINATION_OPTED_OUT'], 'a nickname is not given to a project out of reach');
       const outByName = await nick('', { name: fine, to: target.project.name, answeredBy: asked });
       assert.deepEqual([outByName.status, outByName.body.code], [409, 'DESTINATION_OPTED_OUT'], 'however the project is named');
+      assert.match(outByName.body.error, /^The nickname was not changed\. .*out of reach of the bridge by the operator's choice/, 'and the refusal says why, as any other write to that project is told');
       // Every one of those refusals is on the audit, against the message, with the nickname it was about and none of the message's words.
       const refusals = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'nickname-set' AND route_id = ? AND outcome <> 'applied' ORDER BY audit_seq").all(asked);
       assert.deepEqual([...new Set(refusals.map((r) => r.outcome))].sort(), ['destination-opted-out', 'nickname-collides', 'nickname-exists', 'nickname-reserved', 'unknown-destination']);
@@ -2733,8 +2734,10 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `Op${seq}`, to: target.project.id } })).status, 200);
       const mine = bridgeStore.aliases.record(op);
       assert.deepEqual([mine.createdBy, mine.changedBy, mine.confirmedRouteId, mine.display], ['operator', 'operator', null, `O${op.slice(1)}`]);
-      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: op, to: 'master' } })).status, 200);
+      // Written with its @ or without, it is the same nickname: one reading for the operator's route and the Master's.
+      assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `@${op}`, to: 'master' } })).status, 200);
       assert.deepEqual(bridgeStore.aliases.record(op).destination, { kind: 'master', projectId: null });
+      assert.equal(bridgeStore.aliases.record(`@${op}`), null, 'no second nickname with the @ in its name');
       // Pointing a nickname somewhere else keeps who first made it and when; only who changed it last moves.
       bridgeStore.aliases.set(`old-${op}`, { kind: 'master', projectId: null }, { by: 'master', confirmedRouteId: asked, display: `old-${op}`, at: '2026-01-01T00:00:00.000Z' });
       assert.equal((await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias: `old-${op}`, to: target.project.id } })).status, 200);

@@ -512,7 +512,8 @@ have the reply reach the Master as a reply to that milestone.
 - **An explicit `@name` takes precedence only when it resolves to exactly one current
   destination,** and the Master remains the broker. The reply context is kept either way. A
   name that is ambiguous, unknown or stale is a typed refusal to resolve
-  (`address-ambiguous`, `address-unresolved`) that waits for the Master; it is never silently
+  (`address-ambiguous`, `address-unresolved`, or `address-out-of-reach` since Decision 9a's
+  reachability rule) that waits for the Master; it is never silently
   diverted or defaulted.
 - **The mapping lasts as long as a reply may arrive,** which is without limit, so it is never
   removed. It holds ids and no text. This is the one record Decision 20's retention does not
@@ -689,7 +690,7 @@ Against the schema `main` actually has:
   reads it. The upgrade into v54 drops it by name, a fresh v54 store is never given it, and from
   v54 on its presence fails the shape check. v52's own record of what it required is unchanged.
 - **Routing adds** the route record of P1, separately clearable bodies, conversation-scoped
-  pins, operator-managed global aliases and pins, the Master principal's verification material,
+  pins, global pins the operator manages and nicknames (Decision 9a), the Master principal's verification material,
   and the audit of every `tc bridge` write.
 
 ### P6. Relation to #2037
