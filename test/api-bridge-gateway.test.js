@@ -2585,6 +2585,11 @@ describe('bridge API: the round trip (#2031)', () => {
       // The original instruction is still the operator's message to the Master: taken, and answered in the same conversation.
       assert.equal(bridgeStore.routes.get(asked).state, 'awaiting-master');
       assert.equal((await masterWrites(asked, 'route', { expectedVersion: version(asked), to: 'master' })).status, 200);
+      // One operator request, one change: the instruction whose question was answered is used up with the reply.
+      const before = names();
+      const second = await nick('', { name: `${al}-second`, to: one.project.id, answeredBy: asked });
+      assert.deepEqual([second.status, second.body.code], [409, 'INSTRUCTION_USED'], 'the instruction does not authorise a second change after its reply authorised the first');
+      assert.equal(names(), before);
       assert.equal((await masterWrites(asked, 'answer', { expectedVersion: version(asked), text: `Stored: @${al} is ${one.project.name}.` })).status, 200);
     });
 
@@ -2597,6 +2602,9 @@ describe('bridge API: the round trip (#2031)', () => {
       const before = names();
       const CASES = [
         ['master', 'NICKNAME_RESERVED'], ['@MASTER', 'NICKNAME_RESERVED'],
+        // The words `tc bridge nickname` reads as what to do, and any number: a number is a project's id, whoever has it.
+        ['set', 'NICKNAME_RESERVED'], ['Rename', 'NICKNAME_RESERVED'], ['forget', 'NICKNAME_RESERVED'],
+        ['987654321', 'NICKNAME_COLLIDES'], ['57', 'NICKNAME_COLLIDES'],
         [taken, 'NICKNAME_EXISTS'],
         [other.project.name, 'NICKNAME_COLLIDES'], [other.project.name.toUpperCase(), 'NICKNAME_COLLIDES'],
         [bridgeReach.slugOf(other.project.name), 'NICKNAME_COLLIDES'], [String(other.project.id), 'NICKNAME_COLLIDES']
@@ -2616,6 +2624,22 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
       const out = await nick('', { name: fine, to: target.project.id, answeredBy: asked });
       assert.deepEqual([out.status, out.body.code], [409, 'DESTINATION_OPTED_OUT'], 'a nickname is not given to a project out of reach');
+      // Every one of those refusals is on the audit, against the message, with the nickname it was about and none of the message's words.
+      const refusals = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'nickname-set' AND route_id = ? AND outcome <> 'applied' ORDER BY audit_seq").all(asked);
+      assert.deepEqual([...new Set(refusals.map((r) => r.outcome))].sort(), ['destination-opted-out', 'nickname-collides', 'nickname-exists', 'nickname-reserved', 'unknown-destination']);
+      assert.ok(refusals.every((r) => typeof JSON.parse(r.detail_json).nickname === 'string'), 'each names the nickname');
+      assert.equal(JSON.parse(refusals.at(-1).detail_json).nickname, fine);
+      // The operator's own route holds a new name to the same rule, under its own codes for what it always refused.
+      for (const [alias, code] of [['set', 'ALIAS_RESERVED'], ['Forget', 'ALIAS_RESERVED'], ['4242', 'NICKNAME_COLLIDES'], [other.project.name, 'NICKNAME_COLLIDES'], ['has space', 'BAD_ALIAS']]) {
+        const res = await asOperator('POST', '/api/bridge/operator/aliases', { body: { alias, to: other.project.id } });
+        assert.equal(res.body.code, code, alias);
+      }
+      // A nickname whose project is out of reach is refused as a destination for the reason it is out of reach, not as an unknown name.
+      const viaNickname = (await operatorWrites(`m${++seq}`, '@nobody-known hello')).body.routeId;
+      bridgeStore.aliases.set(`stale-${fine}`, { kind: 'project', projectId: target.project.id });
+      const routedByName = await masterWrites(viaNickname, 'route', { expectedVersion: version(viaNickname), to: `stale-${fine}` });
+      assert.deepEqual([routedByName.status, routedByName.body.code], [409, 'DESTINATION_OPTED_OUT']);
+      bridgeStore.aliases.remove(`stale-${fine}`);
       assert.equal((await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } })).status, 200);
       assert.equal(names(), before, 'none of that stored anything');
       // And none of it used the operator's message up: the corrected change still goes through on it.
@@ -2665,8 +2689,13 @@ describe('bridge API: the round trip (#2031)', () => {
       const again = await instruction('@master forget it again');
       const gone = await nick(`/${second}/forget`, { answeredBy: again });
       assert.deepEqual([gone.status, gone.body.code], [404, 'NICKNAME_NOT_FOUND']);
-      assert.deepEqual(db().prepare("SELECT op FROM bridge_audit WHERE op LIKE 'nickname-%' AND outcome = 'applied' AND route_id IN (?, ?, ?, ?) ORDER BY audit_seq").all(set, rename, recase, forget).map((r) => r.op),
-        ['nickname-set', 'nickname-rename', 'nickname-rename', 'nickname-forget'], 'each change is on the audit, against the message that asked for it');
+      const trail = db().prepare("SELECT op, detail_json FROM bridge_audit WHERE op LIKE 'nickname-%' AND outcome = 'applied' AND route_id IN (?, ?, ?, ?) ORDER BY audit_seq").all(set, rename, recase, forget);
+      assert.deepEqual(trail.map((r) => r.op), ['nickname-set', 'nickname-rename', 'nickname-rename', 'nickname-forget'], 'each change is on the audit, against the message that asked for it');
+      assert.deepEqual(trail.map((r) => JSON.parse(r.detail_json)).map((d) => [d.nickname || null, d.was || null, d.to, d.projectId]),
+        [[first, null, 'project', target.project.id], [second, first, 'project', target.project.id], [second, second, 'project', target.project.id], [null, second, 'project', target.project.id]],
+        'each says the name before and after and what it pointed at');
+      const refusedRows = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op LIKE 'nickname-%' AND outcome <> 'applied' AND route_id IN (?, ?) ORDER BY audit_seq").all(rename, again);
+      assert.deepEqual(refusedRows.map((r) => [r.outcome, JSON.parse(r.detail_json).was]), [['nickname-not-found', `nope-${first}`], ['nickname-collides', first], ['nickname-not-found', second]]);
     });
 
     it('the same over the command line, and the operator can see and put right what was stored', async () => {

@@ -153,8 +153,16 @@ describe('bridge: what may be reached, and how it is named (#2031)', () => {
     // A nickname outlives nothing: its project out of reach, it names nothing, and says why when asked directly.
     store.projects.archive(arc.id);
     assert.deepEqual([one('tc-arc'), one('pilot')], [[], [{ kind: 'project', projectId: pilot.id }]], 'a stale nickname no longer makes the name ambiguous either');
-    assert.deepEqual(reach.resolve('tc-arc'), { refusal: 'unknown' });
+    assert.deepEqual([reach.resolve('tc-arc'), reach.whyUnnamed('tc-arc')], [{ refusal: 'archived' }, 'archived'], 'asked for directly, it says why, the same way the gateway does');
     assert.deepEqual(reach.resolve(arc.id), { refusal: 'archived' });
+    assert.deepEqual([reach.resolve('nobody-at-all'), reach.whyUnnamed('nobody-at-all')], [{ refusal: 'unknown' }, null]);
+
+    // What a nickname may be called. Digits alone are a project's id, whether or not a project has that id yet.
+    assert.deepEqual(['master', 'set', 'rename', 'forget'].map((k) => reach.nicknameClash(k)), ['reserved', 'reserved', 'reserved', 'reserved']);
+    assert.deepEqual([String(pilot.id), '987654321', '0'].map((k) => reach.nicknameClash(k)), ['collides', 'collides', 'collides']);
+    assert.deepEqual([reach.nicknameClash('pilot'), reach.nicknameClash('free-name'), reach.nicknameClash('tc-arc'), reach.nicknameClash('tc-arc', 'tc-arc')], ['exists', null, 'exists', null]);
+    bridgeStore.aliases.remove('pilot');
+    assert.deepEqual([reach.nicknameClash('pilot'), reach.nicknameClash('PILOT'.toLowerCase())], ['collides', 'collides'], 'a reachable project\'s name');
   });
 
   it('what the Master names in a write is resolved by the same rule, and a refusal says why', () => {

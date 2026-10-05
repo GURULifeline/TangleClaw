@@ -403,6 +403,12 @@ derived from the route table, so a route added to it, or taken from it, is a dec
 
 ### 18. Pins and aliases (R5)
 
+> **Superseded in part by Decision 9a (operator ruling, 2026-10-05).** The Master may now store,
+> rename and forget a nickname, but only with an operator message behind each change, as 9a
+> sets out, and a nickname is routing metadata that grants nothing. What stands unchanged:
+> global pins are the operator's alone; exact names and ids come from the registry; the Master
+> cannot treat Discord text as authority to change policy. The text below is kept as decided.
+
 - **Persistent global aliases and pins are the operator's alone**, managed through an
   authenticated local UI or CLI, and never through Discord.
 - **Exact project names and ids come mechanically from the registry.**

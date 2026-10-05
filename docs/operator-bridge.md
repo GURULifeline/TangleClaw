@@ -134,7 +134,7 @@ kept for it. A Medusa send from anything else under such an id is refused before
 An address is a leading `@name` that names **exactly one** destination the bridge may reach:
 
 - `@master`, which always means the Project Master and cannot be an alias;
-- an operator alias;
+- a nickname, which the operator asks the Master for in the chat (see "Nicknames");
 - a project's exact name, without regard to case;
 - a project's slug: its name in lower case, with each run of anything but a letter or a digit
   made one dash. It counts only while exactly one reachable project has it;
@@ -162,7 +162,13 @@ mechanical:
   Master asks with `tc bridge ask` and names the operator's reply. Adopting it settles the
   question and closes the reply's route with the write, by the same correlation as any answer.
 
-One message authorises one change. Whether its words ask for that change is the Master's
+The order matters, because a question can only be asked about a message that still waits for
+the Master. A message that says one thing is routed to the Master and then acted on. A message
+that does not is asked about first; the change is made on the reply, and only then is the
+first message routed to the Master and answered.
+
+One message authorises one change, whichever way it was used: an instruction whose clarifying
+reply authorised a change authorises no second one of its own. Whether its words ask for that change is the Master's
 reading; the audit records the nickname, the target and the message's route id, and none of
 its text.
 
@@ -171,13 +177,14 @@ its text.
 | The message is not one the Master has routed to itself, is closed, or does not exist | `409 NOT_AN_INSTRUCTION` |
 | The message has already authorised a nickname change | `409 INSTRUCTION_USED` |
 | A reply that is not the answer to an open clarifying question | `409 NOT_AN_ANSWER`, `QUESTION_SETTLED`, `QUESTION_EXPIRED`, `QUESTION_PURPOSE` |
-| The name is `master` | `409 NICKNAME_RESERVED` |
+| The name is `master`, or `set`, `rename` or `forget`, which `tc bridge nickname` reads as what to do | `409 NICKNAME_RESERVED` |
 | The name is already a nickname | `409 NICKNAME_EXISTS` |
-| The name is a reachable project's name, slug or id | `409 NICKNAME_COLLIDES` |
+| The name is a reachable project's name or slug, or is all digits. A number is a project's id, whether or not a project has that id yet | `409 NICKNAME_COLLIDES` |
 | The name is not 1 to 64 letters, digits, dots, dashes or underscores | `400 BAD_NICKNAME` |
 | No such nickname, on a rename or a forget | `404 NICKNAME_NOT_FOUND` |
 | The target is not something the bridge may reach | As for any destination, below |
 
+Every refusal is on the audit, against the operator's message, with the nickname it was about.
 A refused change uses nothing up: the same message can still authorise the corrected one. A
 name is never allowed to mean two things when it is written; if a project is later created or
 renamed onto an existing nickname, the name is ambiguous and is never guessed at.
@@ -777,8 +784,8 @@ and what follows is only the destination the bridge suggests with it.
 
 A leading `@name` is the suggestion instead of any of these when it names exactly one current
 destination, and what the message answers is recorded all the same. An `@name` that names nothing, or more
-than one thing, is never guessed at: the route waits for the Master with `address-unresolved`
-or `address-ambiguous`, still knowing what it answers. A reply changes nothing about the candidate it answers and releases nothing again.
+than one thing, is never guessed at: the route waits for the Master with `address-unresolved`,
+`address-ambiguous` or `address-out-of-reach`, still knowing what it answers. A reply changes nothing about the candidate it answers and releases nothing again.
 `tc bridge read <route-id>` shows what a route answers, and the Master's notice says so in
 fixed words.
 
@@ -929,9 +936,9 @@ v54 shape is a superset of v53's.
 
 v54 also carries what the Master's questions rest on. `bridge_questions` holds each question's
 standing; `bridge_outbound`, `bridge_outbound_parts` and `bridge_route_reply_context` gain the
-`question` kind and the id of the question an item asks. `bridge_aliases` has columns for who
-last changed a nickname, when, and on which operator message; nothing writes them yet, and
-rows from an earlier store come through with them empty. `bridge_launches` holds each
+`question` kind and the id of the question an item asks. `bridge_aliases` records who last
+changed a nickname, when, on which operator message when the Master changed it, and the name
+as it was typed; rows from an earlier store come through with those empty. `bridge_launches` holds each
 consented launch and how it stands. `bridge_project_optouts` holds the projects the operator has
 taken out of reach, written only by the operator's routes. The store itself holds the rules that must not depend on a caller: one open
 question per message, one use of an operator's reply, and a settled question never reopened.
@@ -968,7 +975,7 @@ check.
 | `bridge_outbound` | What waits for the helper. Each row has its own idempotency key; `hub_id` is optional. At most one `status` row per route. |
 | `bridge_candidates` | Facts a session offers the Master. |
 | `bridge_candidate_receipts` | The receipts a candidate rests on, each by kind, id and digest. Immutable. |
-| `bridge_aliases`, `bridge_pins` | Routing policy. Global entries are the operator's; the Master may hold a conversation pin only. One pin is active per scope and conversation. A global pin names one conversation, or none, which means all of them. |
+| `bridge_aliases`, `bridge_pins` | Routing policy. Global pins are the operator's; the Master may hold a conversation pin, and may change a nickname only with an operator message behind it. One pin is active per scope and conversation. A global pin names one conversation, or none, which means all of them. |
 | `bridge_audit` | Every bridge write. Never updated; removed only by a compaction. |
 | `bridge_audit_anchor` | One row, always: how far compaction has reached, how many audit rows have left in total, and a digest chained across every compaction. It only moves forward. |
 
