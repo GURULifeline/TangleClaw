@@ -41,8 +41,8 @@ const REMEDY = "require('node:assert/strict')";
  */
 const BARE_REQUIRE = /\brequire\s*\(\s*(['"`])node:assert\1\s*\)/;
 
-/** A waiver for this check, with the reason it must carry. */
-const WAIVER = new RegExp(`prawduct:allow\\s+(?:[\\w/-]+\\s*,\\s*)*${WAIVER_REF}(?:\\s*,\\s*[\\w/-]+)*\\s+--\\s*(\\S.*)$`);
+/** A waiver for this check, and whatever follows it as the reason. */
+const WAIVER = new RegExp(`prawduct:allow\\s+(?:[\\w/-]+\\s*,\\s*)*${WAIVER_REF}(?:\\s*,\\s*[\\w/-]+)*\\s+--(.*)$`);
 
 /**
  * Every `*.test.js` file under a directory, at any depth, in a stable order.
@@ -76,13 +76,14 @@ function inComment(line, index) {
 }
 
 /**
- * The reason a line gives for waiving this check, if it gives one.
+ * The reason a line gives for waiving this check. A waiver that gives none
+ * is not one.
  * @param {string|undefined} line - A source line.
  * @returns {string|null}
  */
 function waiverReason(line) {
   const waived = line === undefined ? null : WAIVER.exec(line);
-  return waived ? waived[1].trim() : null;
+  return (waived && waived[1].trim()) || null;
 }
 
 /**

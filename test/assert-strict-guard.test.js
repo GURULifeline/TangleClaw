@@ -85,6 +85,8 @@ describe('assert-strict-guard (#1377)', () => {
     // With no argument it checks this repository's own tests.
     const own = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
     assert.equal(own.status, 0, own.stderr);
+    const counted = /^assert-strict-guard: (\d+) test file\(s\), none requires bare /m.exec(own.stdout);
+    assert.ok(counted && Number(counted[1]) === guard.scan(__dirname).scanned && Number(counted[1]) > 500, own.stdout);
   });
 
   it('reads only test files, and leaves what is installed alone', () => {
