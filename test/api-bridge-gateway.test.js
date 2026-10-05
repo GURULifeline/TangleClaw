@@ -2627,9 +2627,17 @@ describe('bridge API: the round trip (#2031)', () => {
       const outByName = await nick('', { name: fine, to: target.project.name, answeredBy: asked });
       assert.deepEqual([outByName.status, outByName.body.code], [409, 'DESTINATION_OPTED_OUT'], 'however the project is named');
       assert.match(outByName.body.error, /^The nickname was not changed\. .*out of reach of the bridge by the operator's choice/, 'and the refusal says why, as any other write to that project is told');
+      // A scope that cannot be resolved is refused with what is wrong with it, not with one fixed reason.
+      const scopeWas = bridgeReach._deps.masterScope;
+      bridgeReach._deps.masterScope = () => ({ type: 'not-a-scope' });
+      try {
+        const noScope = await nick('', { name: fine, to: other.project.id, answeredBy: asked });
+        assert.deepEqual([noScope.status, noScope.body.code], [409, 'SCOPE_UNRESOLVED']);
+        assert.match(noScope.body.error, /^The nickname was not changed\. The Project Master's scope cannot be resolved \(it is not a scope the bridge understands\)/);
+      } finally { bridgeReach._deps.masterScope = scopeWas; }
       // Every one of those refusals is on the audit, against the message, with the nickname it was about and none of the message's words.
       const refusals = db().prepare("SELECT outcome, detail_json FROM bridge_audit WHERE op = 'nickname-set' AND route_id = ? AND outcome <> 'applied' ORDER BY audit_seq").all(asked);
-      assert.deepEqual([...new Set(refusals.map((r) => r.outcome))].sort(), ['destination-opted-out', 'nickname-collides', 'nickname-exists', 'nickname-reserved', 'unknown-destination']);
+      assert.deepEqual([...new Set(refusals.map((r) => r.outcome))].sort(), ['destination-opted-out', 'nickname-collides', 'nickname-exists', 'nickname-reserved', 'scope-unresolved', 'unknown-destination']);
       assert.ok(refusals.every((r) => typeof JSON.parse(r.detail_json).nickname === 'string'), 'each names the nickname');
       assert.equal(JSON.parse(refusals.at(-1).detail_json).nickname, fine);
       // The operator's own route holds a new name to the same rule, under its own codes for what it always refused.

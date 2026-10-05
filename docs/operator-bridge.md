@@ -168,6 +168,10 @@ the Master. A message that says one thing is routed to the Master and then acted
 that does not is asked about first; the change is made on the reply, and only then is the
 first message routed to the Master and answered.
 
+A reply to a clarifying question authorises a change whatever the first message was addressed
+to: what counts is that the Master asked the question about a message still waiting for it and
+the operator answered it, not where that message would have gone.
+
 One message authorises one change, whichever way it was used: an instruction whose clarifying
 reply authorised a change authorises no second one of its own. Whether its words ask for that change is the Master's
 reading; the audit records the nickname, the target and the message's route id, and none of
