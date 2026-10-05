@@ -65,6 +65,8 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **The runbook test that types each pasted block into an interactive zsh is announced in the skip ledger** (#2031). It needs macOS, its zsh and `expect`, so it is skipped on the Linux runner; `test/skip-ledger.json` now says why and where it runs, as the skip audit requires. The structural test of every block and the test of every one-line command run everywhere.
+
 - **The bridge's Master-surface tests no longer depend on a Project Master running on the machine that runs them** (#2031). `test/api-bridge.test.js` and `test/bridge-candidates.test.js` left the question "is a Master live" to the machine's own tmux. They passed where one was running and failed on every CI runner, where tmux answers that none is and the credential is revoked, as it should be. Both now say what tmux answers through `test/_master-liveness.js`, and the API suite tests the gate directly: a Master that is gone loses its credential, and tmux not answering changes nothing. Production liveness is unchanged.
 - **The operator bridge has its Discord helper** (#2031, ADR 0023). `bin/tc-bridge-helper` is built and tested against the real bridge routes and a stand-in for Discord. It has not been run against Discord, nothing installs it, and the bridge is still off by default: Rule #145's interim procedure remains the only Discord path. `docs/operator-bridge-helper.md` has setup, operation and removal.
   - **In.** It listens to one channel over the Gateway and hands over only the allowlisted author's messages, judged on ids before the text is read. The bridge checks the same three ids again.
