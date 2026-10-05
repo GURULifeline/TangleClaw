@@ -45,6 +45,10 @@ All notable changes to TangleClaw are documented in this file.
   - The alert records what was true when it was raised and is not repeated or rewritten if the hold changes later. It sends no message and costs no agent turn.
   - Blocking and critical mail keep their thresholds. Mail to a workspace this host cannot supervise is still not escalated from here.
 
+### Security
+
+- **The public website's Next.js and DOMPurify are patched** (#2107). `website/` moves `next` and `eslint-config-next` from 16.3.5 to 16.3.6, which fixes a critical remote code execution in `next/og`'s `ImageResponse` (GHSA-vcvr-r3jv-pc5j), and its lockfile now resolves the `dompurify` that `posthog-js` brings in to 3.4.16, which fixes a low-severity DOM XSS (GHSA-p98j-92pf-mc4p). The site does not use `next/og`, so no path to the first was found, but the fix is not left out of a release. Only the website's manifest and lockfile change; the TangleClaw server has no dependencies and is not affected.
+
 ### Fixed
 
 - **A server restart no longer nudges a session again for mail it already fetched** (#2086). The wake monitor keeps its "already nudged" mark in memory, and after a restart it asks the exchange record instead. The record answered by counting messages still waiting to be read. The Hub redelivers mail that was never marked handled, so a message the recipient had fetched came back as unread with nothing waiting to be read, and every restart typed another nudge, outside the re-arm budget. The record is now asked about each message in the inbox by its own id, and a message the recipient has read or acknowledged counts as theirs whether or not it was ever nudged. New mail and mail with no exchange record are still nudged.
