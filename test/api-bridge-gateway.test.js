@@ -2741,7 +2741,11 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.deepEqual([direct.outcome, direct.detail.instructionRouteId], ['applied', renameIt.routeId]);
       const committed = db().prepare('SELECT state, version, destination_kind, resolved_by FROM bridge_routes WHERE route_id = ?').get(renameIt.routeId);
       assert.deepEqual({ ...committed }, { state: 'accepted', version: stood + 1, destination_kind: 'master', resolved_by: 'master' });
-      assert.equal((await gateway.advance(renameIt.routeId)).state, 'routed', 'and the gateway carries it from there');
+      // Had the first attempt stopped there, the retry with the same request id finishes the carrying and changes nothing else.
+      const retried = await call('POST', `/api/bridge/master/nicknames/${name}/rename`, { headers: asMaster(), body: { requestId: `req-direct-${seq}-0000`, to: `${name}-b`, answeredBy: renameIt.reply } });
+      assert.deepEqual([retried.status, retried.body.replayed, retried.body.instruction.state], [200, true, 'routed'], JSON.stringify(retried.body));
+      assert.equal(bridgeStore.routes.get(renameIt.routeId).state, 'routed');
+      assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_audit WHERE route_id = ? AND op = 'route' AND outcome = 'applied'").get(renameIt.routeId).n, 1);
       const forgetIt = await heldAndAnswered('@master forget that one');
       const forgot = await nick(`/${name}-b/forget`, { answeredBy: forgetIt.reply });
       assert.deepEqual([forgot.status, forgot.body.via, forgot.body.instruction.state], [200, 'reply', 'routed'], JSON.stringify(forgot.body));
