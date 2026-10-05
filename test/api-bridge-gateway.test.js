@@ -302,7 +302,7 @@ describe('bridge API: the round trip (#2031)', () => {
   });
 
   it('refuses a release with nothing held, an unsafe or empty answer, and a second answer', async () => {
-    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const accepted = await operatorSays(`m${++seq}`, '@master hello');
     const routeId = accepted.body.routeId;
     const version = () => bridgeStore.routes.get(routeId).version;
     assert.equal((await masterWrites(routeId, 'release', { expectedVersion: version() })).body.code, 'NO_REPLY_HELD');
@@ -314,9 +314,39 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal((await claim()).body.items.length >= 1, true);
   });
 
+  it('an answer needs a routing decision behind it: a route nobody has routed cannot be answered, the Master\'s own included', async () => {
+    const version = (id) => bridgeStore.routes.get(id).version;
+    // An unaddressed message: suggested for the Master, and still waiting for the Master to say so.
+    const waiting = (await operatorWrites(`m${++seq}`, '@master what is the fleet doing?')).body.routeId;
+    assert.deepEqual([bridgeStore.routes.get(waiting).state, bridgeStore.audit.suggestionFor(waiting).to], ['awaiting-master', 'master']);
+    const early = await masterWrites(waiting, 'answer', { expectedVersion: version(waiting), text: 'All quiet.' });
+    assert.deepEqual([early.status, early.body.code, early.body.route.state], [409, 'NOT_ANSWERABLE', 'awaiting-master']);
+    assert.equal(store.getDb().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE route_id = ? AND kind = 'reply'").get(waiting).n, 0, 'nothing was queued for the operator');
+    assert.equal(bridgeStore.routes.body(waiting, 'answer'), null, 'and no answer text was stored');
+    // The same from the real tc, in the words the Master will see.
+    const typed = await tc(['bridge', 'answer', waiting, '--version', String(version(waiting)), '--text', 'All quiet.']);
+    assert.deepEqual([typed.code, /NOT_ANSWERABLE/.test(typed.stderr)], [2, true]);
+    // Routed to itself, it is answerable, and the audit shows the decision before the answer.
+    const routed = await masterWrites(waiting, 'route', { expectedVersion: version(waiting), to: 'master' });
+    assert.deepEqual([routed.status, routed.body.route.state], [200, 'routed']);
+    const answered = await masterWrites(waiting, 'answer', { expectedVersion: version(waiting), text: 'All quiet.' });
+    assert.deepEqual([answered.status, answered.body.route.state], [200, 'released']);
+    assert.deepEqual(bridgeStore.audit.forRoute(waiting).filter((a) => a.outcome === 'applied').map((a) => a.op), ['suggest', 'route', 'dispatch', 'answer']);
+    // A route that came back to the Master after a failed send is the same: it is routed again before anything is said for it.
+    const name = liveProject(`Gone${++seq}`).project.name;
+    hub.failSend = 'refused';
+    const back = (await operatorWrites(`m${++seq}`, `@${name} hello`)).body.routeId;
+    const sent = await masterWrites(back, 'route', { expectedVersion: version(back), to: name });
+    hub.failSend = null;
+    assert.equal(sent.body.route.state, 'awaiting-master', 'precondition: the send failed and the route is back');
+    assert.equal((await masterWrites(back, 'answer', { expectedVersion: version(back), text: 'It could not be delivered.' })).body.code, 'NOT_ANSWERABLE');
+    assert.equal((await masterWrites(back, 'route', { expectedVersion: version(back), to: 'master' })).status, 200);
+    assert.equal((await masterWrites(back, 'answer', { expectedVersion: version(back), text: 'It could not be delivered.' })).status, 200);
+  });
+
   it('lets the Master pin a conversation, and only a conversation', async () => {
     const alpha = liveProject(`Alpha${++seq}`);
-    const first = await operatorSays(`m${++seq}`, 'hello');
+    const first = await operatorSays(`m${++seq}`, '@master hello');
     const routeId = first.body.routeId;
     const pinned = await masterWrites(routeId, 'pin', { expectedVersion: bridgeStore.routes.get(routeId).version, to: alpha.project.id });
     assert.equal(pinned.status, 200);
@@ -345,7 +375,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal(released.code, 0, released.stderr);
     assert.match(released.stdout, /held reply .* is released to the operator as your answer/);
 
-    const own = (await operatorSays(`m${++seq}`, 'a question for the Master')).body.routeId;
+    const own = (await operatorSays(`m${++seq}`, '@master a question for the Master')).body.routeId;
     const pinned = await tc(['bridge', 'pin', own, '--version', version(own), '--to', alpha.project.name]);
     assert.equal(pinned.code, 0, pinned.stderr);
     const file = path.join(tmpDir, 'answer.txt');
@@ -501,7 +531,7 @@ describe('bridge API: the round trip (#2031)', () => {
      * @returns {Promise<{routeId: string, itemId: number}>}
      */
     const answered = async (text) => {
-      const routeId = (await operatorSays(`m${++seq}`, 'a question for the Master')).body.routeId;
+      const routeId = (await operatorSays(`m${++seq}`, '@master a question for the Master')).body.routeId;
       const done = await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text });
       assert.equal(done.body.route.state, 'released');
       const item = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE route_id = ? AND kind = 'reply'").get(routeId);
@@ -559,17 +589,20 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.ok(bridgeStore.routes.body(three.routeId, 'answer').text, 'and its answer is still held to be posted');
 
     // A circuit reset that withdraws what it caught closes the routes of the answers among them.
-    const claimed = (await claim()).body.items.find((i) => i.outboundId === three.itemId);
-    const reported = await call('POST', `/api/bridge/helper/outbound/${three.itemId}/failure`, { headers: asHelper(), body: { leaseId: claimed.leaseId, reason: 'chat-channel-missing' } });
+    // A route with its answer and one notice waiting: the helper will be holding the notice when the reset is asked for.
+    const caught = await answered('An answer the circuit catches.');
+    assert.equal(bridgeStore.outbound.enqueueStatus(caught.routeId, 'pending').created, true);
+    const claimed = (await claim()).body.items.find((i) => i.outboundId === caught.itemId);
+    const reported = await call('POST', `/api/bridge/helper/outbound/${caught.itemId}/failure`, { headers: asHelper(), body: { leaseId: claimed.leaseId, reason: 'chat-channel-missing' } });
     assert.equal(reported.body.circuit.opened, true);
     // The helper claimed the route's waiting notice in the same pass and still holds it. Withdrawing the answer
     // would close the route and pull that notice out of the helper's hands, so the reset is refused whole.
     const heldNotice = store.getDb().prepare(
       "SELECT o.outbound_id FROM bridge_outbound o JOIN bridge_outbound_leases l ON l.outbound_id = o.outbound_id AND l.state = 'live' WHERE o.route_id = ?"
-    ).get(three.routeId);
+    ).get(caught.routeId);
     assert.ok(heldNotice, 'precondition: another item of the route is in the helper\'s hands');
     const snapshot = () => JSON.stringify([
-      bridgeStore.routes.get(three.routeId), store.getDb().prepare('SELECT outbound_id, state, drop_code, block_code, text FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(three.routeId),
+      bridgeStore.routes.get(caught.routeId), store.getDb().prepare('SELECT outbound_id, state, drop_code, block_code, text FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(caught.routeId),
       bridgeStore.circuit.open().episodeId
     ]);
     const untouched = snapshot();
@@ -577,7 +610,7 @@ describe('bridge API: the round trip (#2031)', () => {
     assert.equal(refusedReset.code, 2);
     assert.match(refusedReset.stderr, /refused \[OUTBOUND_IN_FLIGHT\]/);
     assert.equal(snapshot(), untouched, 'the route, every item of it and the open episode are exactly as they were');
-    assert.equal(closures(three.routeId).length, 0);
+    assert.equal(closures(caught.routeId).length, 0);
     // Once that lease has run out with nothing posted, the same reset goes through.
     const realNow = gateway._deps.now;
     try {
@@ -587,7 +620,7 @@ describe('bridge API: the round trip (#2031)', () => {
     } finally {
       gateway._deps.now = realNow;
     }
-    assert.deepEqual([bridgeStore.routes.get(three.routeId).state, bridgeStore.routes.get(three.routeId).closedBy, closures(three.routeId).length], ['closed', 'master', 1]);
+    assert.deepEqual([bridgeStore.routes.get(caught.routeId).state, bridgeStore.routes.get(caught.routeId).closedBy, closures(caught.routeId).length], ['closed', 'master', 1]);
     assert.deepEqual([bridgeStore.outbound.get(heldNotice.outbound_id).state, bridgeStore.outbound.get(heldNotice.outbound_id).dropCode], ['dropped', 'withdrawn'], 'and the notice goes with its route');
     // And one that puts them back leaves the route waiting for its answer to post.
     const four = await answered('An answer that is put back.');
@@ -623,7 +656,7 @@ describe('bridge API: the round trip (#2031)', () => {
   });
 
   it('an acknowledgement and the route\'s close land together, and a repeat changes nothing', async () => {
-    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const accepted = await operatorSays(`m${++seq}`, '@master hello');
     const routeId = accepted.body.routeId;
     await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
     const externalId = bridgeStore.routes.get(routeId).externalId;
@@ -638,7 +671,7 @@ describe('bridge API: the round trip (#2031)', () => {
   });
 
   it('a claim is named by its nonce: asking again returns the same leases, and a changed request is refused', async () => {
-    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const accepted = await operatorSays(`m${++seq}`, '@master hello');
     const routeId = accepted.body.routeId;
     await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
     const headers = asHelper();
@@ -663,7 +696,7 @@ describe('bridge API: the round trip (#2031)', () => {
   });
 
   it('an acknowledgement over the route needs its lease, from the token that holds it', async () => {
-    const accepted = await operatorSays(`m${++seq}`, 'hello');
+    const accepted = await operatorSays(`m${++seq}`, '@master hello');
     const routeId = accepted.body.routeId;
     await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'hi' });
     const externalId = bridgeStore.routes.get(routeId).externalId;
@@ -742,7 +775,7 @@ describe('bridge API: the round trip (#2031)', () => {
   it('closing a route withdraws its unposted answer, but not while the helper holds it', async () => {
     const realNow = gateway._deps.now;
     try {
-      const accepted = await operatorSays(`m${++seq}`, 'hello');
+      const accepted = await operatorSays(`m${++seq}`, '@master hello');
       const routeId = accepted.body.routeId;
       await masterWrites(routeId, 'answer', { expectedVersion: bridgeStore.routes.get(routeId).version, text: 'an answer the Master thinks better of' });
       const externalId = bridgeStore.routes.get(routeId).externalId;
@@ -986,7 +1019,7 @@ describe('bridge API: the round trip (#2031)', () => {
     });
 
     it('a credential is taken only from a request made directly from this machine', async () => {
-      const routeId = (await operatorSays(`m${++seq}`, 'hello')).body.routeId;
+      const routeId = (await operatorSays(`m${++seq}`, '@master hello')).body.routeId;
       // Through a proxy: the headers one leaves behind are enough to refuse, whatever credential comes with them.
       for (const proxied of [{ 'x-forwarded-for': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }, { via: '1.1 caddy' }, { 'x-real-ip': '203.0.113.9' }, { 'x-forwarded-proto': 'https' }]) {
         const asM = await call('GET', '/api/bridge/master/status', { headers: { ...asMaster(), ...proxied } });
@@ -1394,7 +1427,7 @@ describe('bridge API: the round trip (#2031)', () => {
     });
 
     it('a disabled bridge refuses the helper and every Master write', async () => {
-      const accepted = await operatorSays(`m${++seq}`, 'hello');
+      const accepted = await operatorSays(`m${++seq}`, '@master hello');
       const routeId = accepted.body.routeId;
       await asOperator('POST', '/api/bridge/operator/disable');
       assert.equal((await operatorSays(`m${++seq}`, 'hello again')).body.code, 'BRIDGE_DISABLED');

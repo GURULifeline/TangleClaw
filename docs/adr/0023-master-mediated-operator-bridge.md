@@ -109,6 +109,11 @@ the routing path.
 
 ### 3. How a destination is resolved (D1, D2)
 
+> **Superseded in part by Decision 9a (operator ruling, 2026-10-05).** What this section lets
+> the gateway "apply mechanically" it now only suggests: a reply, a pin, an exact alias and the
+> default are recorded for the Master, and the Master's route write is what sends a message.
+> The order of the steps and the default are unchanged. The text below is kept as decided.
+
 - **The default destination is the Project Master itself.** It is not the Architect and not an
   arbitrary project. An unaddressed Discord message reaches Master, and Master answers it or
   delegates it.

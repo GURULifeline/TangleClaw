@@ -298,7 +298,7 @@ Every write:
 | `409 VERSION_CONFLICT` | The route changed since it was read. |
 | `409 REQUEST_ID_REUSED` | The request id was already used for a different route. |
 | `409 NOT_AWAITING_MASTER` | `route` on a route that is not waiting for the Master. |
-| `409 NOT_ANSWERABLE` | `answer` on a route that is not waiting for one: it is still being resolved or sent, already has an answer, or is closed. A route marked `send-unconfirmed` can be answered. |
+| `409 NOT_ANSWERABLE` | `answer` on a route that is not waiting for one: it has not been routed yet (`awaiting-master`: route it first, `--to master` if it is for the Master), is still being sent, already has an answer, or is closed. A route marked `send-unconfirmed` can be answered. |
 | `409 NO_REPLY_HELD` | `release` on a route with no held reply. |
 | `409 REPLY_NOT_DISPLAY_SAFE` | The held reply contains control or text-direction characters. Answer in your own words instead. |
 | `400 UNKNOWN_DESTINATION` | The destination is not `master`, a project id or an exact project name. |

@@ -124,7 +124,22 @@ function outbound(over = {}) {
 }
 
 /**
- * The operator writes, the helper hands it over, and the Master answers.
+ * The Master takes a waiting message as its own, with its route write. Every
+ * inbound waits for that decision before it can be answered.
+ * @param {string} routeId - The route.
+ * @returns {Promise<number>} The route's version afterwards.
+ */
+async function masterTakesIt(routeId) {
+  const res = await fetch(`${origin}/api/bridge/master/routes/${routeId}/route`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-tangleclaw-bridge-credential': masterCredential },
+    body: JSON.stringify({ requestId: `req-route-${++seq}-0000`, expectedVersion: bridgeStore.routes.get(routeId).version, to: 'master' })
+  });
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  return bridgeStore.routes.get(routeId).version;
+}
+
+/**
+ * The operator writes, the helper hands it over, and the Master routes it to itself and answers.
  * @param {string} text - The Master's answer.
  * @returns {Promise<{routeId: string, messageId: string, outboundId: number}>}
  */
@@ -132,9 +147,10 @@ async function answered(text) {
   const message = operatorMessage(`question ${++seq}`);
   assert.equal(await inbound()(message, { selfId: BOT_ID }), 'inbound-accepted');
   const route = bridgeStore.routes.getByExternalId(message.id);
+  const version = await masterTakesIt(route.routeId);
   const res = await fetch(`${origin}/api/bridge/master/routes/${route.routeId}/answer`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-tangleclaw-bridge-credential': masterCredential },
-    body: JSON.stringify({ requestId: `req-answer-${seq}-0000`, expectedVersion: route.version, text })
+    body: JSON.stringify({ requestId: `req-answer-${seq}-0000`, expectedVersion: version, text })
   });
   assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
   const item = store.getDb().prepare("SELECT outbound_id FROM bridge_outbound WHERE route_id = ? AND kind = 'reply'").get(route.routeId);
@@ -1245,7 +1261,8 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
       await until(() => discord.reactions.length === 1, 'the reaction');
       assert.equal(store.getDb().prepare('SELECT COUNT(*) AS n FROM bridge_routes WHERE author_id = ?').get('100000000000000099').n, 0);
 
-      // The Master answers; the helper's next pass posts it and acknowledges it.
+      // The Master takes it and answers; the helper's next pass posts it and acknowledges it.
+      await masterTakesIt(route.routeId);
       const res = await fetch(`${origin}/api/bridge/master/routes/${route.routeId}/answer`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-tangleclaw-bridge-credential': masterCredential },
         body: JSON.stringify({ requestId: `req-answer-e2e-${seq}`, expectedVersion: bridgeStore.routes.get(route.routeId).version, text: 'Two sessions are working.' })

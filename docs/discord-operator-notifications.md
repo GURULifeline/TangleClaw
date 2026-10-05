@@ -95,9 +95,11 @@ nonce.
 
 1. The Discord helper authenticates, applies the allowlist, and durably delivers the operator's
    message to the Master gateway, which is server code.
-2. The destination is resolved. A reply, a pin, an exact alias or the default is applied by the
-   gateway. Anything else waits for the Project Master session to decide. Nothing is guessed.
-3. An unaddressed message goes to Master itself, which answers it or delegates it.
+2. The gateway works out where the message looks to be going, from a reply, a pin, an exact
+   alias or the default, and records that as a suggestion. It sends the message nowhere.
+3. The Project Master session routes every message, to the suggested place or another. An
+   unaddressed message is suggested for the Master itself, which routes it to itself and
+   answers it, or routes it to a project.
 4. A correlated, tracked Medusa message goes to the target session, and its correlated reply
    comes back to the gateway and is held there.
 5. Master releases the answer, using that reply as its source. Nothing from a target session
