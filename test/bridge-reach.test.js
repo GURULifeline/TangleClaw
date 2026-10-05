@@ -106,16 +106,19 @@ describe('bridge: what may be reached, and how it is named (#2031)', () => {
 
     // The group is deleted. The Master's identity text falls back to every project; the bridge does not.
     store.projectGroups.delete(group.id);
-    assert.deepEqual([reach.scope(), names()], [{ kind: 'unresolved' }, []]);
+    assert.deepEqual([reach.scope(), names()], [{ kind: 'unresolved', cause: 'group-missing' }, []]);
     assert.equal(reach.outOfReach(store.projects.get(inside.id)), 'scope-unresolved');
-    assert.deepEqual(reach.destinations(), { scope: { kind: 'unresolved' }, destinations: [], optedOut: 0 }, 'said as unresolved, not as an empty fleet');
-    // Every other shape that is not understood, and a scope that cannot be read at all, the same.
+    assert.deepEqual(reach.destinations(), {
+      scope: { kind: 'unresolved', cause: 'group-missing', why: 'it names a project group that no longer exists' }, destinations: [], optedOut: 0
+    }, 'said as unresolved, with what is wrong, not as an empty fleet');
+    // Every other shape that is not understood, and a scope that cannot be read at all, the same, each with its own cause.
     for (const odd of [{ type: 'group' }, { type: 'team', groupId: 'x' }, 'everything', 42, null, undefined, '']) {
       scope = odd;
-      assert.deepEqual([reach.scope(), names()], [{ kind: 'unresolved' }, []], JSON.stringify(odd));
+      assert.deepEqual([reach.scope(), names()], [{ kind: 'unresolved', cause: 'malformed' }, []], JSON.stringify(odd));
     }
+    assert.equal(reach.scopeSummary().why, 'it is not a scope the bridge understands');
     reach._deps.masterScope = () => { throw new Error('config unreadable'); };
-    assert.deepEqual([reach.scope(), names()], [{ kind: 'unresolved' }, []]);
+    assert.deepEqual([reach.scope(), names(), reach.scopeSummary().why], [{ kind: 'unresolved', cause: 'unreadable' }, [], 'the Master settings could not be read']);
     reach._deps.masterScope = () => 'all';
     assert.deepEqual(names(), ['Inside', 'Outside']);
   });
@@ -181,9 +184,14 @@ describe('bridge: what may be reached, and how it is named (#2031)', () => {
     assert.deepEqual(reach.liveness(p.id), { state: 'live', sessions: 1, listening: [deaf] });
     const second = session(p);
     assert.deepEqual([reach.liveness(p.id).state, reach.liveness(p.id).listening.sort()], ['several-live', [deaf, second].sort()]);
-    // One of two with a listener is one live session, whichever was started last.
+    // One of two with a listener is one live session, whichever was started last, and it is the one named.
     listening.delete(second);
-    assert.equal(reach.liveness(p.id).state, 'live');
+    assert.deepEqual([reach.liveness(p.id).state, reach.liveness(p.id).listening], ['live', [deaf]]);
+    // A listener is not enough: a session with no launch record can be sent nothing, since no reply to it could be proven.
+    const realHasLaunch = reach._deps.hasLaunch;
+    reach._deps.hasLaunch = () => false;
+    assert.deepEqual(reach.liveness(p.id), { state: 'unreachable', sessions: 2, listening: [] });
+    reach._deps.hasLaunch = realHasLaunch;
     store.sessions.kill(deaf, 'ended');
     assert.equal(reach.liveness(p.id).state, 'unreachable');
     assert.deepEqual(reach.destinations().destinations, [{ projectId: p.id, name: 'Alpha', slug: 'alpha', nicknames: [], live: 'unreachable' }]);

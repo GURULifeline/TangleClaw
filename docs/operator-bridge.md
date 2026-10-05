@@ -152,24 +152,35 @@ what a launch re-checks. A nickname is an overlay on a project id: one whose pro
 reach names nothing.
 
 - **The Master's scope bounds it, and fails closed.** A scope that names a project group which
-  no longer exists, or that cannot be read or understood, reaches no project at all. The
-  Master's own identity text falls back to every project in that case; the bridge does not.
-  It is said, not left as an empty list: `tc bridge status` and `tc bridge destinations` say
-  `SCOPE UNRESOLVED`, the operator's panel says so, and the gateway audits the change once
-  when it happens (`scope-unresolved`) and once when it is put right (`scope-resolved`).
+  no longer exists, that is not a scope the bridge understands, or that cannot be read, reaches
+  no project at all. The Master's own identity text falls back to every project in that case;
+  the bridge does not. It is said, with which of the three it is, not left as an empty list:
+  `tc bridge status` and `tc bridge destinations` say `SCOPE UNRESOLVED`, the operator's panel
+  says so, a refused write says so, and the gateway audits the change with its cause once when
+  it happens (`scope-unresolved`) and once when it is put right (`scope-resolved`).
+- **A suggestion is always something that can be routed to.** A reply to a message that went to
+  a project since taken out of reach, and a pin that points at one, suggest nothing
+  (`destination-out-of-reach`). The operator's own aliases and pins are refused for a
+  destination out of reach, by the same codes as the Master's writes.
+- **Asked again at the send.** A message the Master routed while its project was reachable,
+  and not yet sent when the project went out of reach, goes back to the Master as
+  `destination-out-of-reach` and is sent nowhere.
 - **Opting a project out is the operator's alone,** from the signed-in panel
-  (`POST` and `DELETE /api/bridge/operator/optouts`). The Master has no way to do it, and
+  (`POST /api/bridge/operator/optouts` and `DELETE /api/bridge/operator/optouts/:projectId`). The Master has no way to do it, and
   nothing said in the chat does it. It takes effect at once and is audited.
 - **`tc bridge destinations`** lists each reachable project with every name it answers to and
   how it stands: running; not running; running but unreachable over Medusa; or with more than
-  one live session.
+  one live session. A session a message can be sent to is one the server holds a Medusa
+  listener for and a launch record for, since a reply is proven against that record. That one
+  definition answers both "may this be routed to" and "may this be launched", so a refusal
+  from one never points at the other in a circle.
 - **More than one live session of a project is an anomaly, and is never guessed at.** Launch
   policy allows one. Nothing is sent to either: a route write is refused
   `409 TARGET_AMBIGUOUS`, and a message whose project gains a second session before it is sent
   goes back to the Master as `target-ambiguous`. The Master asks the operator.
 
 A destination the Master names that the bridge may not reach is refused, with the message left
-held as it was:
+held as it was and the refusal on the audit by its code:
 
 | What was named | Answer |
 |---|---|
@@ -836,7 +847,8 @@ request.
 | `POST /api/bridge/operator/candidate-primer` | `{primed}`, true or false: whether every pane is told of `tc candidate` at its next launch. Switching it on is refused `409 BRIDGE_DISABLED` while the bridge is off; switching it off is always taken. Audited. |
 | `POST /api/bridge/operator/circuit/reset` | Closes the open configuration episode. `{requestId, decision}`, where `decision` is `requeue` or `withdraw`. |
 | `POST /api/bridge/operator/outbound/:id/requeue`, `.../withdraw` | Puts a set-aside item back, or withdraws one that has not been posted. `{requestId}`. The same decisions the Master has. |
-| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. |
+| `POST /api/bridge/operator/aliases`, `DELETE .../aliases/:alias` | Sets or removes a global alias. `master` is reserved. The destination must be one the bridge may reach. |
+| `POST /api/bridge/operator/optouts`, `DELETE .../optouts/:projectId` | Takes a project out of reach of the bridge, or puts it back. `{project}` is a project id (`400 UNKNOWN_PROJECT` otherwise); putting back one that is not out is `404 OPTOUT_NOT_FOUND`. Audited. |
 | `POST /api/bridge/operator/pins`, `DELETE .../pins/:pinId` | Sets a pin for one conversation, or for every conversation when no `conversationKey` is given; revokes any active pin, the Master's included. |
 
 ## Storage

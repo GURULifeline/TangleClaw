@@ -639,7 +639,7 @@ describe('the Operator Bridge panel (#2031)', () => {
         const { panel } = controller(real(SIGNED_IN));
         await panel.load();
         const html = panel.html();
-        assert.match(html, /<strong>UNRESOLVED<\/strong>: the Project Master's scope names a project group that cannot be found, so the bridge reaches <strong>no project<\/strong>\. Put the scope right in the Master settings\./);
+        assert.match(html, /<strong>UNRESOLVED<\/strong>: the Project Master's scope cannot be resolved \(it names a project group that no longer exists\), so the bridge reaches <strong>no project<\/strong>\. Put the scope right in the Master settings\./);
         assert.match(html, /No project is within reach\./);
         assert.ok(!/data-bridge-reachable=/.test(html));
       } finally { bridgeReach._deps.masterScope = real_; }

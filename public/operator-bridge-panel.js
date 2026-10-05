@@ -335,7 +335,7 @@
 
         <div class="gs-section-sublabel">What the bridge may reach</div>
         ${line('Scope', scope.kind === 'unresolved'
-          ? '<strong>UNRESOLVED</strong>: the Project Master\'s scope names a project group that cannot be found, so the bridge reaches <strong>no project</strong>. Put the scope right in the Master settings.'
+          ? `<strong>UNRESOLVED</strong>: the Project Master\'s scope cannot be resolved (${escapeHtml(scope.why || 'no reason given')}), so the bridge reaches <strong>no project</strong>. Put the scope right in the Master settings.`
           : (scope.kind === 'group' ? `the Project Master\'s scope, the ${escapeHtml(scope.groupName)} group` : 'every project on this install'))}
         <div class="form-hint">Every project in scope is reachable without being set up, and a new one is reachable at once. Taking one out of reach is done here and nowhere else:
           the Project Master cannot do it, and nothing said in the chat can. Nothing is then routed to it and no session is launched for it.</div>

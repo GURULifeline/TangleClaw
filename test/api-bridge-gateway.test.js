@@ -2287,20 +2287,78 @@ describe('bridge API: the round trip (#2031)', () => {
         const toMaster = await inbound('@master are you there?');
         assert.equal((await masterWrites(toMaster, 'route', { expectedVersion: version(toMaster), to: 'master' })).status, 200, 'the Master itself is always reachable');
         const empty = (await call('GET', '/api/bridge/master/destinations', { headers: asMaster() })).body;
-        assert.deepEqual([empty.scope, empty.destinations], [{ kind: 'unresolved' }, []]);
+        const unresolved = { kind: 'unresolved', cause: 'group-missing', why: 'it names a project group that no longer exists' };
+        assert.deepEqual([empty.scope, empty.destinations], [unresolved, []]);
+        const refusal = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: inside.project.id });
+        assert.match(refusal.body.error, /The Project Master's scope cannot be resolved \(it names a project group that no longer exists\), so no project is reachable\./, 'the refusal says which thing is wrong');
         const shown = await tc(['bridge', 'destinations']);
-        assert.match(shown.stdout, /^SCOPE UNRESOLVED: your scope names a project group that cannot be found, so the bridge reaches no project at all\.\nThis is not an empty fleet\./);
-        assert.match((await tc(['bridge', 'status'])).stdout, /SCOPE UNRESOLVED: your scope names a project group that cannot be found, so the bridge reaches no project\./);
-        assert.deepEqual((await asOperator('GET', '/api/bridge/operator/status')).body.reach.scope, { kind: 'unresolved' });
+        assert.match(shown.stdout, /^SCOPE UNRESOLVED: your scope cannot be resolved \(it names a project group that no longer exists\), so the bridge reaches no project at all\.\nThis is not an empty fleet\./);
+        assert.match((await tc(['bridge', 'status'])).stdout, /SCOPE UNRESOLVED: your scope cannot be resolved \(it names a project group that no longer exists\), so the bridge reaches no project\./);
+        assert.deepEqual((await asOperator('GET', '/api/bridge/operator/status')).body.reach.scope, unresolved);
 
         // Recorded once when it happens and once when it is put right, however many passes run.
         const scopeRows = () => db().prepare("SELECT outcome FROM bridge_audit WHERE op = 'scope' ORDER BY audit_seq").all().map((r) => r.outcome);
         const before = scopeRows().length;
         for (let i = 0; i < 3; i++) await gateway.tick();
         assert.deepEqual(scopeRows().slice(before), ['scope-unresolved']);
+        assert.equal(JSON.parse(db().prepare("SELECT detail_json FROM bridge_audit WHERE op = 'scope' ORDER BY audit_seq DESC LIMIT 1").get().detail_json).cause, 'group-missing', 'with its cause');
         restore();
         for (let i = 0; i < 3; i++) await gateway.tick();
         assert.deepEqual(scopeRows().slice(before), ['scope-unresolved', 'scope-resolved']);
+      } finally { restore(); }
+    });
+
+    it('a reply or a pin that points at a project out of reach suggests nothing, and nothing is stored that could never be routed to', async () => {
+      try {
+        const target = liveProject(`Gone${++seq}`);
+        // A message routed there while it was reachable, and a pin on a conversation of its own.
+        const earlier = (await operatorSays(`m${++seq}`, `@${target.project.name} first`)).body;
+        assert.equal(earlier.state, 'routed');
+        const thread = `thread${++seq}`;
+        const pinned = await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, threadId: thread, text: 'in a thread of its own' } });
+        const pin = await masterWrites(pinned.body.routeId, 'pin', { expectedVersion: version(pinned.body.routeId), to: target.project.id });
+        assert.equal(pin.status, 200, JSON.stringify(pin.body));
+        const reply = async () => (await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, replyToExternalId: bridgeStore.routes.get(earlier.routeId).externalId, text: 'and again' } })).body.routeId;
+        const inThread = async () => (await call('POST', '/api/bridge/helper/inbound', { headers: asHelper(), body: { externalId: `m${++seq}`, ...ALLOWED, threadId: thread, text: 'more in the thread' } })).body.routeId;
+        assert.deepEqual([suggestion(await reply()), suggestion(await inThread())].map((s) => [s.by, s.projectId]), [['reply-inheritance', target.project.id], ['pin', target.project.id]], 'while it is reachable, both are suggested');
+
+        assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
+        const none = { by: null, to: null, projectId: null, reason: 'destination-out-of-reach' };
+        assert.deepEqual([suggestion(await reply()), suggestion(await inThread())], [none, none], 'out of reach, neither is: a suggestion is always something that can be routed to');
+        // The operator's own nicknames and pins are held to the same rule, by the same reason.
+        for (const [apiPath, body] of [['/api/bridge/operator/aliases', { alias: `gone${seq}`, to: target.project.id }], ['/api/bridge/operator/pins', { conversationKey: null, to: target.project.id }]]) {
+          const res = await asOperator('POST', apiPath, { body });
+          assert.deepEqual([res.status, res.body.code], [409, 'DESTINATION_OPTED_OUT'], apiPath);
+        }
+        assert.equal(bridgeStore.aliases.get(`gone${seq}`), null);
+        assert.equal((await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } })).status, 200);
+      } finally { restore(); }
+    });
+
+    it('a Master write refused for where it points is on the audit, by its code, and a route already decided is asked again at the send', async () => {
+      try {
+        const target = liveProject(`Audited${++seq}`);
+        const routeId = await inbound('@nobody-known hello');
+        const rows = () => db().prepare("SELECT op, outcome, actor FROM bridge_audit WHERE route_id = ? AND actor = 'master' ORDER BY audit_seq").all(routeId).map((r) => `${r.op}:${r.outcome}`);
+        assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
+        await refusedRoute(routeId, target.project.id, 409, 'DESTINATION_OPTED_OUT', 'opted out');
+        await refusedRoute(routeId, 'No Such Project', 400, 'UNKNOWN_DESTINATION', 'unknown');
+        assert.equal((await masterWrites(routeId, 'ask-launch', { expectedVersion: version(routeId), project: target.project.id })).status, 409);
+        assert.equal((await masterWrites(routeId, 'pin', { expectedVersion: version(routeId), to: target.project.id })).status, 409);
+        assert.deepEqual(rows(), ['route:destination-opted-out', 'route:unknown-destination', 'ask-launch:destination-opted-out', 'pin:destination-opted-out'], 'every Master write leaves a row, applied or refused');
+        assert.equal((await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } })).status, 200);
+
+        // Decided while reachable, opted out before the send (a restart falls here): not sent.
+        const decided = bridgeStore.applyRouteWrite({
+          op: 'route', requestId: `req-late-${++seq}-0000`, routeId, expectedVersion: version(routeId), actor: 'master', proof: 'master-launch', masterGeneration,
+          change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: target.project.id, resolved_generation: masterGeneration, failure_code: null } })
+        });
+        assert.equal(decided.outcome, 'applied');
+        assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: target.project.id } })).status, 200);
+        const sent = hub.fromGateway().length;
+        await gateway.advance(routeId);
+        assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode, hub.fromGateway().length], ['awaiting-master', 'destination-out-of-reach', sent]);
+        assert.equal((await asOperator('DELETE', '/api/bridge/operator/optouts/:projectId', { params: { projectId: String(target.project.id) } })).status, 200);
       } finally { restore(); }
     });
 
