@@ -289,7 +289,8 @@ message that then fails is reported exactly once: a stop at any moment cannot le
 changed with the operator untold, and no pass, retry or restart makes a second notice. The
 notice is a reply to the operator's own message, a fixed sentence the server wrote, and carries
 nothing of the message, the session or any credential. A send that has not ended reports
-nothing.
+nothing. This covers what the Hub did with a message. The notice for a consented launch that
+failed is written after the launch's own records, not with them.
 - **The Master is not running:** the gateway starts it, at most once per backoff window (15
   seconds, doubling to 10 minutes). If it cannot, the route is queued. Nothing falls back to
   the Architect.

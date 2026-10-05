@@ -878,7 +878,7 @@ describe('bridge gateway (#2031)', () => {
         assert.deepEqual([bridgeStore.routes.get(routeId).state, bridgeStore.routes.get(routeId).failureCode], ['accepted', 'send-unconfirmed'],
           'not routed: nothing could reply to it yet');
         assert.equal(bridgeStore.audit.forRoute(routeId).find((a) => a.op === 'send-unconfirmed').detail.cause, 'outcome-unknown');
-        assert.match(store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = ?").get(`route:${routeId}:send-unconfirmed`).text, /^It is not known whether your message reached its destination\./);
+        assert.match(store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key LIKE ?").get(`route:${routeId}:send-unconfirmed:v%`).text, /^It is not known whether your message reached its destination\./);
         gateway._reset();
         later(10 * 60 * 1000);
         await gateway.tick();
@@ -929,7 +929,7 @@ describe('bridge gateway (#2031)', () => {
       assert.equal(hub.fromGateway().length, 1, 'and not sent a second time');
       const audit = bridgeStore.audit.forRoute('rt_gone').filter((a) => a.op === 'send-unconfirmed');
       assert.deepEqual(audit.map((a) => [a.outcome, a.detail.cause]), [['applied', 'recipient-unknown']], 'once, with its cause');
-      const notices = store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key = 'route:rt_gone:send-unconfirmed'").all();
+      const notices = store.getDb().prepare("SELECT text FROM bridge_outbound WHERE idem_key LIKE 'route:rt_gone:send-unconfirmed:v%'").all();
       assert.deepEqual(notices.map((n) => n.text), [
         'Your message was handed over, but the session it went to can no longer be identified, so its reply could not be accepted. '
         + 'It has not been sent again. The Project Master will follow up.'
@@ -1077,7 +1077,7 @@ describe('bridge gateway (#2031)', () => {
       const route = bridgeStore.routes.get(routeId);
       assert.deepEqual([route.state, route.failureCode, route.destination.kind], ['accepted', 'send-unconfirmed', 'project']);
       const rows = failureRows(routeId);
-      assert.deepEqual(rows.map((r) => r.idem_key), [`route:${routeId}:send-unconfirmed`]);
+      assert.deepEqual(rows.map((r) => r.idem_key), [`route:${routeId}:send-unconfirmed:v${route.version}`]);
       assert.match(rows[0].text, /^It is not known whether your message reached its destination\. It has not been sent again\./);
       assert.deepEqual(failures().map((i) => i.inReplyTo), [{ externalId: 'm1' }]);
       const marked = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed');
@@ -1121,6 +1121,9 @@ describe('bridge gateway (#2031)', () => {
         return realEnqueue.call(bridgeStore.outbound, item);
       };
       let routeId;
+      let refused = 0;
+      const refusing = bridgeStore.outbound.enqueue;
+      bridgeStore.outbound.enqueue = (item) => { if (item.kind === 'failure') refused += 1; return refusing(item); };
       try {
         const accepted = await operatorWrites('m1', '@alpha hello');
         routeId = accepted.body.routeId;
@@ -1128,6 +1131,7 @@ describe('bridge gateway (#2031)', () => {
         later(10 * 60 * 1000);
         await gateway.tick().catch(() => {});
       } finally { bridgeStore.outbound.enqueue = realEnqueue; hub.failSend = null; }
+      assert.ok(refused >= 1, 'the unlearned outcome was seen and the notice was attempted');
       const held = bridgeStore.routes.get(routeId);
       assert.deepEqual([held.state, held.failureCode], ['accepted', null], 'not marked with nobody told');
       assert.deepEqual(failureRows(routeId), []);
@@ -1174,6 +1178,34 @@ describe('bridge gateway (#2031)', () => {
       const keys = failureRows(routeId).map((r) => r.idem_key);
       assert.equal(keys.length, 2);
       assert.equal(new Set(keys).size, 2, 'one for each failure, and each only once');
+    });
+
+    it('a route whose second send also goes unlearned is told of that one too', async () => {
+      const alpha = liveProject('Alpha');
+      hub.failSend = 'unknown';
+      const routeId = (await operatorSays('m1', '@alpha hello')).body.routeId;
+      hub.failSend = null;
+      assert.equal(bridgeStore.routes.get(routeId).failureCode, 'send-unconfirmed');
+      // The first send is later proven never to have reached the Hub, so the route goes back to the Master.
+      store.getDb().prepare("UPDATE medusa_exchanges SET state = 'undeliverable' WHERE request_id = ?").run(`bridge:${routeId}:send1`);
+      for (let i = 0; i < 2; i++) await gateway.tick();
+      const back = bridgeStore.routes.get(routeId);
+      assert.deepEqual([back.state, back.failureCode], ['awaiting-master', 'exchange-undeliverable']);
+      // The Master routes it again, and that send is not learned either.
+      bridgeStore.applyRouteWrite({
+        op: 'route', requestId: 'req-reroute-2005b', routeId, expectedVersion: back.version, actor: 'master', proof: 'master-launch', masterGeneration: 1,
+        change: () => ({ set: { state: 'accepted', resolved_by: 'master', destination_kind: 'project', destination_project_id: alpha.project.id, resolved_generation: 1, failure_code: null } })
+      });
+      hub.failSend = 'unknown';
+      await gateway.advance(routeId);
+      hub.failSend = null;
+      for (let i = 0; i < 2; i++) { later(10 * 60 * 1000); await gateway.tick(); }
+      assert.equal(bridgeStore.routes.get(routeId).failureCode, 'send-unconfirmed');
+      const kinds = failureRows(routeId).map((r) => r.idem_key.replace(`route:${routeId}:`, '').replace(/:v\d+$/, ''));
+      assert.deepEqual(kinds, ['send-unconfirmed', 'failure:exchange-undeliverable', 'send-unconfirmed'], 'each of the three failures has its own notice');
+      assert.equal(new Set(failureRows(routeId).map((r) => r.idem_key)).size, 3);
+      const marks = bridgeStore.audit.forRoute(routeId).filter((a) => a.op === 'send-unconfirmed' && a.outcome === 'applied');
+      assert.equal(new Set(marks.map((a) => a.detail.outboundId)).size, 2, 'and each mark names the notice it queued, not an earlier one');
     });
 
     it('nothing is reported for a send that has not ended', async () => {
