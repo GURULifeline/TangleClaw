@@ -2398,6 +2398,23 @@ describe('bridge API: the round trip (#2031)', () => {
       } finally { restore(); }
     });
 
+    it('with two sessions and one listener, the message goes to the one that is listening, whichever is newer', async () => {
+      try {
+        const older = liveProject(`Pair${++seq}`);
+        const newer = hub.anotherSession(older.project);
+        hub.workspaces.delete(String(newer.sessionId));
+        assert.equal(store.sessions.getActive(older.project.id).id, newer.sessionId, 'precondition: the newest session is the one that cannot be sent to');
+        const routeId = await inbound(`@${older.project.name} which of you hears this?`);
+        const routed = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: older.project.id });
+        assert.deepEqual([routed.status, routed.body.route.state], [200, 'routed'], JSON.stringify(routed.body));
+        const sent = hub.fromGateway().filter((m) => m.message.includes('which of you hears this?'));
+        assert.deepEqual(sent.map((m) => m.to), [older.workspaceId], 'to the session the server holds a listener for');
+        const proof = db().prepare("SELECT target_session_id, target_launch_id FROM bridge_route_proofs WHERE route_id = ? AND direction = 'to-target'").get(routeId);
+        assert.deepEqual([Number(proof.target_session_id), proof.target_launch_id], [older.sessionId, older.launchId], 'and the proof a reply is held to names that session');
+        store.sessions.kill(newer.sessionId, 'ended');
+      } finally { restore(); }
+    });
+
     it('`tc bridge destinations` says how each project is named and how it stands', async () => {
       try {
         const live = liveProject(`Listed_One_${++seq}`);
