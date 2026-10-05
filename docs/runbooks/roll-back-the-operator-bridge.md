@@ -43,6 +43,13 @@ conditions.
    line has already stopped the helper. Set `TC_RECEIPT` to the cutover receipt, paste the first
    block of [the checked-commands step](activate-the-operator-bridge.md#checked-commands) of
    the activation runbook, and run those two again.
+   → `tc_helper` refuses for another reason ("the receipt has no to_commit line", "the checkout
+   is not at the commit the receipt records"): the activation did not get far enough to record
+   the build, or the checkout has moved since. The first line has already stopped the helper.
+   Remove its job file yourself, so that it does not start again at the next login:
+   `rm "$HOME/Library/LaunchAgents/com.tangleclaw.bridge-helper.plist"`
+   then `launchctl print gui/$(id -u)/com.tangleclaw.bridge-helper`
+   → Expected: an answer beginning `Could not find service`.
 
 4. **Operator:** under Helper token, press **Revoke it** and confirm. The button is off until
    step 1 is done.

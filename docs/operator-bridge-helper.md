@@ -108,7 +108,7 @@ is outside the repository, so no Discord id is in a tracked file.
 ### 3. The two secrets, in the Keychain
 
 ```sh
-"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" set-secret helper    # paste the bridge's bht_ helper token
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" set-secret helper
 ```
 
 The helper token comes from the dashboard: global settings, **Operator bridge (Discord)**,

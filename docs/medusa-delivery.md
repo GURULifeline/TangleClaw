@@ -68,7 +68,7 @@ has been replied to reads "satisfied, awaiting initiator close".
 | `escalateAfterMinutes` | Shortens the first escalation, down to 2 minutes. It can never lengthen it |
 | `reason` | `awaiting-ruling`, `awaiting-review`, `awaiting-dispatch`, `incident`, `question` or `other` |
 | `inReplyTo` | The Hub id of the message this answers |
-| `requestId` | An idempotency key; see above |
+| `requestId` | An idempotency key; see above. An id beginning with a prefix a TangleClaw component keeps for its own sends (the operator bridge's is `bridge:`) is refused, `400 REQUEST_ID_RESERVED`, with nothing sent |
 
 Who may claim what:
 

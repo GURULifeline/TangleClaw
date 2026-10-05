@@ -133,14 +133,58 @@ describe('the operator bridge runbooks (#2031)', () => {
       }
       for (const block of [SNAPSHOT, FUNCTIONS, PROVE, RESTORE_BLOCK, FINISH_BLOCK]) {
         assert.ok(!/(^|\s)#/.test(block), 'no comment: a pasting zsh runs one as a command');
+        assert.deepEqual(block.match(/!(?! -[a-z] |= )/g), null, 'no "!" but in "[ ! -e …" and "!=": an interactive zsh reads any other as history expansion and refuses the paste');
         assert.ok(!/[^|]\|[^|]/.test(block.replace(/case [^\n]* in [^\n]*esac/g, '').replace(/\n\s+\*?[^\n]*\) [^\n]*;;/g, '')), 'no pipeline: set -e does not see a failure inside one');
         for (const shell of shells) assert.equal(spawnSync(shell, ['-n', '-c', block]).status, 0, `${shell} parses it`);
+      }
+      // Entered, as a person does it, into an interactive zsh on a terminal. `zsh -c` does not expand history or
+      // parse interactively, so it cannot show what a paste does: there, "[!0-9]" is "event not found" and the
+      // paste goes no further. With nothing set, each block must get as far as its own first guard.
+      const canType = process.platform === 'darwin' && fs.existsSync('/bin/zsh') && spawnSync('sh', ['-c', 'command -v expect']).status === 0;
+      if (canType) {
+        const typing = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-typed-'));
+        // One line at a time with a short pause after each: sent in one burst, a long paste loses characters
+        // in the pty's input queue, which a terminal never lets happen. What the shell parses is the same.
+        fs.writeFileSync(path.join(typing, 'type.exp'), [
+          'set timeout 20', 'log_user 0', 'match_max -d 4000000',
+          // The line editor is off: it redraws as it reads, and under a scripted terminal that garbles what was
+          // typed. History expansion and interactive parsing, which are what this is about, do not need it.
+          'spawn env -i TERM=dumb PATH=/usr/bin:/bin HOME=[lindex $argv 1] /bin/zsh -f -i --no-zle',
+          'expect -re {[%#] }', 'send -- "PROMPT=\'TYPED-READY> \'\\r"', 'expect "TYPED-READY> "',
+          'send -- ": something already in the history\\r"', 'expect "TYPED-READY> "',
+          'set fh [open [lindex $argv 0] r]', 'set text [read $fh]', 'close $fh',
+          'foreach line [split [string trimright $text "\\n"] "\\n"] { send -- "$line\\r"; after 12 }',
+          'send -- "print -r -- \\"TYPED-\\"RC=\\$?\\r"',
+          'set out ""',
+          // (one pattern per line: expect reads a braced list written on a single line as one pattern)
+          'expect {', '  -re {TYPED-RC=([0-9]+)} { set out $expect_out(buffer) }', '  timeout { set out "$expect_out(buffer)\\nTYPED-RC=timeout" }', '  eof { set out "$expect_out(buffer)\\nTYPED-RC=eof" }', '}',
+          'regsub -all {\\r} $out {} out', 'puts $out', 'catch { close }', 'catch { wait }'
+        ].join('\n'));
+        const typed = (text) => {
+          fs.writeFileSync(path.join(typing, 'typed'), `${text}\n`);
+          return spawnSync('expect', [path.join(typing, 'type.exp'), path.join(typing, 'typed'), typing], { encoding: 'utf8' }).stdout;
+        };
+        try {
+          assert.match(typed('case 7 in [!0-9]) echo NOT ;; *) echo DIGIT ;; esac'), /event not found/, 'the check can see the failure it is for');
+          for (const [name, block, guard] of [
+            ['snapshot', SNAPSHOT, /TC_CHECKOUT: set TC_CHECKOUT/], ['commands', FUNCTIONS, /TYPED-RC=0/], ['proof', PROVE, /command not found: tc_receipt/],
+            ['restore', RESTORE_BLOCK, /TC_RECEIPT: set TC_RECEIPT/], ['finish', FINISH_BLOCK, /TC_RECEIPT: set TC_RECEIPT/]
+          ]) {
+            const out = typed(block);
+            const refusedByShell = out.split('\n').filter((l) => /event not found|quote> |parse error|bad pattern/.test(l));
+            assert.deepEqual(refusedByShell.map((l) => l.slice(0, 160)), [], `${name}: entered whole, with no line refused by the shell itself`);
+            assert.match(out, guard, `${name}: it ran, and stopped where it should`);
+            assert.match(out, /TYPED-RC=\d+/, `${name}: and the terminal is still there afterwards`);
+          }
+        } finally {
+          fs.rmSync(typing, { recursive: true, force: true });
+        }
       }
       // What is deleted, anywhere: the receipt's own draft, and the restore's own probe copy. Nothing of the store's.
       assert.deepEqual([SNAPSHOT, FUNCTIONS, PROVE, RESTORE_BLOCK, FINISH_BLOCK].join('\n').match(/^.*\brm\b.*$/gm), ['rm "$DRAFT"', 'rm -r "$PROBE"']);
       // The schema the restore expects of a migrated store is the one this build migrates to.
       assert.match(read('lib/store.js'), /const CURRENT_SCHEMA_VERSION = 54;/);
-      assert.ok(RESTORE_BLOCK.includes('[ "$LIVE" = "54" ]') && SNAPSHOT.includes('[ "$SCHEMA" -lt 54 ]'));
+      assert.ok(RESTORE_BLOCK.includes('if [ "$LIVE" != "54" ]; then') && SNAPSHOT.includes('[ "$SCHEMA" -lt 54 ]'));
     });
 
     it('the snapshot: an owner-only, verified copy and a receipt written once, from the checkout the server really runs', skip, () => {
@@ -225,6 +269,14 @@ describe('the operator bridge runbooks (#2031)', () => {
         assert.notEqual(raced.status, 0, 'the block stops');
         assert.equal(fs.readFileSync(lateReceipt, 'utf8'), 'somebody else wrote this\n', 'and the receipt that got there first is untouched');
         assert.ok(!/^receipt: /m.test(raced.stdout), 'it does not announce a receipt it did not write');
+        // A digest that could not be read is never written into a receipt as if it were one.
+        const noDigest = path.join(h.dir, 'no-digest-bin');
+        fs.mkdirSync(noDigest);
+        fs.writeFileSync(path.join(noDigest, 'shasum'), '#!/bin/sh\necho "shasum: could not read  $3"\n', { mode: 0o755 });
+        const unread = run({ TC_SNAPSHOT_STAMP: 'NODIGEST', PATH: `${noDigest}:${process.env.PATH}` });
+        assert.notEqual(unread.status, 0);
+        assert.match(unread.stderr, /could not read the snapshot's sha256/);
+        assert.ok(!fs.existsSync(path.join(h.cutovers, 'cutover.NODIGEST.receipt')), 'no receipt was written');
         // Other labels are taken only when given, and are what the receipt then says.
         const other = run({ TC_SNAPSHOT_STAMP: 'LABELS', TC_SERVER_LABEL: SERVER, TC_HELPER_LABEL: 'com.tangleclaw.rehearsal.x.bridge-helper' });
         assert.equal(other.status, 0, other.stderr);
@@ -441,6 +493,10 @@ describe('the operator bridge runbooks (#2031)', () => {
         early('a store path with nothing at it', /no store at the receipt's path/, {}, { store: path.join(h.dir, '.tangleclaw', 'tangelclaw.db') });
         assert.ok(!fs.existsSync(path.join(h.dir, '.tangleclaw', 'tangelclaw.db')), 'and no snapshot was installed at the mistyped path');
         early('a store path that is not a SQLite store', /not a SQLite store/, {}, { store: garbage });
+        const helperPlist = path.join(path.dirname(h.plist), `${HELPER}.plist`);
+        fs.writeFileSync(helperPlist, '<plist/>');
+        early('the helper stopped but its job file still installed', /the bridge helper's job file is still installed, so the helper would come back at the next login/);
+        fs.rmSync(helperPlist);
         early('the helper\'s job still loaded', /the bridge helper's job is still loaded, and the previous build has no helper/, { HELPER_STATE: 'loaded' });
         early('an answer about the helper\'s job that proves nothing', /could not prove the helper's job is gone/, { HELPER_STATE: 'unknown' });
         early('a restore already begun from this receipt', /a restore was already begun from this receipt, so nothing was changed: \/somewhere\/quarantine\.OLD/, {}, { restore_begun: 'OLD', restore_quarantine: '/somewhere/quarantine.OLD' });
@@ -474,7 +530,15 @@ describe('the operator bridge runbooks (#2031)', () => {
         assert.equal(fs.readFileSync(path.join(h.cutovers, 'quarantine.T1', 'tangleclaw.db'), 'utf8'), 'an earlier quarantine');
         assert.deepEqual(cut(), ['quarantine.T1'], 'and no probe copy was left');
         before = fresh(52);
-        afterStop('a live store still at the snapshot\'s schema', /the store is at schema 52, not 54, so this is not a store v5\.31\.0 migrated; it was not changed/, {});
+        const unmigrated = run(RESTORE_BLOCK, good);
+        assert.notEqual(unmigrated.status, 0);
+        assert.match(unmigrated.stderr, /the store is at schema 52, not 54, so this is not a store v5\.31\.0 migrated; it was not changed, and the server was started again/);
+        assert.equal(unmigrated.calls.at(-1), `launchctl bootstrap gui/${uid} ${h.plist}`, 'not left with the server down: it is started again on the store it had');
+        assert.ok(!unmigrated.calls.some((c) => / checkout /.test(c)), 'and nothing was checked out');
+        untouched(before, 'a live store still at the snapshot\'s schema');
+        const stuck = run(RESTORE_BLOCK, { ...good, BOOTSTRAP_FAILS: '1' });
+        assert.match(stuck.stderr, /the server could not be started again: gui\/\d+\/com\.tangleclaw\.server\n.*the store is at schema 52/s, 'and says so when it could not');
+        untouched(before, 'a refused schema with a start that failed');
         before = fresh();
         const dirty = run(RESTORE_BLOCK, { ...good, GIT_FAILS: 'checkout' });
         assert.notEqual(dirty.status, 0);

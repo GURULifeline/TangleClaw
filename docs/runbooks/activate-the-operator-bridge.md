@@ -67,13 +67,12 @@ If any step's expected result does not appear, stop and go to
    chmod 600 "$SNAP"
    [ "$(sqlite3 -readonly "$SNAP" 'PRAGMA integrity_check')" = "ok" ] || { echo "integrity check failed: $SNAP" >&2; exit 1; }
    SCHEMA=$(sqlite3 -readonly "$SNAP" 'SELECT MAX(version) FROM schema_version')
-   case "$SCHEMA" in ""|*[!0-9]*) echo "could not read the snapshot's schema: $SNAP" >&2; exit 1 ;; esac
+   expr "x$SCHEMA" : 'x[0-9]\{1,\}$' >/dev/null || { echo "could not read the snapshot's schema: $SNAP" >&2; exit 1; }
    [ "$SCHEMA" -lt 54 ] || { echo "schema $SCHEMA: the new build has already opened this store, so this is not a pre-update snapshot: $SNAP" >&2; exit 1; }
    SUM=$(shasum -a 256 "$SNAP")
    SUM="${SUM%% *}"
-   case "$SUM" in *[!0-9a-f]*) echo "could not read the snapshot's sha256: $SNAP" >&2; exit 1 ;; esac
-   [ "${#SUM}" -eq 64 ] || { echo "could not read the snapshot's sha256: $SNAP" >&2; exit 1; }
-   [ "${#FROM_COMMIT}" -eq 40 ] || { echo "could not read the checkout's commit: $TC_CHECKOUT" >&2; exit 1; }
+   expr "x$SUM" : 'x[0-9a-f]\{64\}$' >/dev/null || { echo "could not read the snapshot's sha256: $SNAP" >&2; exit 1; }
+   expr "x$FROM_COMMIT" : 'x[0-9a-f]\{40\}$' >/dev/null || { echo "could not read the checkout's commit: $TC_CHECKOUT" >&2; exit 1; }
    DRAFT="$RECEIPT.draft.$$"
    printf '%s\n' "receipt=1" "written=$STAMP" "checkout=$TC_CHECKOUT" "store=$STORE" "server_label=$SERVER" "helper_label=$HELPER" "from_tag=$FROM_TAG" "from_commit=$FROM_COMMIT" "snapshot=$SNAP" "snapshot_sha256=$SUM" "snapshot_schema=$SCHEMA" > "$DRAFT"
    ln "$DRAFT" "$RECEIPT"
@@ -126,8 +125,8 @@ If any step's expected result does not appear, stop and go to
      set -eu
      : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
      [ -f "$TC_RECEIPT" ] || { echo "no such receipt: $TC_RECEIPT" >&2; exit 1; }
-     case "$1" in ""|*[!a-z_]*) echo "not a receipt key: $1" >&2; exit 1 ;; esac
-     case "$2" in "") echo "nothing to record for $1" >&2; exit 1 ;; esac
+     expr "x$1" : 'x[a-z_]\{1,\}$' >/dev/null || { echo "not a receipt key: $1" >&2; exit 1; }
+     [ -n "$2" ] || { echo "nothing to record for $1" >&2; exit 1; }
      HAD=$(sed -n "s/^$1=//p" "$TC_RECEIPT")
      [ -z "$HAD" ] || { echo "the receipt already has $1=$HAD" >&2; exit 1; }
      printf '%s\n' "$1=$2" >> "$TC_RECEIPT"
@@ -161,7 +160,7 @@ If any step's expected result does not appear, stop and go to
    TAG=$(git -C "$CHECKOUT" describe --tags --exact-match)
    [ "$TAG" = "v5.31.0" ] || { echo "the checkout is at $TAG, not v5.31.0: $CHECKOUT" >&2; exit 1; }
    COMMIT=$(git -C "$CHECKOUT" rev-parse HEAD)
-   [ "${#COMMIT}" -eq 40 ] || { echo "could not read the checkout's commit: $CHECKOUT" >&2; exit 1; }
+   expr "x$COMMIT" : 'x[0-9a-f]\{40\}$' >/dev/null || { echo "could not read the checkout's commit: $CHECKOUT" >&2; exit 1; }
    tc_record to_tag "$TAG"
    tc_record to_commit "$COMMIT"
    )

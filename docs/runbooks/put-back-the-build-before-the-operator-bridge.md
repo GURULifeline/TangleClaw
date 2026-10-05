@@ -25,9 +25,9 @@ byte, but nothing merges them back.
 
 - The cutover receipt the snapshot step wrote, in `~/.tangleclaw/cutovers`. Without it, stop:
   nothing here can be done from memory, and a digest recomputed from the snapshot proves nothing.
-- The bridge helper's job is gone: step 3 of
+- The bridge helper is stopped and its job file removed: step 3 of
   [Roll the operator bridge back](roll-back-the-operator-bridge.md). The previous build has no
-  helper.
+  helper, and a job file left in place would start it again at the next login.
 
 ## Steps
 
@@ -59,13 +59,11 @@ byte, but nothing merges them back.
    for VALUE in "$CHECKOUT" "$STORE" "$SERVER" "$HELPER" "$COMMIT" "$SNAPSHOT" "$DIGEST" "$SCHEMA"; do
      [ -n "$VALUE" ] || { echo "the receipt is incomplete: $TC_RECEIPT" >&2; exit 1; }
    done
-   case "$DIGEST" in *[!0-9a-f]*) echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1 ;; esac
-   [ "${#DIGEST}" -eq 64 ] || { echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1; }
-   case "$COMMIT" in *[!0-9a-f]*) echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1 ;; esac
-   [ "${#COMMIT}" -eq 40 ] || { echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1; }
-   case "$SCHEMA" in *[!0-9]*) echo "the receipt's schema is not a number: $TC_RECEIPT" >&2; exit 1 ;; esac
+   expr "x$DIGEST" : 'x[0-9a-f]\{64\}$' >/dev/null || { echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1; }
+   expr "x$COMMIT" : 'x[0-9a-f]\{40\}$' >/dev/null || { echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1; }
+   expr "x$SCHEMA" : 'x[0-9]\{1,\}$' >/dev/null || { echo "the receipt's schema is not a number: $TC_RECEIPT" >&2; exit 1; }
    for LABEL in "$SERVER" "$HELPER"; do
-     case "$LABEL" in com.tangleclaw.*[!A-Za-z0-9.-]*) echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1 ;; com.tangleclaw.?*) ;; *) echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1 ;; esac
+     expr "x$LABEL" : 'xcom\.tangleclaw\.[A-Za-z0-9.-]\{1,\}$' >/dev/null || { echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1; }
    done
    PLIST="$HOME/Library/LaunchAgents/$SERVER.plist"
    JOB="gui/$(id -u)/$SERVER"
@@ -81,6 +79,7 @@ byte, but nothing merges them back.
    command -v lsof >/dev/null || { echo "lsof is needed to prove nothing has the store open" >&2; exit 1; }
    if SEEN=$(launchctl print "$HELPER_JOB" 2>&1); then echo "the bridge helper's job is still loaded, and the previous build has no helper: $HELPER_JOB" >&2; exit 1; fi
    case "$SEEN" in *"Could not find service"*) ;; *) echo "could not prove the helper's job is gone: $HELPER_JOB" >&2; exit 1 ;; esac
+   [ ! -e "$HOME/Library/LaunchAgents/$HELPER.plist" ] || { echo "the bridge helper's job file is still installed, so the helper would come back at the next login: $HOME/Library/LaunchAgents/$HELPER.plist" >&2; exit 1; }
    [ -s "$STORE" ] || { echo "no store at the receipt's path: $STORE" >&2; exit 1; }
    [ "$(head -c 15 "$STORE")" = "SQLite format 3" ] || { echo "not a SQLite store: $STORE" >&2; exit 1; }
    launchctl bootout "$JOB" || echo "bootout did not succeed; checking the job itself"
@@ -109,10 +108,14 @@ byte, but nothing merges them back.
    done
    LIVE=$(sqlite3 "$PROBE/probe.db" 'SELECT MAX(version) FROM schema_version')
    rm -r "$PROBE"
-   [ "$LIVE" = "54" ] || { echo "the store is at schema $LIVE, not 54, so this is not a store v5.31.0 migrated; it was not changed: $STORE" >&2; exit 1; }
+   if [ "$LIVE" != "54" ]; then
+     launchctl bootstrap "gui/$(id -u)" "$PLIST" || echo "the server could not be started again: $JOB" >&2
+     echo "the store is at schema $LIVE, not 54, so this is not a store v5.31.0 migrated; it was not changed, and the server was started again: $STORE" >&2
+     exit 1
+   fi
    git -C "$CHECKOUT" checkout --detach "$COMMIT"
-   printf '%s\n' "restore_begun=$STAMP" "restore_quarantine=$QUARANTINE" >> "$TC_RECEIPT"
    mkdir "$QUARANTINE"
+   printf '%s\n' "restore_begun=$STAMP" "restore_quarantine=$QUARANTINE" >> "$TC_RECEIPT"
    echo "quarantine: $QUARANTINE"
    for FILE in "$STORE" "$STORE-journal" "$STORE-wal" "$STORE-shm"; do
      [ -e "$FILE" ] || continue
@@ -137,13 +140,15 @@ byte, but nothing merges them back.
    sha256", "is not a commit id", "is not a number", "is not a TangleClaw label", "a restore was
    already begun", "not the one the server job runs from", "no such snapshot", "does not match
    the receipt", "integrity check failed", "lsof is needed", "no store at the receipt's path",
-   "not a SQLite store", or "the bridge helper's job is still loaded"; or when git does not know
-   the commit. Put right what it names and paste it again.
+   "not a SQLite store", "the bridge helper's job is still loaded", or "the bridge helper's job
+   file is still installed"; or when git does not know the commit. Put right what it names and paste it again.
    → "still loaded", "could not prove the server job is gone" or "still open": the store is
    untouched; the server may be stopped. A line beginning `p` is the id of a process that has
    the file open. Stop nothing by name or pattern. Tell the Architect the ids and paths printed.
    → "the store is at schema … not 54": v5.31.0 never migrated this store. It was not changed,
-   and the server is stopped. There is nothing to restore; tell the Architect.
+   and the block started the server again on it. There is nothing to restore; tell the
+   Architect. If it also says "the server could not be started again", the server is stopped
+   and the store is untouched.
    → It stops at `checkout`: the server is stopped, the store is untouched, and git says why.
    Put that right and paste it again.
    → It stops after the `quarantine:` line: go to step 3. Do not paste this block again: it
@@ -172,13 +177,11 @@ byte, but nothing merges them back.
    for VALUE in "$CHECKOUT" "$STORE" "$SERVER" "$HELPER" "$COMMIT" "$SNAPSHOT" "$DIGEST" "$SCHEMA"; do
      [ -n "$VALUE" ] || { echo "the receipt is incomplete: $TC_RECEIPT" >&2; exit 1; }
    done
-   case "$DIGEST" in *[!0-9a-f]*) echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1 ;; esac
-   [ "${#DIGEST}" -eq 64 ] || { echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1; }
-   case "$COMMIT" in *[!0-9a-f]*) echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1 ;; esac
-   [ "${#COMMIT}" -eq 40 ] || { echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1; }
-   case "$SCHEMA" in *[!0-9]*) echo "the receipt's schema is not a number: $TC_RECEIPT" >&2; exit 1 ;; esac
+   expr "x$DIGEST" : 'x[0-9a-f]\{64\}$' >/dev/null || { echo "the receipt's sha256 is not a sha256: $TC_RECEIPT" >&2; exit 1; }
+   expr "x$COMMIT" : 'x[0-9a-f]\{40\}$' >/dev/null || { echo "the receipt's commit is not a commit id: $TC_RECEIPT" >&2; exit 1; }
+   expr "x$SCHEMA" : 'x[0-9]\{1,\}$' >/dev/null || { echo "the receipt's schema is not a number: $TC_RECEIPT" >&2; exit 1; }
    for LABEL in "$SERVER" "$HELPER"; do
-     case "$LABEL" in com.tangleclaw.*[!A-Za-z0-9.-]*) echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1 ;; com.tangleclaw.?*) ;; *) echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1 ;; esac
+     expr "x$LABEL" : 'xcom\.tangleclaw\.[A-Za-z0-9.-]\{1,\}$' >/dev/null || { echo "the receipt's job label is not a TangleClaw label: $LABEL" >&2; exit 1; }
    done
    PLIST="$HOME/Library/LaunchAgents/$SERVER.plist"
    JOB="gui/$(id -u)/$SERVER"
@@ -197,6 +200,7 @@ byte, but nothing merges them back.
    command -v lsof >/dev/null || { echo "lsof is needed to prove nothing has the store open" >&2; exit 1; }
    if SEEN=$(launchctl print "$HELPER_JOB" 2>&1); then echo "the bridge helper's job is still loaded, and the previous build has no helper: $HELPER_JOB" >&2; exit 1; fi
    case "$SEEN" in *"Could not find service"*) ;; *) echo "could not prove the helper's job is gone: $HELPER_JOB" >&2; exit 1 ;; esac
+   [ ! -e "$HOME/Library/LaunchAgents/$HELPER.plist" ] || { echo "the bridge helper's job file is still installed, so the helper would come back at the next login: $HOME/Library/LaunchAgents/$HELPER.plist" >&2; exit 1; }
    TRIES=0
    while SEEN=$(launchctl print "$JOB" 2>&1); do
      TRIES=$((TRIES + 1))
@@ -252,7 +256,8 @@ The dashboard loads, and the last line of the receipt begins `restore_finished=`
 The server is stopped and the v5.31 store is whole, either where it was or in the directory the
 receipt's `restore_quarantine=` line names. Delete nothing. A file named
 `tangleclaw.db.incoming.<n>` beside the store is an unfinished copy and is never the active
-store. Tell the Architect.
+store. A directory named `probe.<stamp>` beside the receipt is a copy the block made to read the
+store's schema and did not get to remove; it is never read again. Tell the Architect.
 
 > 🚧 **UNVERIFIED** — both blocks were rehearsed on a throwaway install with its own job
 > labels, under `sh` and `zsh`, against a real launchd and a real SQLite store. They have not
