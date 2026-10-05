@@ -15,7 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { setLevel } = require('../lib/logger');
+const { setLevel, setConsoleStream } = require('../lib/logger');
 
 setLevel('error');
 
@@ -129,6 +129,28 @@ function decide(op, outboundId, over = {}) {
  * An item's state and why it is set aside.
  * @param {number} id - Item id.
  * @returns {Array}
+ */
+/**
+ * Run `fn` and return the warnings it logged, one line each.
+ * @param {function(): void} fn - What to run.
+ * @returns {string[]}
+ */
+function warnings(fn) {
+  const lines = [];
+  setLevel('warn');
+  setConsoleStream({ write: (line) => { lines.push(String(line).trimEnd()); } });
+  try {
+    fn();
+  } finally {
+    setConsoleStream(null);
+    setLevel('error');
+  }
+  return lines;
+}
+
+/**
+ * @param {number} id - Outbound id.
+ * @returns {*} How the item stands.
  */
 function standing(id) {
   const item = bridgeStore.outbound.get(id);
@@ -256,8 +278,11 @@ describe('bridge: what the helper may write about an item, and what becomes of o
         assert.deepEqual(bridgeStore.parts.forItem(id), [], `${why}: no posted message was recorded for it`);
         assert.equal(leaseState(item), 'live', `${why}: the lease was not settled as used`);
 
-        const answered = seal(item, [`d${n}00`]);
+        let answered;
+        const logged = warnings(() => { answered = seal(item, [`d${n}00`]); });
         assert.deepEqual([answered.status, answered.body.code], [409, 'ACK_NOT_APPLIED'], `${why}: and the helper is not told it was delivered`);
+        assert.equal(logged.length, 1, `${why}: the refusal is on the record, once`);
+        assert.ok(logged[0].endsWith(`Bridge acknowledgement was not applied outboundId=${id} outcome=item-not-ready`), logged[0]);
         assert.ok(!JSON.stringify(answered.body).includes('"state":"delivered"'));
         assert.equal(JSON.stringify(row(id)), before);
         assert.equal(deliveredAudits(), audits, `${why}: nothing audited as a delivery`);
@@ -683,6 +708,22 @@ describe('bridge: what the helper may write about an item, and what becomes of o
         const ids = store.getDb().prepare('SELECT outbound_id, kind FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(routeId);
         return { routeId, answer: ids.find((r) => r.kind === 'reply').outbound_id, notice: ids.find((r) => r.kind !== 'reply').outbound_id };
       };
+      it('an answer that is no longer there to deliver leaves its route released, and the refusal is on the record', () => {
+        const r = releasedRoute('unapplied');
+        const item = claimOnly(r.answer, r);
+        // Set aside under the helper's live lease: the acknowledgement is in order, the item is not.
+        store.getDb().prepare("UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?").run(r.answer);
+        const before = everything(r);
+        let answered;
+        const logged = warnings(() => { answered = seal(item, ['dA00']); });
+        assert.deepEqual([answered.status, answered.body.code], [409, 'ACK_NOT_APPLIED']);
+        assert.equal(everything(r), before, 'the route is not closed, its answer not cleared, the lease not settled');
+        assert.equal(bridgeStore.routes.get(r.routeId).state, 'released');
+        assert.equal(logged.length, 1, 'once');
+        assert.match(logged[0], new RegExp(`Bridge acknowledgement was not applied outboundId=${r.answer} routeId=${r.routeId} outcome=[a-z-]+$`));
+        assert.ok(!logged[0].includes('the answer'), 'ids and the outcome only: nothing of what was said');
+      });
+
       const everything = (r) => JSON.stringify([
         bridgeStore.routes.get(r.routeId), bridgeStore.routes.body(r.routeId, 'answer'),
         store.getDb().prepare('SELECT outbound_id, state, drop_code, block_code, text FROM bridge_outbound WHERE route_id = ? ORDER BY outbound_id').all(r.routeId),

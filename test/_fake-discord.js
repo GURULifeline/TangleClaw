@@ -68,7 +68,7 @@ async function startFakeDiscord() {
         reactions.push(decodeURIComponent(req.url));
         return answer(204);
       }
-      if (req.method === 'GET' && req.url === '/gateway/bot') return answer(200, { url: 'wss://gateway.fake.invalid' });
+      if (req.method === 'GET' && req.url === '/gateway/bot') return answer(200, { url: 'wss://gateway-test.discord.gg' });
       // The two read-only calls preflight makes. `reads` holds what each answers with.
       if (req.method === 'GET' && req.url === '/users/@me') return answer(...reads.self);
       const channel = /^\/channels\/(\d+)$/.exec(req.url);

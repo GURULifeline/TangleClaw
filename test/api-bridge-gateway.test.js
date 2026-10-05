@@ -316,7 +316,7 @@ describe('bridge API: the round trip (#2031)', () => {
 
   it('an answer needs a routing decision behind it: a route nobody has routed cannot be answered, the Master\'s own included', async () => {
     const version = (id) => bridgeStore.routes.get(id).version;
-    // An unaddressed message: suggested for the Master, and still waiting for the Master to say so.
+    // A message addressed to the Master: suggested for the Master, and still waiting for the Master to say so.
     const waiting = (await operatorWrites(`m${++seq}`, '@master what is the fleet doing?')).body.routeId;
     assert.deepEqual([bridgeStore.routes.get(waiting).state, bridgeStore.audit.suggestionFor(waiting).to], ['awaiting-master', 'master']);
     const early = await masterWrites(waiting, 'answer', { expectedVersion: version(waiting), text: 'All quiet.' });

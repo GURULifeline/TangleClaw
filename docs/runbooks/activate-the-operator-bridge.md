@@ -39,13 +39,18 @@ If any step's expected result does not appear, stop and go to
 [Roll the operator bridge back](roll-back-the-operator-bridge.md).
 
 1. <a id="snapshot"></a>**Release executor:** while the old build is still running, take a
-   snapshot of the store and write the cutover receipt. In a terminal, set
-   `TC_CHECKOUT=<the checkout the service runs from>`, then paste this as it is. The
-   parentheses matter: a failure stops the block, not your terminal.
+   snapshot of the store and write the cutover receipt. In a terminal, enter `unalias -a` on a
+   line of its own, set `TC_CHECKOUT=<the checkout the service runs from>`, then paste this as
+   it is. The parentheses matter: a failure stops the block, not your terminal.
+
+   `unalias -a` removes this terminal's aliases, for this terminal only. A shell replaces an
+   alias as it reads a paste, before anything in the paste runs, so every block here refuses
+   to run where one is set. Enter it again in any other terminal you paste into.
 
    ```sh
    (
    set -eu
+   [ -z "$(alias)" ] || { echo "this terminal has aliases, and an alias changes what a pasted line runs: enter unalias -a on a line of its own, then paste this again" >&2; exit 1; }
    umask 077
    : "${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}"
    SERVER="${TC_SERVER_LABEL:-com.tangleclaw.server}"
@@ -113,6 +118,7 @@ If any step's expected result does not appear, stop and go to
    and runs nothing:
 
    ```sh
+   if [ -z "$(alias)" ]; then
    tc_receipt() (
      set -eu
      : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
@@ -147,13 +153,17 @@ If any step's expected result does not appear, stop and go to
    )
    tc_helper() { tc_checked bin/tc-bridge-helper "$@"; }
    tc_install() { tc_checked deploy/install.sh "$@"; }
+   else echo "this terminal has aliases, so no command was defined: enter unalias -a on a line of its own, then paste this again" >&2; fi
    ```
+
+   → Expected: nothing is printed.
 
    Then paste this:
 
    ```sh
    (
    set -eu
+   [ -z "$(alias)" ] || { echo "this terminal has aliases, and an alias changes what a pasted line runs: enter unalias -a on a line of its own, then paste this again" >&2; exit 1; }
    CHECKOUT=$(tc_receipt checkout)
    SERVER=$(tc_receipt server_label)
    grep -Fq "<string>$CHECKOUT</string>" "$HOME/Library/LaunchAgents/$SERVER.plist" || { echo "the receipt's checkout is not the one the server job runs from: $CHECKOUT" >&2; exit 1; }
@@ -245,9 +255,10 @@ If any step's expected result does not appear, stop and go to
     command, have the Operator press **Copy**, paste at the command's prompt, then have the
     Operator press **I have stored it**:
     `tc_helper set-secret helper`
-    `tc_helper configure --base-url <loopback address> --author <id> --guild <id> --channel <id>`
+    `tc_helper configure --base-url '<loopback address>' --author <id> --guild <id> --channel <id>`
     The address is the one TangleClaw answers on from this machine itself, `http://127.0.0.1:3102`
-    on a default install. The helper refuses any other host.
+    on a default install. The helper refuses any other host. Keep the quotes: the brackets of an
+    IPv6 address such as `http://[::1]:3102` are otherwise read by the shell as a file pattern.
     → Expected: `Stored the helper token in the Keychain.` and `Config written.`
 
 11. **Release executor:** `tc_helper preflight`

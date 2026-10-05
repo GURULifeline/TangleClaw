@@ -1128,6 +1128,35 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
     });
   });
 
+  describe('an acknowledgement the bridge does not apply', () => {
+    it('is not asked again, and does not hold up the next item', async () => {
+      const notice = (n) => bridgeStore.outbound.enqueue({
+        idemKey: `notify:operator-needed:unapplied-${++seq}`, kind: 'notification', notifyType: 'operator-needed', sourceLabel: 'TangleClaw',
+        text: `Notice ${n}.`, digest: bridgeStore.digest(`Notice ${n}.`), at: new Date(clock).toISOString()
+      }).outboundId;
+      const first = notice(1);
+      const relay = outbound({ bridge: losingOnce('ack', { before: true }) });
+      assert.equal((await relay.pass()).ok, false, 'posted, and the acknowledgement did not get through');
+      assert.equal(relay.state.get(first).status, 'posted');
+
+      // Set aside at the bridge while the helper's lease is still live: the acknowledgement is in order, the item is not.
+      store.getDb().prepare("UPDATE bridge_outbound SET state = 'blocked', block_code = 'rejected-by-chat' WHERE outbound_id = ?").run(first);
+      const second = notice(2);
+      codes.length = 0;
+      assert.deepEqual(await relay.pass(), { ok: true, posted: 1, acked: 1, held: 0 }, 'the pass goes on to the next item');
+      // Once from its own record and once more when the claim in progress is replayed: the same answer both times, and then never again.
+      const refused = codes.filter(([c]) => c === 'outbound-ack-failed');
+      assert.ok(refused.length >= 1 && refused.length <= 2, `asked ${refused.length} times`);
+      for (const entry of refused) assert.deepEqual(entry, ['outbound-ack-failed', { outboundId: first, status: 409 }]);
+      assert.deepEqual(relay.state.entries(), [], 'and the helper keeps nothing of either');
+      assert.deepEqual([atBridge(first)[0], atBridge(second)[0]], ['blocked', 'delivered']);
+      codes.length = 0;
+      await relay.pass();
+      assert.deepEqual(logged().filter((c) => c.startsWith('outbound')), [], 'it does not ask again');
+      assert.equal(discord.posts.length, 2, 'and nothing is posted twice');
+    });
+  });
+
   describe('preflight', () => {
     /**
      * Run `preflight` for a helper configured with the given ids.
@@ -1248,10 +1277,10 @@ describe('bridge helper: the relay against the real server (#2031)', () => {
 
       // Discord says hello; the helper identifies; the session is ready.
       const socket = await until(() => ws.sockets[0], 'the Gateway connection');
-      assert.equal(socket.url, 'wss://gateway.fake.invalid/?v=10&encoding=json', 'at the address Discord named');
+      assert.equal(socket.url, 'wss://gateway-test.discord.gg/?v=10&encoding=json', 'at the address Discord named');
       socket.receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
       assert.equal(socket.sent[0].op, OP.IDENTIFY);
-      socket.receive({ op: OP.DISPATCH, t: 'READY', s: 1, d: { session_id: 's', resume_gateway_url: 'wss://resume.fake.invalid', user: { id: BOT_ID } } });
+      socket.receive({ op: OP.DISPATCH, t: 'READY', s: 1, d: { session_id: 's', resume_gateway_url: 'wss://resume-test.discord.gg', user: { id: BOT_ID } } });
 
       // The operator writes; a stranger writes too.
       const message = operatorMessage('what is the fleet doing?');

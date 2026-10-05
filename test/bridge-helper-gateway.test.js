@@ -9,7 +9,7 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { createGateway, resumeAddress, backoffDelay, INTENTS, OP, FATAL_CLOSES, RESUME_CLOSE, DEFAULT_URL } = require('../lib/bridge-helper/discord-gateway');
+const { createGateway, gatewayAddress, backoffDelay, INTENTS, OP, FATAL_CLOSES, RESUME_CLOSE, DEFAULT_URL } = require('../lib/bridge-helper/discord-gateway');
 const { fakeWebSocket } = require('./_fake-discord');
 
 /** A resume address of the shape Discord really gives: a subdomain of discord.gg. */
@@ -96,10 +96,11 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
 
   it('identifies with the three intents the helper needs and nothing else, after asking Discord where to connect', async () => {
     assert.equal(INTENTS, (1 << 0) | (1 << 9) | (1 << 15), 'GUILDS, GUILD_MESSAGES and MESSAGE_CONTENT');
-    const gw = gateway({ getUrl: async () => 'wss://gateway.fake.invalid' });
+    // Only the host is taken from what Discord answered: its path and query are not used.
+    const gw = gateway({ getUrl: async () => 'wss://gateway-us-east1-b.discord.gg:443/elsewhere?v=9&encoding=etf' });
     gw.start();
     await settle();
-    assert.equal(ws.sockets[0].url, 'wss://gateway.fake.invalid/?v=10&encoding=json');
+    assert.equal(ws.sockets[0].url, 'wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json');
     assert.deepEqual(ws.sockets[0].sent, [], 'nothing is sent before Discord says hello');
     ws.sockets[0].receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
     const [identify] = ws.sockets[0].sent;
@@ -111,15 +112,25 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     assert.ok(!JSON.stringify(codes).includes(BOT_TOKEN));
   });
 
-  it('refuses a discovered address that is not a wss one and falls back to Discord\'s own', async () => {
-    for (const bad of ['ws://plain.fake.invalid', 'https://gateway.fake.invalid', 'not a url', null]) {
+  it('refuses a discovered address that is not an address at all and falls back to Discord\'s own', async () => {
+    for (const bad of ['not a url', '', null, undefined, 42, { url: 'wss://gateway.discord.gg' }]) {
       ws = fakeWebSocket();
+      codes = [];
       const gw = gateway({ getUrl: async () => bad });
       gw.start();
       await settle();
-      assert.equal(ws.sockets[0].url, 'wss://gateway.discord.gg/?v=10&encoding=json', String(bad));
+      assert.equal(ws.sockets[0].url, DEFAULT_URL, String(bad));
+      assert.deepEqual(codes.at(-1), ['gateway-address-refused', {}], String(bad));
       gw.stop();
     }
+  });
+
+  it('falls back to Discord\'s own address, with nothing refused, when asking for one fails', async () => {
+    const gw = gateway({ getUrl: async () => { throw new Error('no answer'); } });
+    gw.start();
+    await settle();
+    assert.equal(ws.sockets[0].url, DEFAULT_URL);
+    assert.deepEqual(codes.map(([code]) => code), ['gateway-connecting']);
   });
 
   it('hands each message to the handler with the bot\'s own id, and keeps the heartbeat', async () => {
@@ -192,7 +203,7 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     assert.ok(FATAL_CLOSES.has(4004) && FATAL_CLOSES.has(4014), 'a refused token and disallowed intents among them');
   });
 
-  describe('where a session may be resumed', () => {
+  describe('where the bot token may be sent', () => {
     const REFUSED = [
       ['a host that only starts with Discord\'s', 'wss://discord.gg.example.com'],
       ['a host that only ends with its letters', 'wss://example-discord.gg'],
@@ -214,13 +225,13 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
     ];
 
     it('accepts the Gateway and its subdomains, with no port or 443, and uses nothing of the path Discord sent', () => {
-      assert.equal(resumeAddress('wss://gateway.discord.gg'), 'wss://gateway.discord.gg');
-      assert.equal(resumeAddress('wss://gateway.discord.gg/'), 'wss://gateway.discord.gg');
-      assert.equal(resumeAddress('wss://gateway.discord.gg:443'), 'wss://gateway.discord.gg');
-      assert.equal(resumeAddress('wss://gateway-us-east1-b.discord.gg'), 'wss://gateway-us-east1-b.discord.gg');
-      assert.equal(resumeAddress('wss://a.b.discord.gg/?v=9&encoding=etf#x'), 'wss://a.b.discord.gg');
-      for (const [why, address] of REFUSED) assert.equal(resumeAddress(address), null, why);
-      for (const notAString of [42, null, undefined, {}, ['wss://gateway.discord.gg']]) assert.equal(resumeAddress(notAString), null);
+      assert.equal(gatewayAddress('wss://gateway.discord.gg'), 'wss://gateway.discord.gg');
+      assert.equal(gatewayAddress('wss://gateway.discord.gg/'), 'wss://gateway.discord.gg');
+      assert.equal(gatewayAddress('wss://gateway.discord.gg:443'), 'wss://gateway.discord.gg');
+      assert.equal(gatewayAddress('wss://gateway-us-east1-b.discord.gg'), 'wss://gateway-us-east1-b.discord.gg');
+      assert.equal(gatewayAddress('wss://a.b.discord.gg/?v=9&encoding=etf#x'), 'wss://a.b.discord.gg');
+      for (const [why, address] of REFUSED) assert.equal(gatewayAddress(address), null, why);
+      for (const notAString of [42, null, undefined, {}, ['wss://gateway.discord.gg']]) assert.equal(gatewayAddress(notAString), null);
     });
 
     for (const [why, address] of REFUSED) {
@@ -248,6 +259,28 @@ describe('bridge helper: the Discord Gateway connection (#2031)', () => {
         await settle();
         ws.sockets[2].receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
         assert.equal(ws.sockets[2].sent[0].op, OP.IDENTIFY);
+      });
+    }
+
+    for (const [why, address] of REFUSED) {
+      it(`refuses ${why} for a first connection too: nothing is opened to it, and the token goes only to the default`, async () => {
+        let asked = 0;
+        const gw = gateway({ getUrl: async () => { asked++; return address; } });
+        gw.start();
+        await settle();
+        assert.equal(ws.sockets.length, 1);
+        const first = ws.sockets[0];
+        assert.equal(first.url, DEFAULT_URL, 'the default Gateway, and no socket to the address Discord gave');
+        assert.deepEqual(codes.at(-1), ['gateway-address-refused', {}]);
+        assert.ok(!JSON.stringify(codes).includes(address), 'the refused address is not written to the log');
+        first.receive({ op: OP.HELLO, d: { heartbeat_interval: 40000 } });
+        assert.deepEqual([first.sent[0].op, first.sent[0].d.token], [OP.IDENTIFY, BOT_TOKEN]);
+        // Nothing is remembered of it: the next connection asks again and is held to the same rule.
+        first.drop(1006);
+        timers.fire('timeout');
+        await settle();
+        assert.equal(asked, 2);
+        assert.ok(ws.sockets.every((sock) => sock.url === DEFAULT_URL));
       });
     }
 

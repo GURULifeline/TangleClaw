@@ -91,7 +91,7 @@ also proves the checkout is the one the server's job names and is at the recorde
 ### 2. The helper's config
 
 ```sh
-"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" configure --base-url http://127.0.0.1:3102 \
+"${TC_CHECKOUT:?set TC_CHECKOUT to the checkout the service runs from}/bin/tc-bridge-helper" configure --base-url 'http://127.0.0.1:3102' \
   --author <your user id> --guild <server id> --channel <channel id>
 ```
 
@@ -99,7 +99,8 @@ This writes `~/.tangleclaw/bridge-helper/config.json`, owner-only. It holds no s
 is outside the repository, so no Discord id is in a tracked file.
 
 - `--base-url` is where TangleClaw answers, and must name this machine (`127.0.0.1`,
-  `localhost` or `[::1]`), over `http://` or `https://`. The bridge answers the helper only for
+  `localhost` or `[::1]`), over `http://` or `https://`. Keep it in quotes: unquoted, a shell
+  reads the brackets of `http://[::1]:3102` as a file pattern and runs nothing. The bridge answers the helper only for
   a request made directly from this machine, so there is nowhere else to send the token. It
   may carry no user name or password.
 - `--poll-seconds` (5 to 300, default 15) sets how often the helper asks what to post.
@@ -169,11 +170,15 @@ seconds. `--no-load` writes the job without loading it.
 ## Where it connects
 
 The helper connects to Discord's Gateway at the address Discord gives it, and resumes a dropped
-session at the address Discord named when the session began. A resume carries the bot token, so
-that address is held to a fixed rule first: `wss`, no user or password, no port but 443, and a
-host that is `gateway.discord.gg` or a subdomain of `discord.gg`. Anything else is never
-opened. The session is dropped, the log records `gateway-resume-refused`, and the helper
-identifies afresh at the default address.
+session at the address Discord named when the session began. Both connections carry the bot
+token, so both addresses are held to one fixed rule first: `wss`, no user or password, no port
+but 443, and a host that is `gateway.discord.gg` or a subdomain of `discord.gg`. Anything else
+is never opened.
+
+- A refused first-connection address: the log records `gateway-address-refused`, and the helper
+  identifies at the default address, `gateway.discord.gg`.
+- A refused resume address: the session is dropped, the log records `gateway-resume-refused`,
+  and the helper identifies afresh at the default address.
 
 ## Operating it
 

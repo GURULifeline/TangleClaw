@@ -443,6 +443,10 @@ writes nothing and spends no nonce, so it can be sent again as it is), `401 HELP
 for an item that is no longer waiting to be delivered: withdrawn or set aside in the meantime.
 An item is recorded as delivered only when its own row moved to delivered, or was already in
 exactly that state under the same messages. Nothing else is reported or audited as a delivery.
+For an answer, the route's own change is undone with it: the route stays `released`. The server
+log records each such refusal as `Bridge acknowledgement was not applied`, with the item's id,
+the route's id when it has one, and the outcome. The helper reads it as it reads a lease that
+is no longer its own: it stops asking under that lease and goes on to the next item.
 
 Acknowledging an answer marks it delivered, settles its lease, and closes and clears its route
 in one transaction.
@@ -514,7 +518,10 @@ or notification type, its route, the message replied to, the item's first messag
 part's position and count. A message that replies to something the bridge does not know has no
 such record and is handled as before.
 
-| The reply is to | It goes to | Because |
+Nothing here sends the reply anywhere. Like every inbound, it waits for the Project Master,
+and what follows is only the destination the bridge suggests with it.
+
+| The reply is to | Suggested for | Because |
 |---|---|---|
 | The operator's own earlier message | That message's destination | Reply inheritance, as before. |
 | Any part of an answer whose route is still held | That route's destination | Reply inheritance. Any part, not only the first. |
@@ -522,8 +529,8 @@ such record and is handled as before.
 | Any part of an answer whose route has since been removed | The Project Master, resolved by `outbound-correlation` | There is nowhere left to inherit; what it answered is still on record. |
 | A message the bridge does not know | Resolved as an unaddressed message | Nothing is invented about what it answers. |
 
-A leading `@name` still wins over all of these when it names exactly one current destination,
-and what the message answers is recorded all the same. An `@name` that names nothing, or more
+A leading `@name` is the suggestion instead of any of these when it names exactly one current
+destination, and what the message answers is recorded all the same. An `@name` that names nothing, or more
 than one thing, is never guessed at: the route waits for the Master with `address-unresolved`
 or `address-ambiguous`, still knowing what it answers. A reply changes nothing about the candidate it answers and releases nothing again.
 `tc bridge read <route-id>` shows what a route answers, and the Master's notice says so in

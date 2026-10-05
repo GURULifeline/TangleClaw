@@ -34,7 +34,9 @@ byte, but nothing merges them back.
 1. **Operator:** say that you agree to return the store to the snapshot and to lose what was
    written since. **Architect:** be present. Without both, do not go on.
 
-2. <a id="restore"></a>**Release executor:** in a terminal, set `TC_RECEIPT` to the cutover
+2. <a id="restore"></a>**Release executor:** in a terminal, enter `unalias -a` on a line of
+   its own: it removes this terminal's aliases, which would otherwise change what a pasted line
+   runs, and the blocks refuse to run where one is set. Set `TC_RECEIPT` to the cutover
    receipt. Once the Operator has agreed, set `TC_OPERATOR_CONFIRMED=return-to-snapshot`: it is a
    guard against a paste by mistake, and it is not the Operator's agreement. Then paste this as
    it is. The parentheses matter: the first thing that fails stops the block, and nothing after
@@ -43,6 +45,7 @@ byte, but nothing merges them back.
    ```sh
    (
    set -eu
+   [ -z "$(alias)" ] || { echo "this terminal has aliases, and an alias changes what a pasted line runs: enter unalias -a on a line of its own, then paste this again" >&2; exit 1; }
    umask 077
    : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
    [ "${TC_OPERATOR_CONFIRMED:-}" = "return-to-snapshot" ] || { echo "not confirmed: the Operator has not agreed to return the store to the snapshot" >&2; exit 1; }
@@ -108,11 +111,15 @@ byte, but nothing merges them back.
    done
    LIVE=$(sqlite3 "$PROBE/probe.db" 'SELECT MAX(version) FROM schema_version')
    rm -r "$PROBE"
-   if [ "$LIVE" != "54" ]; then
-     launchctl bootstrap "gui/$(id -u)" "$PLIST" || echo "the server could not be started again: $JOB" >&2
-     echo "the store is at schema $LIVE, not 54, so this is not a store v5.31.0 migrated; it was not changed, and the server was started again: $STORE" >&2
-     exit 1
+   expr "x$LIVE" : 'x[0-9]\{1,\}$' >/dev/null || { echo "could not read the store's schema, so nothing was changed and the server is stopped: $STORE" >&2; exit 1; }
+   if [ "$LIVE" -eq "$SCHEMA" ]; then
+     git -C "$CHECKOUT" checkout --detach "$COMMIT"
+     launchctl bootstrap "gui/$(id -u)" "$PLIST"
+     printf '%s\n' "returned_without_restore=$STAMP" >> "$TC_RECEIPT"
+     echo "returned: $COMMIT on the store as it is, at schema $LIVE; v5.31.0 never migrated it, so nothing was restored and nothing was lost"
+     exit 0
    fi
+   [ "$LIVE" -gt "$SCHEMA" ] && [ "$LIVE" -le 54 ] || { echo "the store is at schema $LIVE, which is neither the snapshot's $SCHEMA nor one v5.31.0 leaves, so nothing was changed and the server is stopped: $STORE" >&2; exit 1; }
    git -C "$CHECKOUT" checkout --detach "$COMMIT"
    mkdir "$QUARANTINE"
    printf '%s\n' "restore_begun=$STAMP" "restore_quarantine=$QUARANTINE" >> "$TC_RECEIPT"
@@ -145,10 +152,12 @@ byte, but nothing merges them back.
    → "still loaded", "could not prove the server job is gone" or "still open": the store is
    untouched; the server may be stopped. A line beginning `p` is the id of a process that has
    the file open. Stop nothing by name or pattern. Tell the Architect the ids and paths printed.
-   → "the store is at schema … not 54": v5.31.0 never migrated this store. It was not changed,
-   and the block started the server again on it. There is nothing to restore; tell the
-   Architect. If it also says "the server could not be started again", the server is stopped
-   and the store is untouched.
+   → A last line beginning `returned:` instead: the store was still at the snapshot's schema,
+   so v5.31.0 never migrated it. The block checked out the previous build and started it on
+   the store as it is. Nothing was restored or lost, and the procedure is done.
+   → "neither the snapshot's … nor one v5.31.0 leaves", or "could not read the store's schema":
+   the store is untouched and the server is stopped. Start nothing: v5.31.0 would migrate the
+   store when it starts. Tell the Architect the schema it printed.
    → It stops at `checkout`: the server is stopped, the store is untouched, and git says why.
    Put that right and paste it again.
    → It stops after the `quarantine:` line: go to step 3. Do not paste this block again: it
@@ -161,6 +170,7 @@ byte, but nothing merges them back.
    ```sh
    (
    set -eu
+   [ -z "$(alias)" ] || { echo "this terminal has aliases, and an alias changes what a pasted line runs: enter unalias -a on a line of its own, then paste this again" >&2; exit 1; }
    umask 077
    : "${TC_RECEIPT:?set TC_RECEIPT to the receipt: line the snapshot step printed}"
    [ "${TC_OPERATOR_CONFIRMED:-}" = "return-to-snapshot" ] || { echo "not confirmed: the Operator has not agreed to return the store to the snapshot" >&2; exit 1; }
@@ -249,7 +259,9 @@ byte, but nothing merges them back.
 ## Done when
 
 The dashboard loads, and the last line of the receipt begins `restore_finished=`. The receipt's
-`restore_quarantine=` line names the directory that holds the v5.31 store.
+`restore_quarantine=` line names the directory that holds the v5.31 store. Or, where step 2
+ended with `returned:`, the last line begins `returned_without_restore=` and there is no
+quarantine.
 
 ## If this doesn't work
 
