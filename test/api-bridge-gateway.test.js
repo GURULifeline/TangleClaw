@@ -1817,18 +1817,22 @@ describe('bridge API: the round trip (#2031)', () => {
         const real = { append: bridgeStore.audit.append };
         try {
           const c = await consented();
-          assert.equal(launchOf(c.routeId).state, 'queued');
+          const behind = await consented();
+          assert.deepEqual([launchOf(c.routeId).state, launchOf(behind.routeId).state], ['queued', 'queued']);
           assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: c.project.id } })).status, 200);
           const before = standing(c);
           BOUNDARIES['as the message is marked'](real);
           try { await gateway.tick().catch(() => {}); } finally { bridgeStore.audit.append = real.append; }
           assert.equal(standing(c), before, 'nothing landed, under any code');
           assert.equal(launchOf(c.routeId).state, 'queued');
+          // The pass stopped there. The one behind did not take its turn ahead of a launch that is still unsettled.
+          assert.deepEqual([launchOf(behind.routeId).state, launched.filter((args) => args[0].id === behind.project.id).length], ['queued', 0]);
           gateway._reset();
           await gateway.tick();
           assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode, bridgeStore.routes.get(c.routeId).failureCode], ['failed', 'project-opted-out', 'project-opted-out']);
           assert.deepEqual(failureRows(c.routeId).map((r) => r.text), ['I could not get a session ready for your message (project-opted-out). Your message is still held, and nothing was sent on.']);
           assert.equal(launched.filter((args) => args[0].id === c.project.id).length, 0, 'and nothing was ever launched for it');
+          assert.equal(launchOf(behind.routeId).state, 'waiting-ready', 'with that one settled, the one behind takes its turn');
           bridgeStore.optouts.remove(c.project.id);
         } finally { bridgeStore.audit.append = real.append; restore(); }
       });
