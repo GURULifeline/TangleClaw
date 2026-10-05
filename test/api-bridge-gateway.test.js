@@ -1425,9 +1425,12 @@ describe('bridge API: the round trip (#2031)', () => {
     };
     let launched;
     let realLaunch;
+    let realWarm;
     let realSessions;
     let realControl;
     let launchBehaviour;
+    /** When set, the warm-up before a launch waits on this promise, as a slow network would make it. */
+    let warming;
 
     beforeEach(() => {
       // One launch is in flight on the install at a time, and this file has one store: what an earlier test left
@@ -1435,11 +1438,15 @@ describe('bridge API: the round trip (#2031)', () => {
       for (const left of bridgeStore.launches.unsettled()) bridgeStore.launches.end(left.launchSeq, 'abandoned', 'test-reset', new Date().toISOString());
       launched = [];
       launchBehaviour = null;
-      realLaunch = gateway._deps.launchProject;
+      warming = null;
+      realLaunch = gateway._deps.launchSession;
+      realWarm = gateway._deps.warmForLaunch;
       realSessions = gateway._deps.sessions;
       realControl = gateway._deps.controlState;
-      // The server's launch, stood in for: a session row, its launch sequence and its listener, as a real launch leaves them.
-      gateway._deps.launchProject = async (...args) => {
+      gateway._deps.warmForLaunch = async () => { if (warming) await warming; };
+      // The server's launch, stood in for: a session row, its launch sequence and its listener, as a real launch
+      // leaves them. Synchronous, as the real one is.
+      gateway._deps.launchSession = (...args) => {
         launched.push(args);
         if (launchBehaviour) return launchBehaviour(...args);
         const session = hub.anotherSession(args[0]);
@@ -1450,7 +1457,7 @@ describe('bridge API: the round trip (#2031)', () => {
     });
 
     // Restored by the file's own `beforeEach` for `gateway._deps.master`; these three are this suite's.
-    const restore = () => Object.assign(gateway._deps, { launchProject: realLaunch, sessions: realSessions, controlState: realControl });
+    const restore = () => Object.assign(gateway._deps, { launchSession: realLaunch, warmForLaunch: realWarm, sessions: realSessions, controlState: realControl });
 
     /** A project that exists and is not running. */
     const stopped = () => store.projects.create({ name: `Stopped${++seq}`, path: path.join(tmpDir, `Stopped${seq}`) });
@@ -1779,6 +1786,10 @@ describe('bridge API: the round trip (#2031)', () => {
         const bounced = bridgeStore.routes.get(raced.routeId);
         assert.deepEqual([bounced.state, bounced.failureCode], ['awaiting-master', 'identity-changed']);
         assert.deepEqual([sentTo(newcomer.workspaceId), sentTo(hub.workspaces.get(String(original.id)))], [[], []], 'sent to neither: the Master decides again');
+        // And the Master's next decision is its own: the launch that is over does not stand in the way of the session that is live now.
+        const rerouted = await masterWrites(raced.routeId, 'route', { expectedVersion: version(raced.routeId), to: raced.project.id });
+        assert.deepEqual([rerouted.status, rerouted.body.route.state], [200, 'routed'], JSON.stringify(rerouted.body));
+        assert.equal(sentTo(newcomer.workspaceId).length, 1, 'a settled launch governs the one send it made, and no later one');
 
         // A session whose launch can never attest is said to be that at once.
         launchBehaviour = (project) => { hub.anotherSession(project); return { session: store.sessions.getActive(project.id), error: null }; };
@@ -1888,7 +1899,12 @@ describe('bridge API: the round trip (#2031)', () => {
       assert.match(read('server.js'), /sessionId: result\.session\.id,/, 'which is how the launch route reads it too');
       // And both launch a session after the same warm-up, by the same function.
       assert.match(read('server.js'), /await launchWarmup\.warmForLaunch\(project\);/);
-      assert.match(read('lib/bridge-gateway.js'), /await require\('\.\/launch-warmup'\)\.warmForLaunch\(project\);\n\s+return require\('\.\/sessions'\)\.launchSession\(project\.name, \{ primePrompt: true, owner: null \}\);/);
+      assert.match(read('lib/bridge-gateway.js'), /warmForLaunch: \(project\) => require\('\.\/launch-warmup'\)\.warmForLaunch\(project\),/);
+      assert.match(read('lib/bridge-gateway.js'), /launchSession: \(project\) => require\('\.\/sessions'\)\.launchSession\(project\.name, \{ primePrompt: true, owner: null \}\),/);
+      // Nothing is awaited between the checks and the launch: the warm-up is the last await before it.
+      const begin = /async function _beginLaunch\(launch\) \{[\s\S]*?\n\}\n/.exec(read('lib/bridge-gateway.js'))[0];
+      assert.equal(begin.split('await ').length - 1, 1, 'one await in the whole of it');
+      assert.ok(begin.indexOf('await _deps.warmForLaunch') < begin.indexOf('_launchRefusal(launch.projectId);\n  if (code)'), 'and it comes before the checks that decide');
     });
 
     it('a launch that can neither begin nor end is left for the next pass, and does not hold the pass in a loop', async () => {
@@ -1896,16 +1912,106 @@ describe('bridge API: the round trip (#2031)', () => {
         const stuck = await consented();
         const behind = await consented();
         const realBegin = bridgeStore.launches.begin;
+        const realEnd = bridgeStore.launches.end;
         let attempts = 0;
-        // The store refuses to record the launch as begun: the row stays queued.
+        // The store refuses to record a launch as begun.
         bridgeStore.launches.begin = () => { attempts += 1; throw new Error('database is locked'); };
         try {
           const done = await Promise.race([gateway.tick().then(() => 'returned'), new Promise((resolve) => setTimeout(() => resolve('still looping'), 3000))]);
           assert.equal(done, 'returned', 'the pass ends');
-          assert.equal(attempts, 1, 'having tried the one whose turn it was, once');
-        } finally { bridgeStore.launches.begin = realBegin; }
-        assert.deepEqual([launchOf(stuck.routeId).state, launchOf(behind.routeId).state], ['queued', 'queued'], 'nothing overtook it');
+          assert.equal(attempts, 2, 'each queued launch was tried once');
+          assert.deepEqual([stuck, behind].map((c) => [launchOf(c.routeId).state, launchOf(c.routeId).failureCode]), [['failed', 'launch-error'], ['failed', 'launch-error']], 'a launch that could not be recorded is ended like any other failure, and holds nothing up');
+          assert.ok(store.sessions.getActive(stuck.project.id), 'the session it did start is left running');
+          // And when not even the ending can be written, the pass stops there and the next one tries again.
+          const third = await consented();
+          const fourth = await consented();
+          bridgeStore.launches.end = () => { throw new Error('database is locked'); };
+          attempts = 0;
+          const again = await Promise.race([gateway.tick().then(() => 'returned'), new Promise((resolve) => setTimeout(() => resolve('still looping'), 3000))]);
+          assert.deepEqual([again, attempts], ['returned', 1], 'it does not go on to the one behind');
+          assert.deepEqual([launchOf(third.routeId).state, launchOf(fourth.routeId).state], ['queued', 'queued']);
+        } finally { bridgeStore.launches.begin = realBegin; bridgeStore.launches.end = realEnd; }
       } finally { restore(); }
+    });
+
+    it('what is asked immediately before the launch is asked after the warm-up, however long that takes', async () => {
+      try {
+        const lane = (blocked, stopped) => () => ({ ...realControl(), blockingOf: () => ({ blocked, stopped }) });
+        /** A consented launch whose warm-up is still going; `during` runs while it waits, then the warm-up ends. */
+        const slowly = async (during) => {
+          launched = [];
+          const c = await consented();
+          let finish;
+          warming = new Promise((resolve) => { finish = resolve; });
+          const pass = gateway.tick();
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.deepEqual([launched.length, launchOf(c.routeId).state], [0, 'queued'], 'nothing is launched while the warm-up runs');
+          await during(c);
+          finish();
+          warming = null;
+          await pass;
+          return c;
+        };
+        // A lane held during the warm-up refuses the launch that follows it.
+        const held = await slowly(async () => { gateway._deps.controlState = lane(true, false); });
+        gateway._deps.controlState = realControl;
+        assert.deepEqual([launchOf(held.routeId).state, launchOf(held.routeId).failureCode, launched.length], ['failed', 'held', 0]);
+        // A session started by hand during the warm-up is waited on; nothing is launched beside it.
+        let manual;
+        const beaten = await slowly(async (c) => { manual = hub.anotherSession(c.project); });
+        assert.deepEqual([launchOf(beaten.routeId).state, launchOf(beaten.routeId).sessionId, launchOf(beaten.routeId).startedSession, launched.length], ['waiting-ready', manual.sessionId, false, 0]);
+        bridgeStore.launches.end(launchOf(beaten.routeId).launchSeq, 'abandoned', 'test-reset', new Date().toISOString());
+        // The bridge switched off during the warm-up: abandoned, not launched.
+        const off = await slowly(async () => { assert.equal((await asOperator('POST', '/api/bridge/operator/disable')).status, 200); });
+        assert.deepEqual([launchOf(off.routeId).state, launched.length], ['abandoned', 0]);
+        assert.equal((await asOperator('POST', '/api/bridge/operator/enable')).status, 200);
+        // The message closed during the warm-up: abandoned, not launched.
+        const gone = await slowly(async (c) => { assert.equal((await masterWrites(c.routeId, 'close', { expectedVersion: version(c.routeId) })).status, 200); });
+        assert.deepEqual([launchOf(gone.routeId).state, launched.length], ['abandoned', 0]);
+        // A second pass that comes round while the first is still warming up does not begin the same launch beside it.
+        const twice = await slowly(async () => {
+          const second = await gateway.tick();
+          assert.deepEqual(second.launches, { begun: 0, dispatched: 0 }, 'the second pass leaves the launches to the first');
+        });
+        assert.deepEqual([launchOf(twice.routeId).state, launched.length], ['waiting-ready', 1], 'launched once');
+      } finally { restore(); }
+    });
+
+    it('a project with a session that cannot be reached is not asked about: there is nothing to launch', async () => {
+      try {
+        const project = stopped();
+        const session = hub.anotherSession(project);
+        hub.workspaces.delete(String(session.sessionId));
+        const routeId = (await operatorWrites(`m${++seq}`, `@${project.name} hello`)).body.routeId;
+        const routed = await masterWrites(routeId, 'route', { expectedVersion: version(routeId), to: project.id });
+        assert.deepEqual([routed.status, routed.body.code], [409, 'TARGET_OFFLINE'], 'it cannot be sent there');
+        const res = await masterWrites(routeId, 'ask-launch', { expectedVersion: version(routeId), project: project.id });
+        assert.deepEqual([res.status, res.body.code], [409, 'TARGET_UNREACHABLE'], 'and a launch would start nothing: a session is already running');
+        assert.equal(db().prepare('SELECT COUNT(*) AS n FROM bridge_questions WHERE route_id = ?').get(routeId).n, 0);
+      } finally { restore(); }
+    });
+
+    it('a launch that cannot even be judged does not outlive its wait, and what is behind it then takes its turn', async () => {
+      const realMedusa = gateway._deps.medusa;
+      try {
+        const broken = await consented();
+        const behind = await consented();
+        await gateway.tick();
+        becomesReady(store.sessions.getActive(broken.project.id).id);
+        gateway._deps.medusa = () => ({ ...realMedusa(), getStatus: () => { throw new Error('listener map unavailable'); } });
+        await gateway.tick();
+        assert.deepEqual([launchOf(broken.routeId).state, launchOf(behind.routeId).state], ['waiting-ready', 'queued'], 'inside its wait it is still waited for');
+        const realNow = gateway._deps.now;
+        const at = new Date(Date.parse(realNow()) + gateway.READY_WAIT_MS + 5000).toISOString();
+        gateway._deps.now = () => at;
+        try {
+          await gateway.tick();
+          assert.deepEqual([launchOf(broken.routeId).state, launchOf(broken.routeId).failureCode], ['failed', 'launch-error']);
+        } finally { gateway._deps.now = realNow; }
+        gateway._deps.medusa = realMedusa;
+        await gateway.tick();
+        assert.equal(launchOf(behind.routeId).state, 'waiting-ready', 'the next in line is no longer held up');
+      } finally { gateway._deps.medusa = realMedusa; restore(); }
     });
 
     it('the three verbs over the command line', async () => {

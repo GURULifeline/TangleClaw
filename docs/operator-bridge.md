@@ -251,8 +251,10 @@ session is never started without the operator saying so.
 2. The Master asks: `tc bridge ask-launch <route-id> --version <n> --project <project>`. The
    server writes the question, in fixed words: "<project> is not running. Would you like me to
    launch it?" Nothing is launched by asking. Refused for a project that is running
-   (`409 TARGET_LIVE`), one the operator has opted out (`409 DESTINATION_OPTED_OUT`), and a
-   message that already has a launch under way (`409 LAUNCH_IN_PROGRESS`).
+   (`409 TARGET_LIVE`), one with a session running that cannot be reached over Medusa
+   (`409 TARGET_UNREACHABLE`: there is nothing to launch, and it is the operator's to look
+   at), one the operator has opted out (`409 DESTINATION_OPTED_OUT`), and a message that
+   already has a launch under way (`409 LAUNCH_IN_PROGRESS`).
 3. The operator replies to that question in the chat.
 4. On a yes, `tc bridge launch <route-id> --version <n> --answered-by <the reply's route-id>`
    records the consent. The same correlation rules apply as for any question, and only a reply
@@ -261,11 +263,15 @@ session is never started without the operator saying so.
    On a no or a cancel, `tc bridge decline <route-id> --version <n> --answered-by <the reply's
    route-id>` closes the message and clears its text. Nothing is launched and nothing is sent.
 5. **The server launches.** On its next pass the gateway takes the oldest queued launch, if
-   none is in flight, and starts a session for the project through the same function the
-   launch route uses, with the project's saved settings and no override of engine, mode, prompt
-   or permission. One launch is in flight on the install at a time; the rest wait in the order
-   consent was adopted. If a session for the project is already live, because someone started
-   it by hand in the meantime, nothing is launched and that session is the one waited for.
+   none is in flight. It first does the launch route's own warm-up, which reads the network
+   and can take many seconds. Then, with nothing awaited in between, it asks again whether
+   anything stands in the way, whether a session is already live, and calls the function the
+   launch route calls, with the project's saved settings and no override of engine, mode,
+   prompt or permission. (The route also resolves the operator's host and checks for stranded
+   wraps afterwards; the bridge has no request to read a host from, and does neither.) One
+   launch is in flight on the install at a time; the rest wait in the order consent was
+   adopted. If a session for the project is already live, because someone started it by hand
+   in the meantime, nothing is launched and that session is the one waited for.
 6. **The message is sent on only when all of this holds at once:** the session the launch
    named is still the project's active one; its launch sequence carries the launch id recorded
    and has attested READY; its recovery gate is not withheld; the server itself holds a Medusa
@@ -285,7 +291,8 @@ nothing more:
 | `project-gone`, `project-archived`, `project-opted-out` | The project is no longer one the bridge may reach. |
 | `held`, `stopped`, `control-unavailable` | The project's control lane is held or stopped, or could not be read. The launch route itself refuses only a stopped lane; the bridge refuses both. |
 | `wrap-running` | A wrap is running for the project. |
-| `launch-refused:<CODE>`, `launch-error` | The launch function refused or failed. Only its own closed code is passed on. |
+| `launch-refused:<CODE>` | The launch function refused. Only its own closed code is passed on, never its prose. |
+| `launch-error` | The warm-up or the launch threw, the launch could not be recorded, or it could not be judged for the whole of its wait. A session that had started is left running, and the server log names it. |
 | `identity-unknown`, `identity-changed` | The session has no launch record, or is no longer the session the launch named. |
 | `ready-not-applicable` | The session's launch has nothing to attest, so it can never say it is READY. Said at once. |
 | `ready-timeout` | Ten minutes passed without every condition of step 6 holding. |
@@ -294,6 +301,11 @@ On any of them the operator is sent one fixed sentence carrying the code, the me
 to waiting for the Master with the code on it, and the Master is told. No other target is
 tried and nothing is retried: another launch needs another consent. A session that did start
 is left running; the bridge never ends one. `tc bridge read` shows where a launch stands.
+
+The session the message is sent to is held to the launch at the moment of sending as well: if
+another session has taken its place in that instant, the message goes back to the Master as
+`identity-changed`. That binds the one send the launch made. A later decision by the Master to
+route the same message is its own, and goes to whichever session is live then.
 
 Closing the message abandons its launch. Disabling the bridge abandons every launch not yet
 settled, and enabling it again revives none. Nothing about a launch is kept in memory: after a
