@@ -1970,8 +1970,10 @@ describe('bridge API: the round trip (#2031)', () => {
         assert.deepEqual([launchOf(gone.routeId).state, launched.length], ['abandoned', 0]);
         // A second pass that comes round while the first is still warming up does not begin the same launch beside it.
         const twice = await slowly(async () => {
-          const second = await gateway.tick();
-          assert.deepEqual(second.launches, { begun: 0, dispatched: 0 }, 'the second pass leaves the launches to the first');
+          // Raced against a timer: a second pass that joined the first in its warm-up would wait here for ever.
+          const second = await Promise.race([gateway.tick(), new Promise((resolve) => setTimeout(() => resolve('waited on the warm-up'), 2000))]);
+          assert.notEqual(second, 'waited on the warm-up', 'the second pass does not join the first');
+          assert.deepEqual(second.launches, { begun: 0, dispatched: 0 }, 'it leaves the launches to the first');
         });
         assert.deepEqual([launchOf(twice.routeId).state, launched.length], ['waiting-ready', 1], 'launched once');
       } finally { restore(); }
