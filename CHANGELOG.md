@@ -69,6 +69,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Internal
 
+- **Tests can no longer drift back to non-strict assertions** (#1377). A test in the suite, backed by `scripts/assert-strict-guard.js`, reads every `*.test.js` file under `test/` at any depth and fails when one requires bare `node:assert`, naming the file, the line and the fix. It reads the directory and carries no list of files. The three suites that had drifted since the last conversion (`remote-output`, `wrap-consecutive-step-delivery`, `wrap-delivery-receipt`) now use `node:assert/strict`; all of their assertions pass unchanged. The unprefixed `assert` is the same module and is caught the same way. A real exception is written on the line as `// prawduct:allow project/bare-assert -- <reason>`, and the command lists every one it honours.
 - **The warm-up before a session launch lives in one module** (`lib/launch-warmup.js`, #2031), because the operator bridge launches sessions too and must warm up as the launch route does. The #991 test that the route awaits the CI probe before launching follows the contract through it.
 
 - **The runbook test that types each pasted block into an interactive zsh is announced in the skip ledger** (#2031). It needs macOS, its zsh and `expect`, so it is skipped on the Linux runner; `test/skip-ledger.json` now says why and where it runs, as the skip audit requires. The structural test of every block and the test of every one-line command run everywhere.

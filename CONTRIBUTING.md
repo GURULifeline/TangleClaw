@@ -74,6 +74,20 @@ node --test --test-reporter=junit --test-reporter-destination=test-results.xml '
 node scripts/test-skip-audit.js test-results.xml
 ```
 
+### Strict assertions
+
+Tests use `node:assert/strict`. A test in the suite fails when any `*.test.js` file under `test/`, at any depth, requires bare `node:assert` (or `assert`, the same module), and names each file and line. To ask outside the suite:
+
+```bash
+node scripts/assert-strict-guard.js
+```
+
+The fix is to change the import. If a file truly needs loose assertions, say so where it applies, on the line or the one above it. A waiver with no reason waives nothing:
+
+```js
+// prawduct:allow project/bare-assert -- <why this file needs loose assertions>
+```
+
 ### The service-worker cache guard
 
 `public/sw.js` serves most `public/*` assets cache-first, so a browser with an active service worker keeps handing out the copy it already has until `CACHE_NAME` changes. Ship a change to one of those files without bumping the generation and it is invisible to operators — who are typically remote, on a phone, with no hard-reload. It has recurred four times (#246, #271, #427, #623), and none of those four files is what the guard watches today — each has since been carved into `NETWORK_FIRST_PATHS`, and not always by its own fix — `ui.js` and `style.css` were carved for #422 some three weeks before #623 was closed by a `CACHE_NAME` bump. It watches whatever is still cache-first, recomputed from `sw.js` on every run, so files added later are covered without anyone maintaining a list.

@@ -11,7 +11,7 @@
  */
 
 const test = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 
 // A real store on a throwaway base path, established SYNCHRONOUSLY at require
 // time. `ENGINE_WAKE_PROFILES` is derived from the profiles the store holds, so
