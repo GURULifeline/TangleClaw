@@ -1731,11 +1731,24 @@ describe('bridge API: the round trip (#2031)', () => {
         return c;
       };
       const NOTICE = 'I could not get a session ready for your message (ready-timeout). Your message is still held, and nothing was sent on.';
-      /** Each place the three old writes used to part: the store is made to fail there, once the write has got that far. */
+      /**
+       * Each place the three old writes used to part: the store is made to fail there, once the write has got that
+       * far, and only the first time, as a passing fault would. A second try in the same pass would succeed.
+       */
+      const once = (fn) => { let spent = false; return (...args) => { if (!spent && fn(...args)) { spent = true; return true; } return false; }; };
       const BOUNDARIES = {
-        'as the launch is ended': (real) => { bridgeStore.audit.append = (row) => { if (row.op === 'launch' && row.outcome === 'failed') throw new Error('injected: at the launch\'s end'); return real.append.call(bridgeStore.audit, row); }; },
-        'as the notice is queued': (real) => { bridgeStore.outbound.enqueue = (item) => { if (item.kind === 'failure') throw new Error('injected: at the notice'); return real.enqueue.call(bridgeStore.outbound, item); }; },
-        'as the message is marked': (real) => { bridgeStore.audit.append = (row) => { if (row.op === 'launch-failed') throw new Error('injected: at the route\'s record'); return real.append.call(bridgeStore.audit, row); }; }
+        'as the launch is ended': (real) => {
+          const here = once((row) => row.op === 'launch' && row.outcome === 'failed');
+          bridgeStore.audit.append = (row) => { if (here(row)) throw new Error('injected: at the launch\'s end'); return real.append.call(bridgeStore.audit, row); };
+        },
+        'as the notice is queued': (real) => {
+          const here = once((item) => item.kind === 'failure');
+          bridgeStore.outbound.enqueue = (item) => { if (here(item)) throw new Error('injected: at the notice'); return real.enqueue.call(bridgeStore.outbound, item); };
+        },
+        'as the message is marked': (real) => {
+          const here = once((row) => row.op === 'launch-failed');
+          bridgeStore.audit.append = (row) => { if (here(row)) throw new Error('injected: at the route\'s record'); return real.append.call(bridgeStore.audit, row); };
+        }
       };
 
       it('all three land together: the launch ended, the message marked, and one fixed notice in reply to the operator\'s message', async () => {
@@ -1778,8 +1791,8 @@ describe('bridge API: the round trip (#2031)', () => {
             try {
               await later(gateway.READY_WAIT_MS + 5000, () => gateway.tick().catch(() => {}));
             } finally { bridgeStore.audit.append = real.append; bridgeStore.outbound.enqueue = real.enqueue; }
-            assert.ok(hit >= 1, 'the write got as far as the injected failure');
-            assert.equal(standing(c), before, 'none of the three landed');
+            assert.equal(hit, 1, 'the write got as far as the injected failure, once');
+            assert.equal(standing(c), before, 'none of the three landed, and the same pass did not end it as something else');
             assert.equal(launchOf(c.routeId).state, 'waiting-ready', 'so the launch is still one a pass comes back to');
             // As after a restart: nothing remembered. The next pass finds the launch and finishes the job.
             gateway._reset();
@@ -1799,6 +1812,26 @@ describe('bridge API: the round trip (#2031)', () => {
           } finally { bridgeStore.audit.append = real.append; bridgeStore.outbound.enqueue = real.enqueue; restore(); }
         });
       }
+
+      it('a launch refused before it begins, whose failure could not be written, is refused again for that reason and not ended as an error', async () => {
+        const real = { append: bridgeStore.audit.append };
+        try {
+          const c = await consented();
+          assert.equal(launchOf(c.routeId).state, 'queued');
+          assert.equal((await asOperator('POST', '/api/bridge/operator/optouts', { body: { project: c.project.id } })).status, 200);
+          const before = standing(c);
+          BOUNDARIES['as the message is marked'](real);
+          try { await gateway.tick().catch(() => {}); } finally { bridgeStore.audit.append = real.append; }
+          assert.equal(standing(c), before, 'nothing landed, under any code');
+          assert.equal(launchOf(c.routeId).state, 'queued');
+          gateway._reset();
+          await gateway.tick();
+          assert.deepEqual([launchOf(c.routeId).state, launchOf(c.routeId).failureCode, bridgeStore.routes.get(c.routeId).failureCode], ['failed', 'project-opted-out', 'project-opted-out']);
+          assert.deepEqual(failureRows(c.routeId).map((r) => r.text), ['I could not get a session ready for your message (project-opted-out). Your message is still held, and nothing was sent on.']);
+          assert.equal(launched.filter((args) => args[0].id === c.project.id).length, 0, 'and nothing was ever launched for it');
+          bridgeStore.optouts.remove(c.project.id);
+        } finally { bridgeStore.audit.append = real.append; restore(); }
+      });
 
       it('a launch that is already ended is not reported again by a write that names it, and one that is another message\'s is not touched', async () => {
         try {
@@ -2206,6 +2239,19 @@ describe('bridge API: the round trip (#2031)', () => {
           const again = await Promise.race([gateway.tick().then(() => 'returned'), new Promise((resolve) => setTimeout(() => resolve('still looping'), 3000))]);
           assert.deepEqual([again, attempts], ['returned', 1], 'it does not go on to the one behind');
           assert.deepEqual([launchOf(third.routeId).state, launchOf(fourth.routeId).state], ['queued', 'queued']);
+          // The store works again. The next pass comes back to the launch whose failure was never written: it
+          // finds the session that consent already started and waits on that one. Nothing is launched twice.
+          const startedFor = (project) => launched.filter((args) => args[0].id === project.id).length;
+          assert.equal(startedFor(third.project), 1);
+          const started = store.sessions.getActive(third.project.id);
+          bridgeStore.launches.begin = realBegin; bridgeStore.launches.end = realEnd; bridgeStore.applyRouteWrite = realWrite;
+          gateway._reset();
+          await gateway.tick();
+          const resumed = launchOf(third.routeId);
+          assert.deepEqual([resumed.state, resumed.sessionId, resumed.startedSession], ['waiting-ready', started.id, false], 'it waits on the session already there');
+          assert.equal(startedFor(third.project), 1, 'one consent, one launch');
+          assert.equal(db().prepare("SELECT COUNT(*) AS n FROM bridge_outbound WHERE route_id = ? AND kind = 'failure'").get(third.routeId).n, 0, 'and nobody is told of a failure that did not happen');
+          assert.equal(launchOf(fourth.routeId).state, 'queued', 'the one behind still waits its turn');
         } finally { bridgeStore.launches.begin = realBegin; bridgeStore.launches.end = realEnd; bridgeStore.applyRouteWrite = realWrite; }
       } finally { restore(); }
     });
