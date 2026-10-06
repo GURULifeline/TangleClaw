@@ -856,6 +856,8 @@ Suite: `node --test 'test/*.test.js'` (CI-gated; the run prints its own totals �
 - `test/bridge-helper-cli.test.js` — #2031: the helper's commands with the machine supplied by the test: config, secrets from stdin, the one-helper lock, status, settle, and the launchd job.
 - `test/_fake-discord.js` — helper for the above: Discord's REST calls over real HTTP with nonce de-duplication, and a WebSocket the test drives.
 - `test/api-bridge.test.js` — #2031: against the real server and the real `bin/tc`, `/api/bridge/master/*` answers only the live Master credential, refuses everything but `status` while the bridge is disabled, closes a route idempotently with an audit row, and `tc` sends the credential on the `bridge` verb only.
+- `test/panel-toggle-rows.test.js` — #1906: the ports, groups and OpenClaw panels render each row's toggle as a native button holding only the arrow, name and passive metadata, with every action control beside it rather than nested inside, checked by walking the rendered HTML as a tree. #1946: folding a row keeps keyboard focus on its toggle.
+- `test/port-owner-kind-panel.test.js` — #1768/#1915: against the real server, the ports panel badges an owner marked "Not a project", its rendered undo button sets the owner back to project and redraws, and a refused undo leaves the badge and says why.
 
 ## TODO (auto-stubbed 2026-09-29)
 
