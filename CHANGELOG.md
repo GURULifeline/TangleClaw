@@ -4,6 +4,10 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+### Internal
+
+- **The Feature Index lists two panel tests it had missed** (#1906, #1768). `FEATURES.md` now has entries for `test/panel-toggle-rows.test.js` and `test/port-owner-kind-panel.test.js`, both of which have been in the suite since those issues shipped. The entries were written in a session's working copy and never committed; they are carried over here, with the first brought up to date for the focus test added since (#1946).
+
 ## [5.31.0] - 2026-10-06
 
 ### Added
