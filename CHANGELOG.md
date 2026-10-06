@@ -4,6 +4,8 @@ All notable changes to TangleClaw are documented in this file.
 
 ## [Unreleased]
 
+## [5.31.0] - 2026-10-06
+
 ### Added
 
 - **Global settings has an Operator bridge (Discord) section** (#2031, ADR 0023). The signed-in operator can see the bridge's state and switch it from the dashboard: enable and disable it, set the exact allowlist, create or revoke the helper's token, say whether sessions are told of `tc candidate`, reset the configuration circuit, and put back or withdraw each item that was set aside. The bridge is still off until the operator enables it here.
