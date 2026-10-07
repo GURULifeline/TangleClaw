@@ -43,7 +43,13 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 **The change.** `POST /api/sessions/:project/launch/reconciliation` returns the stored text with its launch (sequence, attested revision, accepted-at, READY digest, preflight verdict, clearance) and the constant `provenance: agent-authored-unverified`. It proves the operator with `_requireOperatorWrite`, unchanged, which is why it is a POST. The Launch readiness panel gets a button on each attested row; the text is fetched on the click, escaped, labelled as the session's unchecked account, and long text sits in a `<details>`. `GET /api/launch-sequences` is not touched.
 
-**Decision recorded in the plan.** A dedicated route over an operator-only field on the GET: that route's caller resolver reads any browser-shaped request on an open install as the operator, which a bound session can imitate with one header.
+**Decision recorded in the plan.** A dedicated route over an operator-only field on the GET: that route's caller resolver reads any browser-shaped request on an open install as the operator, which a bound session can imitate with one header. The dedicated route narrows that channel and does not close it.
+
+**The limit.** With a login on, only a signed-in session reads the text. On an install with no login the proof is of a request's shape, so a local process that imitates a same-origin browser and carries a page token it fetched itself is served, a session included. The review found the documents stating the refusal without this; the CHANGELOG, user guide, FEATURES and ADR 0017 R3b now state it per gate state, and one test records it.
+
+**Also changed.** `test/api-coordinator-rotation.test.js` names the new route in the coordinator epoch-gate exemptions, with its reason: the roster guard, built from the registered routes, failed the first full run until it did.
+
+**Review.** Cumulative: 0 blocking, 4 warnings. Fixed two leak channels that had no test (the server log, the Master on the launch list) and the unqualified claim above. The duplicated operator-route preamble is filed as #2148. Owed after merge: a press of the button on a live dashboard, armed and open.
 
 **Split.** The default flip, the hint variants, ADR 0017's R3 rewrite and the contract-change tests are chunk 04b, in its own session, after this is on main.
 
