@@ -52,6 +52,7 @@ Dispatched by the PM as the prerequisite for #2188 (Architect ruling A122, item 
 **Added after the Architect's exact-head review (A143).** The reset was reported only when the request left the mode out. The dashboard never does that: its mode control resets when the engine dropdown moves and the save sends the default by name, so a dashboard operator got no word after the save. The warning now follows the outcome (the project went in on a non-default mode and came out on the default across an engine change), and a mode the request chose for the new engine is not called a reset. The same review's CI run failed two tests in `test/wrap-intent-cancel.test.js`, whose harness runs the real `doSaveSettings` and did not supply the new `tcLaunchModePatch`; it now passes the real helper. I had not run that file: every file that evaluates `doSaveSettings` is now in the local run.
 
 **Not covered.** The Project Master's own `master.launchMode` follows the older keep-if-honored rule when its engine changes; that is a separate setting with its own store and was outside this issue. Filed as #2197. No live launch was run; the launch command is asserted from the stored mode through `_buildLaunchCommand`.
+
 ## 2026-10-07 — #2188: the rules for which model an engine may be launched with
 
 <!-- prawduct: type=feature | scope=2188-engine-model-selection -->
