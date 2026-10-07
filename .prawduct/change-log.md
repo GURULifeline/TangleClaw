@@ -45,7 +45,7 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 **Why whole panes.** The 0.155.1 set is three-row excerpts. The state #2059 turned on is one an excerpt would not have kept: the screen Codex opens with draws the empty composer before the folder-trust or update prompt replaces it. It was captured on all three versions, 0.156.1 included (about three seconds there, from one timed run).
 
-**The cell pinned as it behaves.** `NOT_REFUSED_ON_FRESH_IDLE` names the opening screen: with a fresh idle from the channel the pane gate types into it, because the at-rest marker is the only thing that refuses that screen and a fresh idle excuses exactly that marker. Whether the channel can answer idle while that screen is up is a question for a live channel probe, not a fixture, and it applies to the verified 0.156.1 as much as to the unverified versions. Reported to the PM and Architect; closing it belongs to the later chunks.
+**The cell recorded as known unsafe (not a safety pass; Architect A108/A109).** `NOT_REFUSED_ON_FRESH_IDLE` names the opening screen: with a fresh idle from the channel the pane gate types into it, because the at-rest marker is the only thing that refuses that screen and a fresh idle excuses exactly that marker. Whether the channel can answer idle while that screen is up is a question for a live channel probe, not a fixture, and it applies to the verified 0.156.1 as much as to the unverified versions. Reported to the PM and Architect; closing it belongs to the later chunks.
 
 **Not covered.** A real model turn (the busy panes are a fake key's first second before its 401), approval prompts, the 0.159+ agent views, and anything about the app-server protocol.
 

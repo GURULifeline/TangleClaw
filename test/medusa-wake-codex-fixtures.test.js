@@ -95,16 +95,23 @@ const ON_FRESH_IDLE = {
 };
 
 /**
- * Live panes the pane gate does NOT refuse on a fresh idle from the channel,
- * although nothing should be typed into them.
+ * KNOWN UNSAFE. Live panes the pane gate does NOT refuse on a fresh idle from
+ * the channel, although nothing may be typed into them. An entry here records
+ * a hole, not a safety property, and a green test over it proves only that the
+ * hole is still there.
  *
  * Codex draws its empty composer on the screen it opens with, before the
  * folder-trust or update prompt replaces it: no busy marker, a bare prompt, a
  * still transcript. Only the missing at-rest marker refuses that screen, and a
- * fresh idle from the channel excuses exactly that marker. So what keeps a
- * nudge out of it is the channel not answering idle while it is up, which no
- * fixture can show. The cell is pinned as it behaves so that closing it is a
- * deliberate edit here, never a silent one.
+ * fresh idle from the channel excuses exactly that marker. So the one thing
+ * keeping a nudge out of it is the channel not answering idle while it is up.
+ * Nothing proves that it cannot, on any version here, the verified one
+ * included, and no fixture could: it is a question about a live channel.
+ *
+ * An empty composer cannot be the refusal either, because a usable session
+ * shows the same one. Closing this needs a positive sign that the TUI is
+ * ready. When that exists, the pane moves to `ON_FRESH_IDLE` with its hold
+ * and this list empties.
  */
 const NOT_REFUSED_ON_FRESH_IDLE = ['startScreen'];
 
@@ -283,9 +290,9 @@ describe('the wake gate over every Codex engine state, per captured version (#20
         // one, so its fresh-idle cell is not asserted: see UNPROVEN_ON_FRESH_IDLE.
         if (pane.provenance !== 'live-capture') continue;
         if (NOT_REFUSED_ON_FRESH_IDLE.includes(paneName)) {
-          it(`${paneName} pane, channel idle: not refused by the pane, so the channel is the only guard`, async () => {
+          it(`KNOWN UNSAFE: ${paneName} pane, channel idle: the pane gate does not refuse it and a nudge is typed`, async () => {
             const out = await judge(pane.lines, CHANNEL_ANSWERS.idle);
-            assert.deepEqual(out, { injected: 1, held: null });
+            assert.deepEqual(out, { injected: 1, held: null }, 'if this now holds, the hole is closed: move the pane to ON_FRESH_IDLE');
           });
           continue;
         }
@@ -427,4 +434,11 @@ describe('a captured Codex version is woken only if the profile verified it (#20
 
   // What the gate then does with such a session is the `absent` row of the
   // matrix above: held as engine-channel-absent on every pane of every set.
+});
+
+describe('the known-unsafe list is exactly the opening screen (#2059)', () => {
+  it('names nothing else, so a second hole cannot be added quietly', () => {
+    assert.deepEqual(NOT_REFUSED_ON_FRESH_IDLE, ['startScreen']);
+    for (const name of NOT_REFUSED_ON_FRESH_IDLE) assert.ok(!(name in ON_FRESH_IDLE), `${name} has no hold to mistake for a refusal`);
+  });
 });
