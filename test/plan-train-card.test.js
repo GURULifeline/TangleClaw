@@ -48,6 +48,21 @@ function render(body, fence = '```') {
 }
 
 /**
+ * The markup a car opens with: its pill, then its info popover as far as the
+ * state's words. What follows is that state's meaning.
+ * @param {number} issue - Issue number.
+ * @param {string} state - State class.
+ * @param {string} words - The state in words.
+ * @param {string} [title] - The car's title, as it appears escaped.
+ * @returns {string}
+ */
+function car(issue, state, words, title) {
+  return `<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#${issue}</span>`
+    + `<span class="car-info"><span class="car-info-head">#${issue}${title ? ` ${title}` : ''}</span>`
+    + `<span class="car-info-line"><span class="car-info-state">${words}</span>: `;
+}
+
+/**
  * Assert a block is refused: code fallback plus a reason matching `why`.
  * @param {object|string} body - Block.
  * @param {RegExp} why - Expected reason.
@@ -68,7 +83,9 @@ describe('plan train cards (#1930)', () => {
 
     it('renders a collapsible card whose summary is the engine, the cars, the name, the count and the badge', () => {
       assert.match(html, /^<details class="train-card"><summary class="train-summary"><span class="train-engine" aria-hidden="true">🚂<\/span>/);
-      assert.match(html, /<span class="train-car open" title="#411 open" aria-label="#411 open">#411<\/span><span class="train-joint" aria-hidden="true">—<\/span><span class="train-car closed" title="#1234 closed" aria-label="#1234 closed">#1234<\/span>/);
+      assert.ok(html.includes(car(411, 'open', 'open', 'Stale service worker')));
+      assert.ok(html.includes(car(1234, 'closed', 'closed', 'Done thing')));
+      assert.match(html, /<\/span><\/span><span class="train-joint" aria-hidden="true">—<\/span><span class="train-car closed" tabindex="0">/);
       assert.match(html, /<span class="train-name">Train 1: First Install, Completed<\/span><span class="train-count">\(1\/2\)<\/span><span class="train-badge">verified<\/span><\/summary>/);
     });
 
@@ -244,10 +261,10 @@ describe('train version, status and car state (#1933)', () => {
         { issue: 4, closed: true, state: 'closed' }
       ]
     }));
-    assert.match(html, /<span class="train-car in-progress" title="#1 in progress" aria-label="#1 in progress">#1<\/span>/);
-    assert.match(html, /<span class="train-car blocked" title="#2 blocked" aria-label="#2 blocked">#2<\/span>/);
-    assert.match(html, /<span class="train-car open" title="#3 open" aria-label="#3 open">#3<\/span>/);
-    assert.match(html, /<span class="train-car closed" title="#4 closed" aria-label="#4 closed">#4<\/span>/);
+    assert.ok(html.includes(car(1, 'in-progress', 'in progress')));
+    assert.ok(html.includes(car(2, 'blocked', 'blocked')));
+    assert.ok(html.includes(car(3, 'open', 'open')));
+    assert.ok(html.includes(car(4, 'closed', 'closed')));
     assert.match(html, /<td class="train-state">◐ in progress<\/td>/);
     assert.match(html, /<td class="train-state">⛔ blocked<\/td>/);
     assert.match(html, /\(1\/4\)/);
@@ -256,8 +273,8 @@ describe('train version, status and car state (#1933)', () => {
 
   it('keeps the old behaviour when a car has no state', () => {
     const html = render(train({ cars: [{ issue: 5, closed: false }, { issue: 6, closed: true }] }));
-    assert.match(html, /train-car open" title="#5 open"/);
-    assert.match(html, /train-car closed" title="#6 closed"/);
+    assert.ok(html.includes(car(5, 'open', 'open')));
+    assert.ok(html.includes(car(6, 'closed', 'closed')));
     assert.match(html, /<strong>1 open · 1 closed<\/strong>/);
   });
 
@@ -496,7 +513,7 @@ describe('ID-less Topic Buckets (#2006)', () => {
     const html = render(bucket());
     assert.match(html, /<details class="train-card"/);
     assert.match(html, /<summary class="train-summary"/);
-    assert.match(html, /aria-label="#192 open"/);
+    assert.match(html, /<span class="train-car open" tabindex="0"><span aria-hidden="true">#192<\/span>/);
   });
 
   it('names it exactly "Topic Bucket: <title>", with no train number', () => {
@@ -548,8 +565,8 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
         { issue: 2, closed: true, state: 'dropped' }
       ]
     }));
-    assert.match(html, /<span class="train-car in-review" title="#1 in review" aria-label="#1 in review">#1<\/span>/);
-    assert.match(html, /<span class="train-car dropped" title="#2 dropped" aria-label="#2 dropped">#2<\/span>/);
+    assert.ok(html.includes(car(1, 'in-review', 'in review')));
+    assert.ok(html.includes(car(2, 'dropped', 'dropped')));
     assert.match(html, /<td class="train-state">◆ in review<\/td>/);
     assert.match(html, /<td class="train-state">⊘ dropped<\/td>/);
   });
@@ -566,9 +583,9 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
       cars: trainCard.CAR_STATES.map((state, i) => ({ issue: i + 1, closed: trainCard.CLOSED_CAR_STATES.includes(state), state }))
     }));
     trainCard.CAR_STATES.forEach((state, i) => {
-      const pill = html.match(new RegExp(`<span class="train-car ${state}" title="#${i + 1} ([a-z ]+)" aria-label="#${i + 1} ([a-z ]+)">`));
+      const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#${i + 1}</span>`
+        + `<span class="car-info"><span class="car-info-head">#${i + 1}</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
       assert.ok(pill, `${state} has a labelled pill`);
-      assert.equal(pill[1], pill[2]);
       assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
       if (state !== 'open') assert.match(page, new RegExp(`\\.train-car\\.${state}\\{`), `${state} has a style`);
     });
@@ -589,7 +606,7 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
 
   it('counts a state-less closed car as closed, never as dropped', () => {
     const html = render(train({ cars: [{ issue: 6, closed: true }] }));
-    assert.match(html, /train-car closed" title="#6 closed"/);
+    assert.ok(html.includes(car(6, 'closed', 'closed')));
     assert.match(html, /\(1\/1\)/);
   });
 
@@ -1080,9 +1097,9 @@ describe('the car-state legend (#2165)', () => {
       for (const state of trainCard.CAR_STATES) {
         const closed = trainCard.CLOSED_CAR_STATES.includes(state);
         const html = render(train({ cars: [{ issue: 7, closed, state }] }));
-        const pill = html.match(new RegExp(`<span class="train-car ${state}" title="#7 ([a-z ]+)" aria-label="#7 ([a-z ]+)">#7</span>`));
+        const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#7</span>`
+          + `<span class="car-info"><span class="car-info-head">#7</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
         assert.ok(pill, `${state} renders as a pill`);
-        assert.equal(pill[1], pill[2]);
         assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
         assert.ok(css.includes(`\n.train-car.${state}{`), `${state} has a style rule`);
       }
@@ -1180,11 +1197,169 @@ describe('the car-state legend (#2165)', () => {
         }
       });
 
+      it(`gives a car's info popover at least 4.5:1 for its text against its own background in the ${scheme} scheme`, () => {
+        const text = resolve(declared('.car-info', 'color'), tokens);
+        const fill = resolve(declared('.car-info', 'background'), tokens);
+        const ratio = contrast(text, fill);
+        assert.ok(ratio >= 4.5, `${text} on ${fill} is ${ratio.toFixed(2)}:1`);
+      });
+
       it(`gives the legend's words at least 4.5:1 against the page in the ${scheme} scheme`, () => {
         const text = resolve(declared('main.plan ul.train-legend', 'color'), tokens);
         const ratio = contrast(text, tokens['--bg']);
         assert.ok(ratio >= 4.5, `${text} on ${tokens['--bg']} is ${ratio.toFixed(2)}:1`);
       });
     }
+  });
+});
+
+describe('a car\'s info popover (#2165)', () => {
+  /**
+   * The info popover of one car, by issue number.
+   * @param {string} html - Rendered HTML.
+   * @param {number} issue - Issue number.
+   * @returns {string} The popover's inner HTML.
+   */
+  function infoOf(html, issue) {
+    const m = html.match(new RegExp(`<span aria-hidden="true">#${issue}</span><span class="car-info">(.*?)</span></span>(?=<span class="train-(?:joint|name)")`));
+    assert.ok(m, `#${issue} has an info popover`);
+    return m[1];
+  }
+
+  describe('what it says', () => {
+    it('gives the issue number and title, then the state with the meaning the legend gives it', () => {
+      const html = render(train({ cars: [{ issue: 411, closed: false, state: 'in-review', title: 'Stale service worker' }] }));
+      assert.equal(infoOf(html, 411),
+        '<span class="car-info-head">#411 Stale service worker</span>'
+        + '<span class="car-info-line"><span class="car-info-state">in review</span>: written, pull request open for review</span>');
+    });
+
+    it('takes every state\'s meaning from the one map the legend reads', () => {
+      const legend = trainCard.renderLegend();
+      for (const state of trainCard.CAR_STATES) {
+        const closed = trainCard.CLOSED_CAR_STATES.includes(state);
+        const info = infoOf(render(train({ cars: [{ issue: 7, closed, state }] })), 7);
+        const said = info.match(/<span class="car-info-state">([^<]+)<\/span>: ([^<]+)<\/span>$/);
+        assert.ok(said, `${state} is said in words`);
+        assert.equal(said[2], trainCard.CAR_STATE_MEANING[state]);
+        assert.ok(legend.includes(`<span class="train-car ${state}">${said[1]}</span> ${said[2]}</li>`), `${state} reads the same in the legend`);
+      }
+    });
+
+    it('gives a car without a title its number, state and meaning', () => {
+      const html = render(train({ cars: [{ issue: 5, closed: false }] }));
+      assert.equal(infoOf(html, 5),
+        '<span class="car-info-head">#5</span><span class="car-info-line"><span class="car-info-state">open</span>: not started</span>');
+    });
+
+    it('adds the reason a car needs attention, and the lane that owns its train, when the block gives them', () => {
+      const html = render(train({
+        owner: 'Pilot-B2',
+        cars: [{ issue: 9, closed: false, state: 'blocked', title: 'Merge', reason: 'Conflicts with main in CHANGELOG.md' }, { issue: 10, closed: true }]
+      }));
+      assert.equal(infoOf(html, 9),
+        '<span class="car-info-head">#9 Merge</span>'
+        + '<span class="car-info-line"><span class="car-info-state">blocked</span>: needs attention: merge conflicts, a failed check, or labelled blocked</span>'
+        + '<span class="car-info-line">Reason: Conflicts with main in CHANGELOG.md</span>'
+        + '<span class="car-info-line">lane: Pilot-B2</span>');
+      assert.match(infoOf(html, 10), /<span class="car-info-state">closed<\/span>: [^<]+<\/span><span class="car-info-line">lane: Pilot-B2<\/span>$/);
+    });
+
+    it('shows no reason line and no lane line when there is none', () => {
+      const info = infoOf(render(train({ cars: [{ issue: 9, closed: false, state: 'blocked' }] })), 9);
+      assert.doesNotMatch(info, /Reason:|lane:/);
+    });
+
+    it('shows a reason on a car in any state', () => {
+      const info = infoOf(render(train({ cars: [{ issue: 3, closed: false, state: 'in-progress', reason: 'Waiting on #2' }] })), 3);
+      assert.match(info, /<span class="car-info-line">Reason: Waiting on #2<\/span>$/);
+    });
+  });
+
+  describe('the reason field', () => {
+    it('escapes the reason and the title, so neither becomes markup', () => {
+      const html = render(train({ cars: [{ issue: 1, closed: false, title: '<img src=x onerror=1>', reason: '<script>alert(1)</script> & "more"' }] }));
+      assert.doesNotMatch(html, /<img|<script/);
+      assert.match(infoOf(html, 1), /Reason: &lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;more&quot;<\/span>$/);
+      assert.match(infoOf(html, 1), /^<span class="car-info-head">#1 &lt;img src=x onerror=1&gt;<\/span>/);
+    });
+
+    it('refuses a reason that is not a string or is over the bound, and accepts one at the bound', () => {
+      refused(train({ cars: [{ issue: 1, closed: false, reason: 5 }] }), /cars\[0\]\.reason must be a string/);
+      refused(train({ cars: [{ issue: 1, closed: false, reason: 'x'.repeat(trainCard.LIMITS.carReason + 1) }] }), /cars\[0\]\.reason/);
+      assert.match(render(train({ cars: [{ issue: 1, closed: false, reason: 'x'.repeat(trainCard.LIMITS.carReason) }] })), /class="train-card"/);
+      assert.equal(trainCard.LIMITS.carReason, 300);
+    });
+
+    it('still refuses a car key the schema does not name', () => {
+      refused(train({ cars: [{ issue: 1, closed: false, owner: 'x' }] }), /cars\[0\] has unknown key/);
+    });
+  });
+
+  describe('reaching it', () => {
+    const html = render(train());
+
+    it('makes every car a keyboard stop', () => {
+      assert.equal(html.match(/<span class="train-car (?:open|closed)" tabindex="0">/g).length, 2);
+    });
+
+    it('carries no title attribute on a car, so a browser tooltip never doubles the popover', () => {
+      assert.doesNotMatch(html, /<span class="train-car [a-z-]+"[^>]*\stitle=/);
+    });
+
+    it('reads a car once to assistive technology: the bare number is hidden and the popover says it', () => {
+      assert.equal(html.match(/<span aria-hidden="true">#\d+<\/span><span class="car-info"><span class="car-info-head">#\d+/g).length, 2);
+      assert.doesNotMatch(html, /class="car-info"[^>]*(aria-hidden|hidden)/);
+    });
+
+    it('gives every car in a release panel its popover, with its own workstream\'s lane', () => {
+      const panel = planDocs.renderPlanBody(`\`\`\`tc-release\n${JSON.stringify({
+        version: '5.32.0',
+        trains: [
+          { kind: 'train', train: 31, title: 'A', owner: 'Lane one', cars: [{ issue: 1, closed: false, title: 'First' }] },
+          { kind: 'bucket', title: 'B', cars: [{ issue: 2, closed: true, state: 'dropped' }] }
+        ]
+      })}\n\`\`\``);
+      assert.match(infoOf(panel, 1), /^<span class="car-info-head">#1 First<\/span>.*<span class="car-info-line">lane: Lane one<\/span>$/);
+      assert.match(infoOf(panel, 2), /<span class="car-info-state">dropped<\/span>: closed as not planned<\/span>$/);
+      assert.doesNotMatch(infoOf(panel, 2), /lane:/);
+    });
+
+    it('leaves the legend\'s sample cars and the queue\'s pills as they were', () => {
+      assert.doesNotMatch(trainCard.renderLegend(), /tabindex|car-info/);
+      const queue = planDocs.renderPlanBody(`\`\`\`tc-queue\n${JSON.stringify({ newDays: 14, issues: [{ issue: 9, createdAt: '2026-09-27T09:30:00Z' }] })}\n\`\`\``,
+        0, { now: Date.parse('2026-09-28T00:00:00Z') });
+      assert.match(queue, /<span class="train-car queue-new" title="#9 new" aria-label="#9 new">#9<\/span>/);
+      assert.doesNotMatch(queue, /car-info/);
+    });
+  });
+
+  describe('page styles', () => {
+    const css = trainCard.TRAIN_CARD_CSS;
+    const popover = css.match(/\n\.car-info\{([^}]*)\}/)[1];
+
+    it('takes the popover out of the layout, anchored to its card\'s summary row, so showing it moves nothing', () => {
+      assert.match(popover, /(^|;)position:absolute(;|$)/);
+      assert.match(popover, /(^|;)left:0(;|$)/);
+      assert.match(popover, /(^|;)max-width:min\(100%,24rem\)(;|$)/);
+      assert.match(css, /\nsummary\.train-summary\{[^}]*position:relative[^}]*\}/);
+    });
+
+    it('hides it by opacity alone, so it stays in the page for assistive technology', () => {
+      assert.match(popover, /(^|;)opacity:0(;|$)/);
+      assert.match(popover, /(^|;)pointer-events:none(;|$)/);
+      assert.doesNotMatch(popover, /display:none|visibility:hidden/);
+    });
+
+    it('shows it on hover and on focus, and marks the focused car', () => {
+      assert.match(css, /\n\.train-car:hover>\.car-info,\.train-car:focus>\.car-info\{opacity:1\}/);
+      assert.match(css, /\n\.train-car:focus-visible\{outline:2px solid var\(--link\);outline-offset:2px\}/);
+    });
+
+    it('lets the popover wrap and read as ordinary text inside a one-line pill', () => {
+      assert.match(popover, /(^|;)white-space:normal(;|$)/);
+      assert.match(popover, /(^|;)color:var\(--fg\)(;|$)/);
+      assert.match(popover, /(^|;)background:var\(--surface\)(;|$)/);
+    });
   });
 });
