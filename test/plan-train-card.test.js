@@ -855,6 +855,9 @@ describe('release panels (#2165)', () => {
       refusedRelease(withEntry(train()), /trains\[0\]\.kind must be written out as one of train, bucket/);
       refusedRelease(withEntry(train({ kind: 'pilot', train: 'B2' })), /trains\[0\]\.kind must be written out as one of train, bucket/);
       refusedRelease(withEntry({ kind: 'unconfigured', title: 'Later', cars: [] }), /trains\[0\]\.kind must be written out as one of train, bucket/);
+      // A bucket that left its kind out is told about the kind, not about a train identity it must not have.
+      const bare = refusedRelease(withEntry({ title: 'Install safety', cars: [] }), /trains\[0\]\.kind must be written out as one of train, bucket/);
+      assert.doesNotMatch(bare, /train must be an integer/);
       refusedRelease(withEntry(train({ kind: 'release' })), /trains\[0\]\.kind must be one of train, bucket, pilot, unconfigured/);
     });
 
