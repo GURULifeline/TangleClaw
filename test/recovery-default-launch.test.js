@@ -402,6 +402,29 @@ describe('the default recovery mode a launch freezes (#1937)', () => {
     });
   });
 
+  describe('the notice', () => {
+    it('says which launch it belongs to, and does not claim to have been shown', () => {
+      // It is claimed when the launch is recorded. A first launch that ends
+      // before its task step is served has used it unread, so "shown once"
+      // would be a claim about something nothing checks.
+      const notice = launchPage.ADVISORY_DEFAULT_NOTICE;
+      assert.match(notice, /belongs to this project's first launch under that default and is not repeated on a later one\]$/);
+      assert.doesNotMatch(notice, /shown/);
+      assert.doesNotMatch(notice, /moved/, 'true of a project that has never launched too');
+      assert.ok(!/[\r\n]/.test(notice));
+
+      gate(ARMED);
+      const project = makeProject({ fileMode: 'operator', damaged: false });
+      const first = launch(project);
+      end(first);
+      const second = launch(project);
+      ackThroughState(second.id);
+      assert.equal('advisoryDefaultNotice' in launchSequence.next(second.id).body, false,
+        'the first launch ended with its task step unread, and the notice was still its own');
+      assert.equal(noticeLaunch(project), first.sequence.launchId);
+    });
+  });
+
   describe('the page budget', () => {
     it('covers a task page carrying both notices', () => {
       const widest = {
