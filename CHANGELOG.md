@@ -64,6 +64,8 @@ All notable changes to TangleClaw are documented in this file.
 
 - **Fleet-concurrency guardrails added to the stand-up runbook** (#2159, `docs/runbooks/stand-up-a-new-agent-fleet.md`). A new "running the fleet concurrently" section records six evidenced guardrails (one writer per workspace, one chunk per session, merge authority kept outside the Builder, review results bound to an exact head, caller/auth-surface changes routed through the Architect before code, verifying a peer's claim before acting on it) from a 2026-09-16 architectural assessment plus one overnight shift that exercised them in practice.
 
+- **The Feature Index gains two entries it was missing**: ADR 0024 (release versions group Trains) and `test/operator-bridge-runbooks.test.js`. A session wrap's index step found both undescribed and stubbed them as `TBD` on a local branch; they are written out here in full, so no placeholder reaches `main`.
+
 ## [5.31.0] - 2026-10-06
 
 ### Added
