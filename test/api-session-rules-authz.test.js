@@ -565,6 +565,46 @@ describe('api/session-rules caller gate (#2013)', () => {
         assert.equal(res.data.status, 'active');
         assert.equal(store.sessionRules.get(proposal.id).status, 'active');
       });
+
+      // Architect ruling A88: an operator-authored POST /api/session-rules
+      // with replacesRuleId lands active by default (this route never
+      // requests another status) and retires its target in the SAME
+      // transaction as creation — a retirement that bypassed the password
+      // gate entirely until this fix, even though PUT .../status requires it
+      // for the exact same effect reached the other way.
+      it('creating an operator replacement with a wrong or absent password cannot retire the target', async () => {
+        const wrongPwTarget = activeRule(own.id, 'create-replace password-gated (wrong password)');
+        const wrong = await request('POST', '/api/session-rules',
+          { content: 'wrong-password amendment', projectId: own.id, replacesRuleId: wrongPwTarget.id, password: 'wrong' }, asOperator);
+        assert.equal(wrong.status, 403);
+        assert.equal(wrong.data.code, 'FORBIDDEN');
+        assert.equal(store.sessionRules.get(wrongPwTarget.id).status, 'active', 'the target must not be retired');
+        assert.equal(rulesOf(own.id).filter((r) => r.content === 'wrong-password amendment').length, 0, 'no replacement must have been created');
+
+        const absentPwTarget = activeRule(own.id, 'create-replace password-gated (absent password)');
+        const absent = await request('POST', '/api/session-rules',
+          { content: 'absent-password amendment', projectId: own.id, replacesRuleId: absentPwTarget.id }, asOperator);
+        assert.equal(absent.status, 403);
+        assert.equal(absent.data.code, 'FORBIDDEN');
+        assert.equal(store.sessionRules.get(absentPwTarget.id).status, 'active', 'the target must not be retired');
+      });
+
+      it('creating an operator replacement with the correct password retires the target', async () => {
+        const target = activeRule(own.id, 'create-replace password-gated (correct password)');
+        const res = await request('POST', '/api/session-rules',
+          { content: 'correct-password amendment', projectId: own.id, replacesRuleId: target.id, password: REAL_PASSWORD }, asOperator);
+        assert.equal(res.status, 201);
+        assert.equal(res.data.status, 'active');
+        assert.equal(store.sessionRules.get(target.id).status, 'retired');
+        assert.equal(store.sessionRules.get(target.id).supersededBy, res.data.id);
+      });
+
+      it('creating an operator rule with NO replacesRuleId still needs no password — only the retirement side effect is gated', async () => {
+        const res = await request('POST', '/api/session-rules',
+          { content: 'plain operator rule, no replacement', projectId: own.id }, asOperator);
+        assert.equal(res.status, 201);
+        assert.equal(res.data.status, 'active');
+      });
     });
 
     it('the operator restores a retired rule, with no password, and it comes back disabled', async () => {

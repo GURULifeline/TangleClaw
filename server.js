@@ -5728,6 +5728,17 @@ route('POST', '/api/session-rules', (req, res, _params, body) => {
   if (!body || typeof body.content !== 'string' || !body.content.trim()) {
     return errorResponse(res, 400, 'content (non-empty string) is required', 'BAD_REQUEST');
   }
+  // Architect ruling A88: an operator-authored create with `replacesRuleId`
+  // lands active by default (this route never requests another status), and
+  // the store retires its target in the same transaction — the same
+  // retirement the PUT .../status route requires the delete password for.
+  // A bound session's create always lands 'proposed' regardless of
+  // `replacesRuleId` (never retires anything immediately), so only the
+  // operator path can reach this side effect and only it is gated here.
+  if (caller.operator && body.replacesRuleId !== undefined && body.replacesRuleId !== null) {
+    const check = projects.checkDeletePassword(body.password);
+    if (!check.allowed) return errorResponse(res, 403, check.error, 'FORBIDDEN');
+  }
   try {
     const rule = store.sessionRules.create({
       content: body.content,
