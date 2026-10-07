@@ -95,10 +95,10 @@ const ON_FRESH_IDLE = {
 };
 
 /**
- * KNOWN UNSAFE. Live panes the pane gate does NOT refuse on a fresh idle from
- * the channel, although nothing may be typed into them. An entry here records
- * a hole, not a safety property, and a green test over it proves only that the
- * hole is still there.
+ * KNOWN UNSAFE IF THE CHANNEL ANSWERS IDLE. Live panes the pane gate does NOT
+ * refuse on a fresh idle from the channel, although nothing may be typed into
+ * them. An entry here records a hole, not a safety property, and a green test
+ * over it proves only that the hole is still there.
  *
  * Codex draws its empty composer on the screen it opens with, before the
  * folder-trust or update prompt replaces it: no busy marker, a bare prompt, a
@@ -113,7 +113,7 @@ const ON_FRESH_IDLE = {
  * ready. When that exists, the pane moves to `ON_FRESH_IDLE` with its hold
  * and this list empties.
  */
-const NOT_REFUSED_ON_FRESH_IDLE = ['startScreen'];
+const KNOWN_UNSAFE_IF_CHANNEL_IDLE = ['startScreen'];
 
 /**
  * Cells this file does not prove: a fresh idle from the channel against a pane
@@ -289,9 +289,13 @@ describe('the wake gate over every Codex engine state, per captured version (#20
         // A pane nobody observed cannot prove what the gate does with a real
         // one, so its fresh-idle cell is not asserted: see UNPROVEN_ON_FRESH_IDLE.
         if (pane.provenance !== 'live-capture') continue;
-        if (NOT_REFUSED_ON_FRESH_IDLE.includes(paneName)) {
-          it(`KNOWN UNSAFE: ${paneName} pane, channel idle: the pane gate does not refuse it and a nudge is typed`, async () => {
+        if (KNOWN_UNSAFE_IF_CHANNEL_IDLE.includes(paneName)) {
+          it(`KNOWN UNSAFE IF CHANNEL IDLE: ${paneName} pane, channel idle: the pane gate does not refuse it and a nudge is typed`, async () => {
             const out = await judge(pane.lines, CHANNEL_ANSWERS.idle);
+            // `injected: 1` DOCUMENTS what the gate does today when handed an
+            // idle answer over this pane. It is not acceptance of that
+            // behaviour, and it is not evidence that a live channel can answer
+            // idle while Codex is still starting: the answer here is a stub.
             assert.deepEqual(out, { injected: 1, held: null }, 'if this now holds, the hole is closed: move the pane to ON_FRESH_IDLE');
           });
           continue;
@@ -438,7 +442,7 @@ describe('a captured Codex version is woken only if the profile verified it (#20
 
 describe('the known-unsafe list is exactly the opening screen (#2059)', () => {
   it('names nothing else, so a second hole cannot be added quietly', () => {
-    assert.deepEqual(NOT_REFUSED_ON_FRESH_IDLE, ['startScreen']);
-    for (const name of NOT_REFUSED_ON_FRESH_IDLE) assert.ok(!(name in ON_FRESH_IDLE), `${name} has no hold to mistake for a refusal`);
+    assert.deepEqual(KNOWN_UNSAFE_IF_CHANNEL_IDLE, ['startScreen']);
+    for (const name of KNOWN_UNSAFE_IF_CHANNEL_IDLE) assert.ok(!(name in ON_FRESH_IDLE), `${name} has no hold to mistake for a refusal`);
   });
 });
