@@ -131,7 +131,8 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   paste as `[Pasted text #N]`, and a nudge that collapses that way cannot be
   recognised if its Enter is lost. The project nudge therefore names its API
   base once, with `GET /messages`, `POST /send` and `POST /read` relative to
-  it, and is held to 750 characters for the longest valid project name.
+  it, and is held to 750 characters for the longest name `validateName`
+  accepts. A name registered without that check (#2180) is not covered.
 - **Closing:** the original sender closes an exchange with
   `POST <base>/medusa/exchanges/<exchange-id>/close` (`tc message close`).
 - **Listing:** `GET <base>/medusa/exchanges?direction=sent|received&open=1`
