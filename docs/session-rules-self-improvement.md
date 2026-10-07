@@ -128,7 +128,12 @@ still `active`, no other pending replacement already naming it — `400
 INVALID_REPLACES` otherwise). Approving a replacement **atomically** retires the rule
 it names, in the same transaction (`replaced: {id}` on the response), or reports
 `replacementSkipped: {id, reason}` when the target left force first (nothing to
-retire, but the replacement still lands active).
+retire, but the replacement still lands active). An **operator**-authored create with
+`replacesRuleId` lands active immediately (this route never requests another status)
+and retires its target the same way — so it carries the same delete-password gate as
+retirement itself, checked before the target is looked up (Architect ruling A88; a
+bound session's create always lands `proposed` regardless of `replacesRuleId`, so it
+never reaches this side effect and is never asked for a password here).
 
 At most one pending replacement per rule, enforced at both doors into a text change:
 
@@ -182,7 +187,7 @@ and `GET /api/learnings` (#1121); a valid project with no rules returns `200 []`
 | Method & path | Purpose |
 |---|---|
 | `GET /api/session-rules?projectId=&kind=` | List rules |
-| `POST /api/session-rules` `{content, projectId, createdBy?, replacesRuleId?}` | Create (projectId required). #2013: the operator creates an active rule; a session bound to the project creates a proposal (`createdBy` is recorded as `ai` whatever the body says); anyone else is refused. `replacesRuleId` files it as a replacement proposal (#1696) — `400 INVALID_REPLACES` if the target cannot be honoured |
+| `POST /api/session-rules` `{content, projectId, createdBy?, replacesRuleId?, password?}` | Create (projectId required). #2013: the operator creates an active rule; a session bound to the project creates a proposal (`createdBy` is recorded as `ai` whatever the body says); anyone else is refused. `replacesRuleId` names the active rule this one replaces (#1696) — `400 INVALID_REPLACES` if the target cannot be honoured. For a bound session it files a replacement **proposal**; for the **operator** it lands active and retires the target immediately, so it needs the delete `password` too, checked before the target is looked up (Architect ruling A88) |
 | `PUT /api/session-rules/:id` `{content?, enabled?}` | Update (snapshots a version). #2013: the operator only, except that a bound session may revise the text of its own project's still-proposed AI rule. `changedBy` is recorded from the caller, not the body. A content change to an **active, non-master** rule defers to a replacement proposal instead of applying in place — `202` with `replacementProposed` (#1696); a `retired` rule's content is frozen (`409 RULE_RETIRED`); a second change while one replacement is already pending is `409 REPLACEMENT_PENDING` |
 | `DELETE /api/session-rules/:id` | Delete (snapshots a tombstone). #2013: the operator only, except that a bound session may withdraw its own project's still-proposed AI rule |
 | `GET /api/session-rules/:id/versions` | Version history (newest first) |
