@@ -17,6 +17,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const models = require('../lib/engine-models');
 const engines = require('../lib/engines');
+const { setLevel } = require('../lib/logger');
+
+setLevel('error');
 
 const ENGINES_DIR = path.join(__dirname, '..', 'data', 'engines');
 const NOW = Date.parse('2026-10-07T22:00:00Z');
@@ -151,6 +154,26 @@ describe('#2188 engine-models', () => {
       assert.equal(models.roster(p, cache(LISTED, { fetchedAt: '2026-10-07T20:59:59Z' })).unavailable, true);
     });
 
+    it('refuses a cache dated in the future, and allows for a few minutes of clock drift', () => {
+      const p = profileOffering(['gpt-6-luna'], { maxAgeHours: 168 });
+      const future = models.roster(p, cache(LISTED, { fetchedAt: '2026-10-08T22:00:00Z' }));
+      assert.equal(future.unavailable, true);
+      assert.match(future.reason, /dated in the future/);
+      // 22:04 against a clock reading 22:00 is drift; 22:06 is not.
+      assert.equal(models.roster(p, cache(LISTED, { fetchedAt: '2026-10-07T22:04:00Z' })).unavailable, undefined);
+      assert.equal(models.roster(p, cache(LISTED, { fetchedAt: '2026-10-07T22:06:00Z' })).unavailable, true);
+      // A future date is refused whether or not the profile sets an age bound.
+      assert.equal(models.roster(profileOffering(['gpt-6-luna']), cache(LISTED, { fetchedAt: '2027-01-01T00:00:00Z' })).unavailable, true);
+    });
+
+    it('a stale or future-dated cache refuses the selection itself, with ROSTER_UNAVAILABLE', () => {
+      const p = profileOffering(['gpt-6-luna'], { maxAgeHours: 168 });
+      for (const fetchedAt of ['2026-09-20T00:00:00Z', '2026-10-08T22:00:00Z', null]) {
+        const res = models.checkSelection(p, 'gpt-6-luna', cache(LISTED, { fetchedAt }));
+        assert.equal(res.code, 'ROSTER_UNAVAILABLE', String(fetchedAt));
+      }
+    });
+
     it('drops cache entries whose slug is not a model id instead of passing them on', () => {
       const read = models.roster(profileOffering(['gpt-6-luna']), cache([...LISTED, { slug: 'bad id; rm' }, { display_name: 'no slug' }, null]));
       assert.deepEqual(read.models.map((m) => m.id), ['gpt-5.6-sol', 'gpt-6-luna', 'gpt-reserve']);
@@ -199,6 +222,7 @@ describe('#2188 engine-models', () => {
       const code = (profile, id, deps) => models.checkSelection(profile, id, deps).code;
       assert.equal(code(p, 'gpt 6', cache(LISTED)), 'MODEL_MALFORMED');
       assert.equal(code({ id: 'aider', name: 'Aider' }, 'gpt-6-luna', cache(LISTED)), 'ENGINE_HAS_NO_MODELS');
+      assert.equal(code({ id: 'x', name: 'X', models: [] }, 'gpt-6-luna', cache(LISTED)), 'MODELS_BLOCK_INVALID');
       assert.equal(code(p, 'gemini-3.1-pro-high', cache(LISTED)), 'MODEL_NOT_OFFERED', 'another engine\'s model');
       assert.equal(code(p, 'gpt-reserve', cache(LISTED)), 'MODEL_NOT_OFFERED', 'in the roster, not on the allowlist');
       assert.equal(code(p, 'gpt-6-luna', cache(null)), 'ROSTER_UNAVAILABLE');
@@ -212,6 +236,21 @@ describe('#2188 engine-models', () => {
         assert.ok(typeof res.reason === 'string' && res.reason.length > 20, `${res.code} needs a reason`);
       }
       assert.match(models.checkSelection(p, 'gemini-3.1-pro-high', cache(LISTED)).reason, /offered: gpt-5\.6-sol, gpt-6-luna, gpt-7-nova/);
+    });
+
+    it('refuses by name when the profile declares a models block that is invalid, and never as "no selection"', () => {
+      const broken = { id: 'codex', name: 'Codex', models: { flag: '--model', offered: ['gpt-6-luna'], roster: { source: 'no-such-reader' } } };
+      const res = models.checkSelection(broken, 'gpt-6-luna', cache(LISTED));
+      assert.equal(res.code, 'MODELS_BLOCK_INVALID');
+      assert.match(res.reason, /Codex's model settings are invalid/);
+      assert.match(res.reason, /must name a roster reader/, 'the reason carries what is wrong with the block');
+      // The absent case keeps its own code: that is a statement, not a fault.
+      assert.equal(models.checkSelection({ id: 'aider', name: 'Aider' }, 'gpt-6-luna', cache(LISTED)).code, 'ENGINE_HAS_NO_MODELS');
+      // And nothing downstream can launch with it.
+      assert.equal(models.supportsModelSelection(broken), false);
+      assert.deepEqual(models.offeredWithAvailability(broken, cache(LISTED)), []);
+      assert.equal(models.roster(broken, cache(LISTED)).unavailable, true);
+      assert.throws(() => models.modelArgv(broken, 'gpt-6-luna'), /no model flag/);
     });
 
     it('never reads the roster for an id it has already refused', () => {
