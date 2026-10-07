@@ -35,6 +35,24 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-07 — #1971: session rules gain a lifecycle — retirement, supersession, and approval for edits
+
+<!-- prawduct: type=feature | scope=rule-lifecycle-report -->
+
+#1971 (#1696, #1709), 4 chunks, PM-dispatched design pass → Architect-reviewed (ruling A81) → fresh build on `fix/1971-rule-lifecycle-report`, re-ported from the stale `fix/1696-1709-rule-retirement` branch's design rather than rebased: that branch predates the #2019 caller-authentication gate and claimed a schema version main has since used for five unrelated migrations.
+
+**Chunk 01 — schema v56 + store-layer lifecycle.** `session_rules.status` gains `retired` alongside `proposed | active | rejected`, moving only along `SESSION_RULE_TRANSITIONS` (6 of 16 `(from, to)` pairs allowed; every other pair is `400 INVALID_TRANSITION`, closing the `active → proposed → rejected` two-step the earlier deny-list missed). New columns `replaces_rule_id`, `superseded_by`, `retired_at`, `replacement_origin` carry replacement/supersession provenance. A content change to an active, non-master rule now files a replacement proposal instead of rewriting in place; approving a replacement atomically retires the rule it replaces.
+
+**Chunk 02 — route layer.** `sessionRuleCaller` extended, never replaced. `PUT /api/session-rules/:id/status` drives retire/restore; retirement's password check runs BEFORE the rule is looked up (an Architect-reviewed asymmetry from approval's existing order), so a wrong/absent password answers identically whether the target exists. `PUT /api/session-rules/:id` and `POST .../restore` answer `202`/`replacementProposed` on an active-rule edit. A local Critic review (independent of the Architect's design review) caught one more blocking issue: `REPLACEMENT_PENDING` was thrown by the store but unmapped by either route, falling through to a bare 500 — fixed, with 5 new tests.
+
+**Chunk 03 — UI.** Rules Graveyard (closed-by-default disclosure), Retire (confirm-gated, password-revealed-on-403 like Approve) and Restore (always comes back switched off) in the Project Rules modal; a proposed row names what approving it will do to the rule it replaces, in all four cases (still active / edit of still-active / already replaced by someone else / target gone). Verified by 30 automated tests and a live click-through in a real browser against an isolated scratch server.
+
+**Chunk 04 — docs, `tc rules`, CHANGELOG, mutation-coverage audit, full regression sweep.** `docs/session-rules-self-improvement.md` gets a "Rule lifecycle" section with the transition table held to the live `SESSION_RULE_TRANSITIONS` constant by a parity test. `tc rules` marks a retired rule and says how to propose an amendment. CHANGELOG.md's compatibility-change entry for the 202-on-active-edit behavior. Mutation-coverage acceptance criterion (more than 30 checks across the transition table, caller gate, password gate, and replacement/supersession logic, each confirmed to turn at least one test red): 26 real mutations scripted against the committed source (unique-string substitution, target test run, result recorded, source reverted via `git checkout --`) — 21 already caught, 5 genuine gaps closed with new tests (one pre-existing and unrelated to this branch: the operator-approval password check had no HTTP-level test). Combined with the 16 individually-parametrized transition pairs and the existing 11-route unbound-caller sweep, the total is in the 40s.
+
+**Found while building, not fixed here.** `lib/store.js#_startupControlAtomic`'s name is still scoped to the subsystem it was first built for; this branch adds 3 more unrelated call sites on top of 2 pre-existing ones. Filed as #2164 rather than bundled into this PR (cross-cutting rename, unrelated to the feature).
+
+**Review.** Cumulative Critic on `4997ad28b` (rev-20261007T164153Z-96809607): 0 blocking, 1 warning (above, filed), 2 note (backlog reconciliation — #1709 closes via this PR; #1047/#2016 are pre-existing, untouched, out of scope). Synced to `origin/main` after (merge commit `d80cd8eed`, no conflicts; schema v56 and `sessionRuleCaller` both unmoved on main since the design's merge-base) — full suite re-run green on the merged tree before the PR review.
+
 ## 2026-10-07 — #2154: a Leave keeps a file out of the wrap commit whatever a later step concludes
 
 <!-- prawduct: type=bugfix | scope=2154-keep-local-leave -->
