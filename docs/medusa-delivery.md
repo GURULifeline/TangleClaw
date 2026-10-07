@@ -130,7 +130,8 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   under 800 characters, wake reference included: Claude Code shows a longer
   paste as `[Pasted text #N]`, and a nudge that collapses that way cannot be
   recognised if its Enter is lost. The project nudge therefore names its API
-  base once.
+  base once, with `GET /messages`, `POST /send` and `POST /read` relative to
+  it, and is held to 750 characters for the longest valid project name.
 - **Closing:** the original sender closes an exchange with
   `POST <base>/medusa/exchanges/<exchange-id>/close` (`tc message close`).
 - **Listing:** `GET <base>/medusa/exchanges?direction=sent|received&open=1`

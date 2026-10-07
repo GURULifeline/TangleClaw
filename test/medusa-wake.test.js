@@ -510,11 +510,11 @@ describe('medusa-wake — nudge injection', () => {
     // name again against the composer's verbatim-paste limit.
     assert.match(cmd, /tc message read/);
     assert.match(cmd, /tc message ack <message-id>/);
-    assert.match(cmd, /the API at \S+\/api\/sessions\/proj-a\/medusa;/);
+    assert.match(cmd, /API at \S+\/api\/sessions\/proj-a\/medusa: GET \/messages, POST \/send \(inReplyTo \+ launch headers\), POST \/read\./);
   });
 
   it('URL-encodes the project name in the nudge path', () => {
-    assert.match(wake._nudgeLine('My Proj', 2), /\/api\/sessions\/My%20Proj\/medusa;/);
+    assert.match(wake._nudgeLine('My Proj', 2), /\/api\/sessions\/My%20Proj\/medusa: GET \/messages/);
   });
 
   it('watermark keys off the production row shape: inner `id` primary, envelope `messageId` honored, length fallback', () => {
@@ -969,10 +969,12 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     // read at session start and subject to compaction, while the nudge is what
     // is actually in front of the model at the moment it acts.
     // The reply path a project session is given is now `tc message send`, which
-    // carries its launch headers (#1976); the API base stays as the fallback.
+    // carries its launch headers (#1976). The raw reply route stays, named once
+    // relative to the one API base, with what a raw reply must carry.
     const line = wake._nudgeLineFor('/api/sessions/p/medusa', 1, 'http://localhost:3102');
     assert.match(line, /tc message send --in-reply-to <message-id> <sender-workspace-id> "<reply>"/);
-    assert.match(line, /the API at http:\/\/localhost:3102\/api\/sessions\/p\/medusa;/);
+    assert.match(line, /API at http:\/\/localhost:3102\/api\/sessions\/p\/medusa: GET \/messages, POST \/send \(inReplyTo \+ launch headers\), POST \/read\./);
+    assert.equal(line.split('/api/sessions/p/medusa').length - 1, 1, 'the base is named once');
     assert.match(line, /initiator closes the exchange/);
     assert.ok(!line.includes('\n'), 'still one line');
   });
@@ -992,26 +994,32 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     assert.ok(!line.includes('\n'), 'still one line');
   });
 
-  it('stays under the composer\'s verbatim-paste limit for the longest valid project name (#1976)', () => {
+  it('stays well under the composer\'s verbatim-paste limit for the longest valid project names (#1976)', () => {
     // Claude Code shows a paste of up to COMPOSER_VERBATIM_MAX characters as
     // typed and anything longer as `[Pasted text #N]`. A nudge whose Enter is
     // lost is recognised by reading the composer back, so a collapsed nudge is
     // never recognised and the session's wakes stop until the exchange
-    // escalates. The base carries the URL-encoded name: 64 spaces is the
-    // longest a valid name can encode to.
+    // escalates. The base carries the URL-encoded name, and a space encodes to
+    // three characters, so space-heavy names are the long ones.
     const { validateName } = require('../lib/projects');
-    const longest = ' '.repeat(64);
-    assert.equal(validateName(longest).valid, true, 'the worst case must be a name the registry accepts');
-    assert.equal(validateName('x'.repeat(65)).valid, false, 'and nothing longer is');
-    assert.equal(encodeURIComponent(longest).length, 192);
     const wakeTransports = require('../lib/wake-transports');
-    const built = (base) => wakeTransports.withNonce(wake._nudgeLineFor(base, 99999, 'https://localhost:65535'), '0123456789ab');
-    const MARGIN = 32;
-    for (const base of [`/api/sessions/${encodeURIComponent(longest)}/medusa`, require('../lib/master').MASTER_MEDUSA_API_BASE]) {
-      const line = built(base);
-      assert.ok(line.length <= wake.COMPOSER_VERBATIM_MAX - MARGIN,
-        `${base.slice(0, 24)}… builds ${line.length} characters; the limit is ${wake.COMPOSER_VERBATIM_MAX} less a margin of ${MARGIN}`);
-      assert.equal(wake.isOwnNudge(line), true, 'and it is still recognised as our own nudge');
+    const BOUND = 750;
+    assert.ok(BOUND <= wake.COMPOSER_VERBATIM_MAX - 50, 'the bound keeps a margin under the measured limit');
+    assert.equal(validateName('x'.repeat(65)).valid, false, 'no valid name is longer than 64');
+    const project = (name) => {
+      assert.equal(validateName(name).valid, true, `"${name.slice(0, 8)}…" must be a name the registry accepts`);
+      return `/api/sessions/${encodeURIComponent(name)}/medusa`;
+    };
+    const cases = [
+      ['a letter, 62 spaces, a letter', project(`a${' '.repeat(62)}b`), 999, 'https://localhost:3102'],
+      ['64 plain characters', project('x'.repeat(64)), 999, 'https://localhost:3102'],
+      ['64 spaces, the longest origin and count', project(' '.repeat(64)), 99999, 'https://localhost:65535'],
+      ['the Master', require('../lib/master').MASTER_MEDUSA_API_BASE, 99999, 'https://localhost:65535']
+    ];
+    for (const [label, base, unread, origin] of cases) {
+      const line = wakeTransports.withNonce(wake._nudgeLineFor(base, unread, origin), '0123456789ab');
+      assert.ok(line.length <= BOUND, `${label}: the whole nudge is ${line.length} characters, over ${BOUND}`);
+      assert.equal(wake.isOwnNudge(line), true, `${label}: still recognised as our own nudge`);
     }
   });
 
