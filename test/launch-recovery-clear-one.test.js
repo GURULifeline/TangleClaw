@@ -109,6 +109,71 @@ describe('clearOneLaunch', () => {
     assert.deepEqual(clearedRows(project), []);
   });
 
+  describe('a launch whose session has ended', () => {
+    /**
+     * End a launch's session the way a kill, a crash or a wrap does.
+     * @param {'killed'|'crashed'|'wrapped'} how - The status to end it at
+     * @param {object} sequence - The launch
+     * @returns {void}
+     */
+    function end(how, sequence) {
+      if (how === 'killed') store.sessions.kill(sequence.sessionId, 'test');
+      else if (how === 'crashed') store.sessions.markCrashed(sequence.sessionId, 'test');
+      else store.sessions.wrap(sequence.sessionId, 'test');
+      assert.equal(store.sessions.get(sequence.sessionId).status, how, 'the fixture must actually have ended it');
+    }
+
+    for (const how of ['killed', 'crashed', 'wrapped']) {
+      it(`refuses a ${how} session's launch, names the status and changes nothing`, () => {
+        const { project, sequence, binding } = fixture.launchInRecovery(env);
+        end(how, sequence);
+        const result = clearOneLaunch({ project, ...binding, ...OPERATOR });
+        assert.equal(result.outcome, OUTCOMES.SESSION_ENDED);
+        assert.equal(result.sessionStatus, how);
+        assert.equal(result.sequence.id, sequence.id);
+        assert.equal(storedRecovery(sequence), 'required');
+        assert.deepEqual(clearedRows(project), []);
+      });
+    }
+
+    it('treats a launch whose session row is gone as ended', () => {
+      const { project, sequence, binding } = fixture.launchInRecovery(env);
+      const real = store.sessions.get;
+      store.sessions.get = () => null;
+      try {
+        const result = clearOneLaunch({ project, ...binding, ...OPERATOR });
+        assert.equal(result.outcome, OUTCOMES.SESSION_ENDED);
+        assert.equal(result.sessionStatus, null);
+      } finally {
+        store.sessions.get = real;
+      }
+      assert.equal(storedRecovery(sequence), 'required');
+    });
+
+    it('still answers a moved revision as moved: stale is decided before ended', () => {
+      const { project, sequence, binding } = fixture.launchInRecovery(env);
+      end('killed', sequence);
+      const result = clearOneLaunch({
+        project, ...binding, recoveryRevision: binding.recoveryRevision + 1, ...OPERATOR
+      });
+      assert.equal(result.outcome, OUTCOMES.BINDING_MOVED);
+      assert.equal(storedRecovery(sequence), 'required');
+    });
+
+    it('still answers an already-cleared launch as not-required after its session ends', () => {
+      const { project, sequence, binding } = fixture.launchInRecovery(env);
+      assert.equal(clearOneLaunch({ project, ...binding, ...OPERATOR }).outcome, OUTCOMES.CLEARED);
+      end('killed', sequence);
+      assert.equal(clearOneLaunch({ project, ...binding, ...OPERATOR }).outcome, OUTCOMES.NOT_REQUIRED);
+    });
+
+    it('still refuses an advisory launch as advisory after its session ends', () => {
+      const { project, sequence, binding } = fixture.launchInRecovery(env, 'advisory');
+      end('crashed', sequence);
+      assert.equal(clearOneLaunch({ project, ...binding, ...OPERATOR }).outcome, OUTCOMES.ADVISORY);
+    });
+  });
+
   it('answers not-required for a second clear, and writes no second activity row', () => {
     const { project, binding } = fixture.launchInRecovery(env);
     assert.equal(clearOneLaunch({ project, ...binding, ...OPERATOR }).outcome, OUTCOMES.CLEARED);

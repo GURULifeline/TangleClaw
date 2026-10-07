@@ -104,4 +104,116 @@ function launchInRecovery(env, recoveryMode = 'operator') {
   };
 }
 
-module.exports = { openTempStore, launchStubbed, launchInRecovery };
+const HOST = 'localhost:3102';
+const PASSWORD = 'correct-horse-battery';
+
+/**
+ * A browser-shaped client for the real request handler, with the login
+ * helpers the operator-only routes need.
+ * @param {Function} handleRequest - `server.js#handleRequest`
+ * @returns {{send: Function, json: Function, arm: Function, signIn: Function, pageToken: Function}}
+ */
+function makeClient(handleRequest) {
+  /**
+   * One request through the real handler.
+   * @param {string} method - HTTP method
+   * @param {string} url - Request path
+   * @param {object} [opts]
+   * @param {object} [opts.body] - JSON body
+   * @param {object} [opts.headers] - Extra headers, lowercase; `undefined` removes one
+   * @param {boolean} [opts.browser] - Whether to look browser-shaped (default true)
+   * @returns {Promise<object>} The response, with `statusCode`, `body` and `headers`
+   */
+  async function send(method, url, opts = {}) {
+    const raw = opts.body === undefined ? null : JSON.stringify(opts.body);
+    const browser = opts.browser !== false;
+    const headers = { host: HOST, ...(browser ? { 'sec-fetch-site': 'same-origin', origin: `http://${HOST}` } : {}) };
+    Object.assign(headers, opts.headers || {});
+    for (const [k, v] of Object.entries(headers)) if (v === undefined) delete headers[k];
+    if (raw !== null) {
+      headers['content-type'] = 'application/json';
+      headers['content-length'] = String(Buffer.byteLength(raw));
+    }
+    const req = {
+      url,
+      method,
+      headers,
+      socket: {
+        remoteAddress: '127.0.0.1',
+        server: { address: () => ({ address: '127.0.0.1', port: 3102, family: 'IPv4' }) }
+      },
+      on(event, cb) {
+        if (event === 'data' && raw !== null) cb(Buffer.from(raw));
+        if (event === 'end') cb();
+      }
+    };
+    const res = {
+      statusCode: 0,
+      body: '',
+      headers: {},
+      setHeader(name, value) { this.headers[name.toLowerCase()] = value; },
+      writeHead(status, written) {
+        this.statusCode = status;
+        for (const [k, v] of Object.entries(written || {})) this.headers[k.toLowerCase()] = v;
+      },
+      end(chunk) { if (chunk != null) this.body = String(chunk); }
+    };
+    await handleRequest(req, res);
+    return res;
+  }
+
+  const json = (res) => JSON.parse(res.body);
+
+  /**
+   * Create an account and turn the login on.
+   * @returns {void}
+   */
+  function arm() {
+    store.users.create('rosie', PASSWORD);
+    const cfg = store.config.load();
+    cfg.authEnabled = true;
+    store.config.save(cfg);
+  }
+
+  /**
+   * Sign in and return the cookie and CSRF token a browser would then carry.
+   * @returns {Promise<{cookie: string, csrf: string}>}
+   */
+  async function signIn() {
+    const res = await send('POST', '/api/auth/login', { body: { username: 'rosie', password: PASSWORD } });
+    assert.equal(res.statusCode, 200, res.body);
+    const setCookie = [].concat(res.headers['set-cookie'] || []);
+    const cookie = setCookie.map((c) => String(c).split(';')[0]).join('; ');
+    return { cookie, csrf: json(res).csrfToken };
+  }
+
+  /**
+   * The token an open install's dashboard would have been issued.
+   * @returns {Promise<string>}
+   */
+  async function pageToken() {
+    const me = json(await send('GET', '/api/auth/me'));
+    assert.ok(me.openInstallToken, 'an open install issues its dashboard a token');
+    return me.openInstallToken;
+  }
+
+  return { send, json, arm, signIn, pageToken };
+}
+
+/**
+ * Put the login back to "none": no accounts, no sessions, no fallback marker,
+ * a fresh open-install token. For a `beforeEach`.
+ * @returns {void}
+ */
+function resetLogin() {
+  store.getDb().prepare('DELETE FROM auth_sessions').run();
+  store.getDb().prepare('DELETE FROM users').run();
+  const gateFallback = require('../lib/gate-fallback');
+  gateFallback.removeMarker(gateFallback.markerPath());
+  require('../lib/open-install-token').reset();
+  const cfg = store.config.load();
+  cfg.authEnabled = false;
+  store.config.save(cfg);
+}
+
+module.exports = { openTempStore, launchStubbed, launchInRecovery, makeClient, resetLogin, PASSWORD };

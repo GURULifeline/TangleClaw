@@ -8125,9 +8125,10 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
   // route that offers this decision. Project-scoped on purpose: the path names
   // a project, and a sequence id from another one must not be clearable
   // through it.
-  const { outcome, sequence } = launchRecoveryClear.clearOneLaunch({
+  const result = launchRecoveryClear.clearOneLaunch({
     project, sessionId, sequenceId, recoveryRevision, clearance, clearedBy
   });
+  const { outcome, sequence } = result;
   if (outcome === launchRecoveryClear.OUTCOMES.NOT_FOUND) {
     // Logged like the rest, and for a sharper reason than tidiness: on an open
     // install a page-token holder can walk `sequenceId` values against another
@@ -8167,6 +8168,16 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
       `That clear names recovery revision ${recoveryRevision}, and this launch is at `
       + `${sequence.recoveryRevision}. Re-read the launch and clear it again if it still needs one.`,
       'STALE_RECOVERY');
+  }
+  if (outcome === launchRecoveryClear.OUTCOMES.SESSION_ENDED) {
+    log.warn('Refused a recovery clear', {
+      code: 'SESSION_ENDED', project: params.project, sequence: sequence.id,
+      session: sequence.sessionId, sessionStatus: result.sessionStatus
+    });
+    return errorResponse(res, 409,
+      'That launch\'s session has ended, so there is no session left for a clear to let through; nothing was '
+      + 'changed. Re-read the project\'s launches: a new session has a launch of its own.',
+      'SESSION_ENDED');
   }
   if (outcome !== launchRecoveryClear.OUTCOMES.CLEARED) {
     // An outcome this route has no answer for must never be reported as a clear.
