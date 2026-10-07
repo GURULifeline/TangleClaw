@@ -48,18 +48,20 @@ function render(body, fence = '```') {
 }
 
 /**
- * The markup a car opens with: its pill, then its info popover as far as the
+ * A pattern for the markup a car opens with: its pill, tied by
+ * `aria-describedby` to its info popover, then the popover as far as the
  * state's words. What follows is that state's meaning.
  * @param {number} issue - Issue number.
  * @param {string} state - State class.
  * @param {string} words - The state in words.
  * @param {string} [title] - The car's title, as it appears escaped.
- * @returns {string}
+ * @returns {RegExp}
  */
 function car(issue, state, words, title) {
-  return `<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#${issue}</span>`
-    + `<span class="car-info"><span class="car-info-head">#${issue}${title ? ` ${title}` : ''}</span>`
-    + `<span class="car-info-line"><span class="car-info-state">${words}</span>: `;
+  const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`<span class="train-car ${state}" tabindex="0" aria-describedby="(car_info_\\d+)">#${issue}`
+    + `<span class="car-info" id="\\1" aria-hidden="true"><span class="car-info-head">#${issue}${title ? ` ${esc(title)}` : ''}</span>`
+    + `<span class="car-info-line"><span class="car-info-state">${words}</span>: `);
 }
 
 /**
@@ -83,9 +85,9 @@ describe('plan train cards (#1930)', () => {
 
     it('renders a collapsible card whose summary is the engine, the cars, the name, the count and the badge', () => {
       assert.match(html, /^<details class="train-card"><summary class="train-summary"><span class="train-engine" aria-hidden="true">🚂<\/span>/);
-      assert.ok(html.includes(car(411, 'open', 'open', 'Stale service worker')));
-      assert.ok(html.includes(car(1234, 'closed', 'closed', 'Done thing')));
-      assert.match(html, /<\/span><\/span><span class="train-joint" aria-hidden="true">—<\/span><span class="train-car closed" tabindex="0">/);
+      assert.match(html, car(411, 'open', 'open', 'Stale service worker'));
+      assert.match(html, car(1234, 'closed', 'closed', 'Done thing'));
+      assert.match(html, /<\/span><\/span><span class="train-joint" aria-hidden="true">—<\/span><span class="train-car closed" tabindex="0" aria-describedby="car_info_2">/);
       assert.match(html, /<span class="train-name">Train 1: First Install, Completed<\/span><span class="train-count">\(1\/2\)<\/span><span class="train-badge">verified<\/span><\/summary>/);
     });
 
@@ -261,10 +263,10 @@ describe('train version, status and car state (#1933)', () => {
         { issue: 4, closed: true, state: 'closed' }
       ]
     }));
-    assert.ok(html.includes(car(1, 'in-progress', 'in progress')));
-    assert.ok(html.includes(car(2, 'blocked', 'blocked')));
-    assert.ok(html.includes(car(3, 'open', 'open')));
-    assert.ok(html.includes(car(4, 'closed', 'closed')));
+    assert.match(html, car(1, 'in-progress', 'in progress'));
+    assert.match(html, car(2, 'blocked', 'blocked'));
+    assert.match(html, car(3, 'open', 'open'));
+    assert.match(html, car(4, 'closed', 'closed'));
     assert.match(html, /<td class="train-state">◐ in progress<\/td>/);
     assert.match(html, /<td class="train-state">⛔ blocked<\/td>/);
     assert.match(html, /\(1\/4\)/);
@@ -273,8 +275,8 @@ describe('train version, status and car state (#1933)', () => {
 
   it('keeps the old behaviour when a car has no state', () => {
     const html = render(train({ cars: [{ issue: 5, closed: false }, { issue: 6, closed: true }] }));
-    assert.ok(html.includes(car(5, 'open', 'open')));
-    assert.ok(html.includes(car(6, 'closed', 'closed')));
+    assert.match(html, car(5, 'open', 'open'));
+    assert.match(html, car(6, 'closed', 'closed'));
     assert.match(html, /<strong>1 open · 1 closed<\/strong>/);
   });
 
@@ -513,7 +515,7 @@ describe('ID-less Topic Buckets (#2006)', () => {
     const html = render(bucket());
     assert.match(html, /<details class="train-card"/);
     assert.match(html, /<summary class="train-summary"/);
-    assert.match(html, /<span class="train-car open" tabindex="0"><span aria-hidden="true">#192<\/span>/);
+    assert.match(html, /<span class="train-car open" tabindex="0" aria-describedby="car_info_1">#192</);
   });
 
   it('names it exactly "Topic Bucket: <title>", with no train number', () => {
@@ -565,8 +567,8 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
         { issue: 2, closed: true, state: 'dropped' }
       ]
     }));
-    assert.ok(html.includes(car(1, 'in-review', 'in review')));
-    assert.ok(html.includes(car(2, 'dropped', 'dropped')));
+    assert.match(html, car(1, 'in-review', 'in review'));
+    assert.match(html, car(2, 'dropped', 'dropped'));
     assert.match(html, /<td class="train-state">◆ in review<\/td>/);
     assert.match(html, /<td class="train-state">⊘ dropped<\/td>/);
   });
@@ -583,8 +585,8 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
       cars: trainCard.CAR_STATES.map((state, i) => ({ issue: i + 1, closed: trainCard.CLOSED_CAR_STATES.includes(state), state }))
     }));
     trainCard.CAR_STATES.forEach((state, i) => {
-      const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#${i + 1}</span>`
-        + `<span class="car-info"><span class="car-info-head">#${i + 1}</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
+      const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0" aria-describedby="car_info_${i + 1}">#${i + 1}`
+        + `<span class="car-info" id="car_info_${i + 1}" aria-hidden="true"><span class="car-info-head">#${i + 1}</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
       assert.ok(pill, `${state} has a labelled pill`);
       assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
       if (state !== 'open') assert.match(page, new RegExp(`\\.train-car\\.${state}\\{`), `${state} has a style`);
@@ -606,7 +608,7 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
 
   it('counts a state-less closed car as closed, never as dropped', () => {
     const html = render(train({ cars: [{ issue: 6, closed: true }] }));
-    assert.ok(html.includes(car(6, 'closed', 'closed')));
+    assert.match(html, car(6, 'closed', 'closed'));
     assert.match(html, /\(1\/1\)/);
   });
 
@@ -1097,8 +1099,8 @@ describe('the car-state legend (#2165)', () => {
       for (const state of trainCard.CAR_STATES) {
         const closed = trainCard.CLOSED_CAR_STATES.includes(state);
         const html = render(train({ cars: [{ issue: 7, closed, state }] }));
-        const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0"><span aria-hidden="true">#7</span>`
-          + `<span class="car-info"><span class="car-info-head">#7</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
+        const pill = html.match(new RegExp(`<span class="train-car ${state}" tabindex="0" aria-describedby="car_info_1">#7`
+          + `<span class="car-info" id="car_info_1" aria-hidden="true"><span class="car-info-head">#7</span><span class="car-info-line"><span class="car-info-state">([a-z ]+)</span>: `));
         assert.ok(pill, `${state} renders as a pill`);
         assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
         assert.ok(css.includes(`\n.train-car.${state}{`), `${state} has a style rule`);
@@ -1221,9 +1223,9 @@ describe('a car\'s info popover (#2165)', () => {
    * @returns {string} The popover's inner HTML.
    */
   function infoOf(html, issue) {
-    const m = html.match(new RegExp(`<span aria-hidden="true">#${issue}</span><span class="car-info">(.*?)</span></span>(?=<span class="train-(?:joint|name)")`));
+    const m = html.match(new RegExp(`aria-describedby="(car_info_\\d+)">#${issue}<span class="car-info" id="\\1" aria-hidden="true">(.*?)</span></span>(?=<span class="train-(?:joint|name)")`));
     assert.ok(m, `#${issue} has an info popover`);
-    return m[1];
+    return m[2];
   }
 
   describe('what it says', () => {
@@ -1305,16 +1307,41 @@ describe('a car\'s info popover (#2165)', () => {
     const html = render(train());
 
     it('makes every car a keyboard stop', () => {
-      assert.equal(html.match(/<span class="train-car (?:open|closed)" tabindex="0">/g).length, 2);
+      assert.equal(html.match(/<span class="train-car (?:open|closed)" tabindex="0" /g).length, 2);
     });
 
     it('carries no title attribute on a car, so a browser tooltip never doubles the popover', () => {
       assert.doesNotMatch(html, /<span class="train-car [a-z-]+"[^>]*\stitle=/);
     });
 
-    it('reads a car once to assistive technology: the bare number is hidden and the popover says it', () => {
-      assert.equal(html.match(/<span aria-hidden="true">#\d+<\/span><span class="car-info"><span class="car-info-head">#\d+/g).length, 2);
-      assert.doesNotMatch(html, /class="car-info"[^>]*(aria-hidden|hidden)/);
+    it('keeps a car\'s detail out of its row for assistive technology and ties it to that car as its description', () => {
+      const cars = [...html.matchAll(/<span class="train-car [a-z-]+" tabindex="0" aria-describedby="([^"]+)">#(\d+)<span class="car-info" id="([^"]+)" aria-hidden="true">/g)];
+      assert.equal(cars.length, 2);
+      for (const [, describedBy, , id] of cars) assert.equal(describedBy, id);
+      // The number is the car's name, so it is read; the detail is not read in the row.
+      assert.doesNotMatch(html, /<span aria-hidden="true">#\d+/);
+      assert.equal(html.match(/class="car-info"/g).length, html.match(/class="car-info" id="car_info_\d+" aria-hidden="true"/g).length);
+    });
+
+    it('leaves the row reading as the car numbers and then the train\'s name', () => {
+      const summary = html.slice(html.indexOf('<summary'), html.indexOf('</summary>'));
+      const read = summary.replace(/<span class="car-info".*?<\/span><\/span>/g, '</span>').replace(/<span[^>]*aria-hidden="true"[^>]*>[^<]*<\/span>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      assert.equal(read, '#411 #1234 Train 1: First Install, Completed (1/2) verified');
+    });
+
+    it('puts every tab stop of a card in its always-visible row, and none in the body a collapsed card hides', () => {
+      const card = render(train({ owner: 'Lane', thesis: 'T', sequencing: 'S' }));
+      const row = card.slice(card.indexOf('<summary'), card.indexOf('</summary>'));
+      const body = card.slice(card.indexOf('<div class="train-body">'));
+      assert.equal(row.match(/tabindex="0"/g).length, 2);
+      assert.doesNotMatch(body, /tabindex|aria-describedby|contenteditable|<button|<input|<select|<textarea/);
+    });
+
+    it('gives a heading no way to claim a popover\'s id', () => {
+      const page = planDocs.renderPlanBody(`# car info 1\n\n## car_info_1\n\n\`\`\`tc-train\n${JSON.stringify(train())}\n\`\`\``);
+      const ids = [...page.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+      assert.ok(ids.includes('car_info_1') && ids.includes('car-info-1'));
+      assert.equal(new Set(ids).size, ids.length);
     });
 
     it('gives every car in a release panel its popover, with its own workstream\'s lane', () => {
@@ -1328,6 +1355,29 @@ describe('a car\'s info popover (#2165)', () => {
       assert.match(infoOf(panel, 1), /^<span class="car-info-head">#1 First<\/span>.*<span class="car-info-line">lane: Lane one<\/span>$/);
       assert.match(infoOf(panel, 2), /<span class="car-info-state">dropped<\/span>: closed as not planned<\/span>$/);
       assert.doesNotMatch(infoOf(panel, 2), /lane:/);
+    });
+
+    it('numbers the popovers across the whole page, so no id repeats over several trains, releases and a blockquote', () => {
+      const block = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
+      const rel = (version) => ({ version, trains: [train({ kind: 'train' }), { kind: 'bucket', title: 'B', cars: [{ issue: 411, closed: false }] }] });
+      const quoted = block('tc-train', train({ train: 3 })).split('\n').map((l) => `> ${l}`).join('\n');
+      const md = [block('tc-train', train()), block('tc-release', rel('5.32.0')), quoted, block('tc-release', rel('5.33.0')), block('tc-train', train({ train: 2 }))].join('\n\n');
+      for (const page of [
+        planDocs.renderPlanPage({ project: { id: 74, name: 'Roadmap' }, file: 'b.md', relative: 'b.md', modifiedAt: '2026-09-27T00:00:00.000Z', markdown: md, timeZone: 'UTC' }),
+        planDocs.renderPlanBody(md)
+      ]) {
+        const ids = [...page.matchAll(/class="car-info" id="([^"]+)"/g)].map((m) => m[1]);
+        const refs = [...page.matchAll(/aria-describedby="([^"]+)"/g)].map((m) => m[1]);
+        assert.equal(ids.length, 12);
+        assert.equal(new Set(ids).size, ids.length, 'no popover id repeats');
+        assert.deepEqual(refs, ids, 'each car names its own popover, in order');
+        assert.deepEqual(ids, ids.map((_, i) => `car_info_${i + 1}`));
+      }
+    });
+
+    it('starts the count again on every page', () => {
+      const md = `\`\`\`tc-train\n${JSON.stringify(train())}\n\`\`\``;
+      assert.equal(planDocs.renderPlanBody(md), planDocs.renderPlanBody(md));
     });
 
     it('leaves the legend\'s sample cars and the queue\'s pills as they were', () => {
@@ -1350,7 +1400,7 @@ describe('a car\'s info popover (#2165)', () => {
       assert.match(css, /\nsummary\.train-summary\{[^}]*position:relative[^}]*\}/);
     });
 
-    it('hides it by opacity alone, so it stays in the page for assistive technology', () => {
+    it('hides it by opacity and never removes it, so the description a car points at is always in the page', () => {
       assert.match(popover, /(^|;)opacity:0(;|$)/);
       assert.match(popover, /(^|;)pointer-events:none(;|$)/);
       assert.doesNotMatch(popover, /display:none|visibility:hidden/);
