@@ -148,6 +148,7 @@ It is deliberately a separate field from `capabilities.awareness.reason`, which 
 | `persistent` | object\|null | yes | Persistent engine config (null for session engines) |
 | `capabilities` | object | yes | Feature flags |
 | `errorPatterns` | array | no | How to recognise the engine's own API errors in its terminal output — see [Engine API error detection](#engine-api-error-detection-errorpatterns) |
+| `models` | object | no | Which models the engine may be launched with — see [Model selection](#model-selection-models). Absent means the engine offers no model selection |
 
 ### Config Format
 
@@ -1008,6 +1009,43 @@ Each engine profile includes a `statusPage` field (object or `null`):
 - **`productName`** — For Google: product name to filter incidents by
 
 Set to `null` for engines without a known upstream status page.
+
+## Model selection (`models`)
+
+An engine profile that can be launched with a chosen model declares which ones. A profile with no `models` block offers no model selection, and TangleClaw passes the engine no model argument.
+
+```json
+"models": {
+  "flag": "--model",
+  "offered": ["gpt-5.6-sol", "gpt-6-luna"],
+  "roster": { "source": "codex-models-cache", "maxAgeHours": 168 }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `flag` | The CLI flag that takes the model id |
+| `offered` | The allowlist: the model ids TangleClaw will offer for this engine. Each is letters, digits, dots, hyphens and underscores, starting with a letter or digit |
+| `roster.source` | The name of a roster reader in `lib/engine-models.js`. A profile names a reader; it cannot supply one |
+| `roster.maxAgeHours` | Optional. A roster older than this is treated as unreadable |
+
+A model can be selected only when it is in `offered` **and** in the roster the installed CLI reports at that moment. The two lists do different jobs. The allowlist is a decision: a CLI's roster also holds entries nobody chose to offer (Codex's lists hidden and internal models). The roster is the CLI's own account of what it can run for this account, read fresh every time, so a model the CLI drops stops being selectable without a TangleClaw release.
+
+`lib/engine-models.js` answers every model question, so saving, launching and listing choices cannot disagree:
+
+- `offeredWithAvailability(profile)` returns every offered model with `available` and, when it is not, a `reason`. An unavailable model is still returned, so a UI can show it as unavailable instead of dropping it.
+- `checkSelection(profile, modelId)` returns `{ok: true}` or a refusal with a stable `code` and a `reason`: `MODEL_MALFORMED`, `ENGINE_HAS_NO_MODELS`, `MODEL_NOT_OFFERED` (which is also what another engine's model gets), `ROSTER_UNAVAILABLE`, `MODEL_UNAVAILABLE`.
+- `modelArgv(profile, modelId)` returns the flag and the quoted id for the launch command.
+
+Nothing here substitutes a model. A selection that cannot be confirmed is refused.
+
+The roster says the CLI lists a model for this account. It does not prove the account can run it; only a completed turn on that model does.
+
+**Readers.** `codex-models-cache` reads `models_cache.json` under `$CODEX_HOME` (default `~/.codex`), which the Codex CLI rewrites with a fetch time whenever it starts.
+
+**Which engines declare it.** Codex. Antigravity does not yet: no record has been measured that names the model of a completed turn and ties it to one launch, and offering a model TangleClaw could not confirm it launched would be worse than not offering one.
+
+**Status.** The block and the module are in place. Nothing reads them at save or launch yet, so no project setting, API field or launch command has changed (#2188 is being built in steps).
 
 ## Engine API error detection (`errorPatterns`)
 
