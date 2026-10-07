@@ -82,7 +82,9 @@ Chunk C03 of #1949 (Train 30). The PM dispatched it over Medusa (379ec59b). The 
 
 **Tests.** `test/scorecard-cache.test.js`, `test/plan-progress-card.test.js`, one HTTP case in `test/api-plan-docs.test.js`, and the fixture `test/fixtures/scorecard-v1.json`. Full suite green on `9029c406` (7675 passed, 0 failed).
 
-**Not done here.** The producer and collector, and whatever refreshes the cache: a follow-on chunk, and who writes the file is still open with the PM. Wiring B5's `validateCertificationSummary` once C02 lands. Placing the blocks in the Registry and the board (the PM's job). VRF-1949-C03 is queued for the visual check.
+**Added 2026-10-06, before merge.** C02 landed on `main` (#1975) while this PR waited, so the certification section is no longer accepted as any object. `validateScorecard` now passes it to `lib/release-certification/scorecard.js#validateCertificationSummary` and refuses the document on any violation, naming up to five codes, each cut to 60 characters because a code can end in a key name from the document. This is an intentional test-contract change, dispatched by the PM (ca09f1ad): the case that accepted `{ anything: … }` is replaced by cases that accept an empty and a populated real summary and refuse seven malformed ones, plus a read/write case. Removing the validator call fails two of them. The PR still only reads the local cache and publishes nothing (ADR 0021 point 7).
+
+**Not done here.** The producer and collector, and whatever refreshes the cache: a follow-on chunk, and who writes the file is still open with the PM. Placing the blocks in the Registry and the board (the PM's job). VRF-1949-C03 is queued for the visual check.
 
 ## 2026-10-04 — #1949: soak certification judge, successor to #2056
 

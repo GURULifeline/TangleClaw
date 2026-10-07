@@ -13,6 +13,9 @@ const os = require('node:os');
 const path = require('node:path');
 
 const sc = require('../lib/scorecard-cache');
+const cert = require('../lib/release-certification/scorecard');
+const sm = require('../lib/release-certification/state-machine');
+const fx = require('./_release-certification-fixtures');
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'scorecard-v1.json');
 const fixture = () => JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -32,18 +35,72 @@ function refusal(doc) {
   }
 }
 
+/**
+ * A real published certification scorecard, built the way the certification
+ * work builds one: admitted, one healthy sample, then summarized.
+ * @returns {object} Scorecard document
+ */
+function certScorecard() {
+  const m = fx.manifest();
+  const first = sm.admit(m, fx.sample(0));
+  const state = sm.reduce({ ...first.state, manifestDigest: 'f'.repeat(64) }, m, fx.sample(fx.MIN)).state;
+  return cert.scorecard(state, m, fx.T0 + 5 * fx.MIN, 2);
+}
+
 describe('lib/scorecard-cache.js (#1949)', () => {
   describe('validateScorecard — the tc.scorecard/v1 contract', () => {
     it('accepts the versioned fixture', () => {
       assert.equal(refusal(fixture()), null);
     });
 
-    it('accepts a certification section as an object, leaving its contents to its own validator', () => {
+    it('accepts a certification section only when the certification validator accepts it', () => {
       const doc = fixture();
-      doc.certification = { anything: 'judged by lib/release-certification' };
-      assert.equal(refusal(doc), null);
-      doc.certification = [];
-      assert.match(refusal(doc), /certification must be an object/);
+      doc.certification = cert.certificationSummary([]);
+      assert.equal(refusal(doc), null, 'no candidate published yet');
+      const summary = cert.certificationSummary([certScorecard()]);
+      assert.deepEqual(cert.validateCertificationSummary(summary), [], 'the populated summary is itself valid');
+      doc.certification = summary;
+      assert.equal(refusal(doc), null, 'a published candidate');
+    });
+
+    it('refuses a certification section the certification validator refuses, naming its codes', () => {
+      const good = () => cert.certificationSummary([certScorecard()]);
+      const cases = [
+        [[], /certification must be an object/],
+        [null, /certification must be an object/],
+        [{ anything: 'not a summary' }, /not a valid certification summary \(SCHEMA\)/],
+        [{ ...good(), host: 'h' }, /not a valid certification summary \(UNKNOWN_FIELD:host\)/],
+        [{ ...good(), current: null }, /not a valid certification summary \(FIELD:current\)/],
+        [{ ...good(), current: { ...good().current, worktreePath: '/x' } }, /not a valid certification summary \(FIELD:current\)/],
+        [{ ...good(), candidates: [{ candidateSha: fx.SHA }] }, /FIELD:candidates/]
+      ];
+      for (const [section, why] of cases) {
+        const doc = fixture();
+        doc.certification = section;
+        assert.match(refusal(doc), why, JSON.stringify(section).slice(0, 60));
+      }
+    });
+
+    it('reads a cache with a refused certification section as invalid, never as ok', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-scorecard-cert-'));
+      try {
+        const doc = fixture();
+        doc.certification = { anything: 'not a summary' };
+        const file = sc.cachePath(dir);
+        assert.throws(() => sc.writeScorecardCache(file, doc), sc.ScorecardError);
+        assert.equal(fs.existsSync(file), false, 'a refused document never reaches the cache');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(doc));
+        const read = sc.readScorecardCache(file, { now: doc.generatedAt + 1 });
+        assert.equal(read.status, 'invalid');
+        assert.match(read.reason, /not a valid certification summary \(SCHEMA\)/);
+        assert.equal(read.doc, undefined, 'no figures from a refused document');
+        const longKey = { ...cert.certificationSummary([]), ['k'.repeat(500)]: 1 };
+        doc.certification = longKey;
+        assert.ok(refusal(doc).length < 200, 'a key name from the document is bounded in the reason');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('refuses an unknown key at every level it owns', () => {
