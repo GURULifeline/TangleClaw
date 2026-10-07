@@ -322,6 +322,46 @@ describe('tc start (car 21.3)', () => {
     assert.doesNotMatch(tcVerbs.renderStartStatus(base), /Handoff consumed/, 'an older server that sends no field prints nothing');
   });
 
+  it('reports a project file that disagrees with the recovery mode on record, in the resolver\'s own words (#1937)', () => {
+    /**
+     * Render a status whose current-mode block is the variable under test.
+     * @param {object} [projectRecovery] - The block, or undefined for a server that sends none
+     * @returns {string} The printed page
+     */
+    const render = (projectRecovery) => tcVerbs.renderStartStatus({
+      sequence: 'present',
+      sessionId: 7,
+      sequenceId: 3,
+      revision: 1,
+      applicability: 'applicable',
+      preflight: { verdict: 'ok' },
+      pageBudget: 19332,
+      status: { cursor: 0, ready: false, recovery: 'none', recoveryMode: 'operator', recoveryRevision: 1, unready: false },
+      ...(projectRecovery ? { projectRecovery } : {}),
+      steps: [{ index: 0, id: 'identity', pageCount: 1, pagesServed: [], servedAt: null, ackedAt: null }]
+    });
+    const pinned = render({
+      projectRecoveryMode: 'operator',
+      projectRecoverySource: 'pinned',
+      projectRecoveryDiscrepancy: 'the operator pinned this project to operator-cleared recovery, and project.json holds recoveryMode "advisory"; the pin decides'
+    });
+    assert.match(pinned, /Recovery mode discrepancy: the operator pinned this project/);
+    assert.match(pinned, /now operator \(pinned\)/);
+    assert.match(pinned, /this launch keeps the mode it started with/);
+
+    const invalid = render({
+      projectRecoveryMode: 'operator',
+      projectRecoverySource: 'invalid',
+      projectRecoveryDiscrepancy: 'the operator chose advisory recovery, and project.json holds an unrecognised recoveryMode "Advisory"; recovery stays operator-cleared until the file is corrected'
+    });
+    assert.match(invalid, /now operator \(invalid\)/);
+    assert.doesNotMatch(invalid, /pinned/, 'a project held by an unrecognised value is not described as pinned');
+
+    const agreeing = render({ projectRecoveryMode: 'operator', projectRecoverySource: 'pinned', projectRecoveryDiscrepancy: null });
+    assert.doesNotMatch(agreeing, /discrepancy/i, 'nothing is said when the file and the record agree');
+    assert.doesNotMatch(render(), /discrepancy/i, 'an older server that sends no block prints nothing');
+  });
+
   it('tells a session in recovery what is blocking it, and who can open it', () => {
     // A session in OPERATOR recovery has just been told by `tc start next` that
     // its task step is withheld, and `status` is where it looks to find out
@@ -366,6 +406,34 @@ describe('tc start (car 21.3)', () => {
     const none = render({ cursor: 1, ready: false, recovery: 'none', recoveryMode: 'operator', recoveryRevision: 1, unready: false });
     assert.doesNotMatch(none, /Recovery/,
       'a launch that owes none is not told about a gate it will never meet');
+  });
+
+  it('does not tell a session to `tc start next` into a step the operator is withholding (#1937)', () => {
+    const steps = ['identity', 'governance', 'state', 'task'].map((id, index) => ({
+      index, id, pageCount: 1, pagesServed: [0], servedAt: 'x', ackedAt: index < 3 ? 'x' : null
+    }));
+    /**
+     * Render a four-step status at the task step.
+     * @param {object} status - The status block to render
+     * @returns {string} The printed page
+     */
+    const render = (status) => tcVerbs.renderStartStatus({
+      sequence: 'present', sessionId: 7, sequenceId: 3, revision: 1, applicability: 'applicable',
+      preflight: { verdict: 'crash-recovery' }, pageBudget: 19332, toolOutput: null, pending: null,
+      renderContext: 'recorded', status, steps
+    });
+    // `taskWithheld` is the server gate's own answer; the page reads it rather
+    // than re-deciding from recovery, mode and cursor.
+    const withheld = render({ cursor: 3, ready: false, recovery: 'required', recoveryMode: 'operator', recoveryRevision: 2, unready: true, taskWithheld: true });
+    assert.doesNotMatch(withheld, /Run `tc start next` to continue/);
+    assert.doesNotMatch(withheld, /advisory/, 'the page describes the gate; it does not advertise another mode');
+    const advisory = render({ cursor: 3, ready: false, recovery: 'required', recoveryMode: 'advisory', recoveryRevision: 2, unready: true, taskWithheld: false });
+    assert.match(advisory, /Run `tc start next` to continue/, 'an advisory task step is served, so it is still pointed at');
+    const early = render({ cursor: 1, ready: false, recovery: 'required', recoveryMode: 'operator', recoveryRevision: 2, unready: true, taskWithheld: false });
+    assert.match(early, /Run `tc start next` to continue/, 'the steps before the task step are still served in recovery');
+    const older = render({ cursor: 3, ready: false, recovery: 'required', recoveryMode: 'operator', recoveryRevision: 2, unready: true });
+    assert.match(older, /Run `tc start next` to continue/,
+      'a server that predates the field is not second-guessed: `tc start next` itself says withheld');
   });
 
   it('prints the missing render context, because a re-render can then be thinner', () => {

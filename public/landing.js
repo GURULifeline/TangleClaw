@@ -829,7 +829,18 @@ function renderStaleServerBanner(info) {
       `Running <code>${shortStartup}</code>; <code>${shortDisk}</code> on disk ` +
       `(${aheadStr}).${uptimeStr} ${impact.tail}`;
   }
+  const wasHidden = banner.classList.contains('hidden');
   banner.classList.remove('hidden');
+
+  // The server has moved, so this page may be running assets older than it.
+  // Ask the service worker to check for a new /sw.js as the banner appears
+  // (#411) — once per appearance, not on every poll while it stays up. A new
+  // worker takes control and sw-register.js reloads the page onto the current
+  // assets; nothing here is visible. The global is absent in old pages and in
+  // tests that do not provide it.
+  if (wasHidden && typeof window !== 'undefined' && typeof window.tcRequestServiceWorkerUpdate === 'function') {
+    window.tcRequestServiceWorkerUpdate();
+  }
 
   // A records-only range has nothing to load, so the banner does not offer a
   // restart for it. The global restart control in settings is unaffected.
@@ -1242,7 +1253,7 @@ async function loadPorts() {
   if (!data) return;
   state.ports = data.leases || [];
   document.getElementById('portsCount').textContent = state.ports.length;
-  renderPorts();
+  renderKeepingFoldFocus(document.getElementById('portsGrid'), renderPorts);
 }
 
 /**
@@ -1373,7 +1384,7 @@ async function loadGroups() {
   if (!data) return;
   state.groups = data.groups || [];
   document.getElementById('groupsCount').textContent = state.groups.length;
-  renderGroups();
+  renderKeepingFoldFocus(document.getElementById('groupsPanel'), renderGroups);
 }
 
 /**
@@ -1393,7 +1404,7 @@ async function loadOpenclawConnections() {
   });
   await Promise.all(statusPromises);
 
-  renderOpenclawConnections();
+  renderKeepingFoldFocus(document.getElementById('openclawPanel'), renderOpenclawConnections);
 }
 
 /**
@@ -1997,7 +2008,7 @@ function openLaunchModeModal(name, engine, continuityMode = null, project = null
     html += `
       <label class="launch-mode-option">
         <input type="radio" name="launchMode" value="${esc(key)}" ${checked}
-               onchange="selectedLaunchMode='${esc(key)}'; updateLaunchModeWarning()">
+               onchange="selectedLaunchMode=${jsArg(key)}; updateLaunchModeWarning()">
         <div class="launch-mode-info">
           <span class="launch-mode-label">${esc(mode.label)}</span>
           <span class="launch-mode-desc">${esc(mode.description || '')}</span>

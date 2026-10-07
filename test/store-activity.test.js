@@ -63,6 +63,26 @@ describe('store.activity', () => {
       });
     });
 
+    it('logOrThrow writes the same row log does', () => {
+      store.activity.logOrThrow({ projectId, eventType: 'strict.event', detail: { foo: 'strict' } });
+      const entries = store.activity.query({ eventType: 'strict.event' });
+      assert.deepEqual([entries.length, entries[0].projectId, entries[0].detail.foo], [1, projectId, 'strict']);
+    });
+
+    it('logOrThrow throws where log swallows, and says which step failed', () => {
+      const db = store.getDb();
+      db.exec("CREATE TRIGGER refuse_strict BEFORE INSERT ON activity_log WHEN NEW.event_type = 'refused.event' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+      try {
+        assert.doesNotThrow(() => store.activity.log({ eventType: 'refused.event' }));
+        assert.throws(() => store.activity.logOrThrow({ eventType: 'refused.event' }), (err) => err.activityPhase === 'insert' && /refused/.test(err.message));
+        // A project that does not exist is refused by the table itself.
+        assert.throws(() => store.activity.logOrThrow({ projectId: 987654, eventType: 'strict.orphan' }), (err) => err.activityPhase === 'insert');
+      } finally {
+        db.exec('DROP TRIGGER refuse_strict;');
+      }
+      assert.equal(store.activity.query({ eventType: 'refused.event' }).length, 0);
+    });
+
     it('handles null detail', () => {
       store.activity.log({ eventType: 'null.detail', detail: null });
       const entries = store.activity.query({ eventType: 'null.detail' });

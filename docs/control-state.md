@@ -102,6 +102,7 @@ active. None of these is a principal:
 | RELEASE a hold | Operator (any named hold); the hold's own issuer; or a principal the matrix delegates (`releaseDelegations`). **Never the target.** The PM and the Architect cannot clear each other's holds by role |
 | STOP | Operator or anyone in `authority.stop` (never the target) |
 | Close | Operator or anyone in `authority.lifecycle` |
+| Finalize the bound session headlessly (`tc finalize`, #2027) | The target session itself, or anyone in `authority.lifecycle`, never the operator. Only once the lane composes `AVAILABLE`, has no unresolved Medusa obligation and holds no work of its own. See [session-finalize.md](session-finalize.md) |
 | Acknowledge | The target's currently bound launch, for the current generation only |
 
 **Operator proof tier.** An operator-only command needs one of these:
@@ -270,6 +271,34 @@ A checkout with no marker is never refused, so removing the markers alone is eno
 commits. Removing the hooks restores the checkout exactly.
 
 `git commit --no-verify` and `git push --no-verify` also get past the hooks in an emergency.
+
+### Control state survives a rollback, and comes back on re-upgrade
+
+Removing the hooks and markers unblocks git. It does **not** clear the control state, and neither
+does the rollback:
+
+- **Rollback deletes nothing.** The assignments, holds, events and receipts stay in the database.
+  A server whose schema predates control state runs no migration against a newer database, so it
+  never reads those tables and never clears them.
+- **Re-upgrading makes them authoritative again,** exactly as they were left. A lane that was HELD
+  or STOPPED before the rollback is still HELD or STOPPED:
+  - its governed mutations are refused again;
+  - an ordinary launch into a stopped project is refused;
+  - the next launch of a governed project reinstalls its hooks and markers.
+
+  This is the safe behavior: a hold nobody released is still in force. But a refusal right after
+  an upgrade can look like a regression. It is not a regression. It is state carried over from
+  before the rollback.
+- **Resolve it through the control workflows, never by editing the database.**
+  - Inspect what came back: `GET /api/control/assignments` lists every open assignment (operator
+    only), and `GET /api/control/assignments/:id` shows one assignment's holds and events. From a
+    pane, `tc control status` shows that lane's own state.
+  - Release holds that no longer apply, with `expectedGeneration` and a reason code.
+  - After a STOP, create a successor assignment.
+  - Close an active assignment whose work is finished.
+
+  The events and receipts tables are append-only by design, and a hand edit to the others bypasses
+  the generations and the audit trail that make those decisions safe to trust.
 
 ## Code
 

@@ -377,7 +377,16 @@ a well-formed artifact exist:*
 and only a person clears it, from the project's Launch readiness panel. In `advisory` the task step
 is served behind a warning and the session clears its own recovery by attesting with a written
 reconciliation, recorded as `agent-reconciled`. An unrecognised value reads as `operator`, so a typo
-can never be why a damaged handoff went unnoticed.
+can never be why a damaged handoff went unnoticed. While the task step is withheld, the unready nudge and
+`tc start status` say the launch is waiting on the operator and stop pointing at `tc start next` and
+`tc start ready`, which would both refuse (#1937). The mode is the operator's choice (ADR 0017 R3a): a
+session that names it in `PATCH /api/projects/:name` is refused `403 OPERATOR_ONLY`. The operator's
+decision is recorded in the server store, which outranks the project's `.tangleclaw/project.json`
+(#1937): once the operator has pinned a project to `operator`, no edit to that file loosens it, and a
+file that disagrees with the decision on record is reported in the server log at launch, on
+`GET /api/launch-sequences` and in `tc start status`. A launch reads the decision once and freezes the
+mode it resolves to. If the decision cannot be read, the launch takes `operator`. With no decision on
+record the file's value decides.
 
 **The handoff preflight is what produces that verdict.** At launch TangleClaw reads the handoff the
 previous session published and returns an ordered verdict — `ok` only for a current, eligible
@@ -957,6 +966,6 @@ A status page says whether the provider is up. It does not say that *this sessio
 
 The field is optional. Bundled: Codex declares the pattern above; the other engines declare none until a shape is known for them.
 
-**What the operator sees.** The wrap sentinel's existing per-tick read of every live pane (every few seconds) is the capture; there is no second loop. A match records `lastEngineError = { type, status, message, timestamp }` on the session, which reaches `GET /api/sessions/:project/status` and the project's `session` object in `GET /api/projects`. The session page shows a banner above the terminal naming the status, the error type and the provider's message; the project card on the dashboard carries a red `⚠ HTTP <status>` badge with the same detail in its tooltip.
+**What the operator sees.** The engine-error monitor's per-tick read of every live tmux pane (every few seconds) is the capture; there is no second loop. A match records `lastEngineError = { type, status, message, timestamp }` on the session, which reaches `GET /api/sessions/:project/status` and the project's `session` object in `GET /api/projects`. The session page shows a banner above the terminal naming the status, the error type and the provider's message; the project card on the dashboard carries a red `⚠ HTTP <status>` badge with the same detail in its tooltip.
 
 **When it clears — stated honestly.** TangleClaw cannot see an API call succeed; it sees the pane's captured tail. The error is reported for as long as a matching line is inside that tail, and clears the first time a capture no longer contains one — which is what the next successful prompt looks like from outside: the engine produced enough new output to push the error line off the captured rows. An error still on screen stays reported even after the operator has fixed the cause, until the terminal moves past it; a repeated error re-arms with a fresh timestamp once the previous one has scrolled away. A capture that came back empty — tmux failed or timed out — is no reading at all and changes nothing, so a flaky tmux cannot flash the card healthy for a tick and re-stamp the same error as new. Detection applies to tmux sessions; a Web UI (gateway) session has no pane to read.

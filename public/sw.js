@@ -35,6 +35,10 @@ const STATIC_ASSETS = [
   // landing.js that calls it. landing.js guards the call, so a worker that has
   // not yet learned this file degrades to "no panel", never a ReferenceError.
   '/health-panel.js',
+  // operator-bridge-panel.js (#2031) is dual-listed the same way: ui.js guards
+  // the mount, so a worker that has not learned this file yet degrades to a
+  // settings page with no bridge section, never a ReferenceError.
+  '/operator-bridge-panel.js',
   // reconnect-policy.js is dual-listed for the same reason, with a sharper
   // failure mode: a network-first MISS while the network is down returns the
   // synthetic JSON 503, and a `<script src>` served a 503 leaves both pages
@@ -166,6 +170,10 @@ const NETWORK_FIRST_PATHS = new Set([
   // needs a hand must not be served stale behind an active worker. Network-first
   // rather than a CACHE_NAME bump (#710).
   '/health-panel.js',
+  // operator-bridge-panel.js holds the controls that switch the Discord bridge
+  // off (#2031). A stale copy behind an active worker is the wrong thing to be
+  // holding when the operator needs the kill switch.
+  '/operator-bridge-panel.js',
   // reconnect-policy.js is a shared frontend base like api-helper.js: both page
   // scripts call `tcCreateReconnectPolicy` at load, so a stale copy served
   // against a fresh landing.js or session.js is not a cosmetic skew but a

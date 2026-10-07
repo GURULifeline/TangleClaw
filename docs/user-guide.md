@@ -161,7 +161,10 @@ A row that begins **Could not check** means the measurement itself failed (ttyd 
 launchd, `~/Documents` absent, git unreadable) and says why. That is deliberately not hidden: a
 check that could not run has not said the machine is healthy. The same verdicts are available
 as JSON from `GET /api/system/health`, each condition in one of three states — `fired`, `clear`,
-or `unknown` with a reason.
+or `unknown` with a reason. The ttyd row's `reading` also carries the counts as values —
+`wedged` (confirmed wedged children), `orphanGate` and `pool` (`{used, cap}`) — each `null` when it
+could not be measured, so a program can compare them without reading the `detail` text. Off macOS
+the row also carries `applicable: false`.
 
 ### PortHub Lease Import Banner
 
@@ -172,6 +175,10 @@ If TangleClaw detects an existing PortHub installation with active leases that h
 Sessions report what they are doing with `tc workload set`, and TangleClaw combines that with what each session's terminal is observed doing into one verdict per session. You see it with `tc sessions` from any launched pane, or `GET /api/tc/sessions`: `AVAILABLE`, `WORKING`, `WAITING`, `BLOCKED`, `COMPLETE_NOT_CLEAR`, `HELD`, `STOPPED` or `UNKNOWN`. A session that has not reported reads as unknown, never available.
 
 You can narrow a session's verdict (hold it at unknown, or mark it not safe to clear) through `POST /api/tc/workload/narrowing`. See [Fleet workload](fleet-workload.md). A dashboard view is deferred under the current operator UI freeze.
+
+### Coordinator Context Rotation
+
+A Codex coordinator (Architect or ProjectManager) that needs to clear its context runs `tc rotation prepare --checkpoint <file>` instead of a bare `/clear`. TangleClaw then holds the coordinator's new dispatch, clears it once its turn ends, and binds the new thread. It tells that thread to reconcile the checkpoint and submit a receipt with `tc rotation resume`. Dispatch resumes only when the receipt checks out. If a rotation cannot finish, the operator ends it with `POST /api/tc/rotation/abandon`. See [Coordinator context rotation](coordinator-rotation.md).
 
 ### Ports Panel
 
@@ -193,7 +200,7 @@ Below the ports panel, there's a collapsible **Global Rules** panel. These are m
 
 - **Edit**: Expand the panel, modify the textarea, and tap **Save**
 - **Revert**: restore it from git (`data/global-rules.md` is tracked). There is no Reset button: the old one called an endpoint that, since the canonical-source model (#240), returns the current content unchanged, so it looked like a revert and did nothing (#243)
-- **API**: `GET /api/rules/global`, `PUT /api/rules/global`. `POST /api/rules/global/reset` still exists as a back-compat no-op since #240 — it returns the current content unchanged
+- **API**: `GET /api/rules/global`, `PUT /api/rules/global` (the operator's, like the panel). `POST /api/rules/global/reset` still exists as a back-compat no-op since #240 — it returns the current content unchanged
 
 Global rules live in one git-tracked file, `data/global-rules.md` in the TangleClaw repo (#240). Saving from the panel writes that file directly; there is no bundled default and no per-install copy under `~/.tangleclaw/`. A leftover `~/.tangleclaw/global-rules.md` from an older install is ignored — if its content differs, TangleClaw backs it up next to itself and logs a warning on startup so you can merge what you still want.
 
@@ -689,7 +696,7 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 
   Optional train fields:
 
-  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. An `unconfigured` card must have no `train`; every other kind needs one.
+  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. A `bucket` or `unconfigured` card must have no `train`, so a Topic Bucket never shows or borrows a train number; `train` and `pilot` cards need one.
   - `version`: a short label such as `v6`, shown as a badge.
   - `status`: one of `planned`, `ready`, `in-progress`, `blocked`, `shipped` or `sunset`, shown as a badge.
 
@@ -841,6 +848,26 @@ A branch that a worktree still holds always reads `preserve`. To retire both, ch
 
 This is a check and a rule. It runs from a TangleClaw-launched pane, because `tc` needs `TANGLECLAW_API`. Nothing yet stops a raw `git branch -D`, `reset --hard` or `worktree remove --force` typed in a shell, and TangleClaw does not retire merged branches or worktrees for you (#1267).
 
+### Retiring a Finished Session Headlessly
+
+A session with nothing left to decide can retire itself with no wrap drawer (#2027):
+
+```
+tc workload set complete --clearance safe-to-clear --summary "<what was finished>"
+tc finalize --reason "<why>"
+```
+
+When a session finalizes itself, its pane closes during the request. The coordinator can confirm the outcome by repeating the request with `--project` and `--session`. If the pane survived, it can confirm the outcome itself with `tc finalize --session <id> --reason "<why>"`. A coordinator named in the target assignment's `authority.lifecycle` can do the same for the session that assignment is bound to, with `tc finalize --project <name> --session <id> --reason "<why>"`. The session is recorded `wrapped` and audited, and its Medusa workspace, startup channel and pane are torn down. Nothing in the checkout is committed, staged, reset or discarded, and a final handoff is published so the next launch starts cleanly.
+
+It refuses, with nothing changed and exit 3, whenever there is still something to decide. (Exit 3 with `FINALIZE_INCOMPLETE` is different: the session is finalized, and repeating the command finishes the publishing or teardown that was left.)
+- the receipt is not a current `complete` + `safe-to-clear`, or a delegated target's engine is not at rest;
+- something addressed to the session is still open, or it is waiting on a reply;
+- files changed since launch, or it made commits no remote has;
+- the lane is held or stopped;
+- a wrap is running.
+
+Use the full wrap for those. Files that were already uncommitted when the session launched are left exactly as they were. The whole contract is in [session-finalize.md](session-finalize.md).
+
 ### Update Blocked by Local Changes
 
 **Update now** never moves a checkout that has uncommitted changes someone may
@@ -955,6 +982,18 @@ service worker's state) is gone the moment the condition clears, which it does
 on its own. The runbook also says why bumping the service worker's
 `CACHE_NAME` is not the fix.
 
+### Dashboard Still Looks Old After the Server Moved
+
+A dashboard tab left open for a long time can be running page code older than the server it talks to. TangleClaw keeps that from sticking in three ways (#411), and none of them needs you to open DevTools or unregister the service worker:
+
+- **The page scripts are fetched fresh.** `landing.js` and the other core scripts are served network-first, so any reload gets the server's current copy.
+- **The service worker checks for a new version** when the page loads, whenever the tab comes back to the foreground, and when the "TC server is out of date" banner first appears. When it finds one, the new worker takes over and the page reloads itself once onto the current assets.
+- **Restarting from the banner reloads the page** only after the new server process answers, so the reload cannot land on a dead server and fall back to a cached copy.
+
+If the page still looks old after that, reload it once. That is expected: a tab whose service worker has not changed keeps the code it loaded until something reloads it, and the dashboard does not show a separate "your page is older than the server" notice.
+
+**A restart that does not seem to take is a different problem.** If "Restart TangleClaw" appears to do nothing and the uptime keeps counting, the server process itself is not recycling, and nothing above addresses that. In the incident behind #411 that symptom was fixed from a terminal (`launchctl kickstart -k gui/$UID/com.tangleclaw.server`), and its cause was never found. If you see it, capture the server log (`~/.tangleclaw/logs/tangleclaw.log`) and the `startedAt` from `/api/server-info` before and after the click, and file an issue.
+
 ### Dashboard Constantly Refreshes After Enabling HTTPS
 
 Port 3102 serves either HTTP or HTTPS, not both. If HTTPS is enabled but the
@@ -1039,8 +1078,8 @@ condition fired or could not be measured. Each row carries its own fix; the back
   runs it from `~/.tangleclaw/bin/ttyd`, and `deploy/install.sh` builds and installs it whenever
   it is missing, broken or out of date, so a normal install needs no extra step. If the ingress
   cutover stops with "the managed ttyd runtime … cannot be used", run
-  `node scripts/ttyd-runtime.js provision` and then the cutover again (not `deploy/install.sh`, which
-  rewrites the terminal's launchd job for direct mode); if the installer itself stops there, its
+  `node scripts/ttyd-runtime.js provision` and then the cutover again (or `deploy/install.sh`, which
+  in caddy mode does both); if the installer itself stops there, its
   message says what failed (see "The ttyd runtime launchd runs"
   in `docs/configuration-reference.md`). To put it in service or take it out again, follow
   [Roll out the owned ttyd runtime](runbooks/roll-out-the-owned-ttyd.md) or

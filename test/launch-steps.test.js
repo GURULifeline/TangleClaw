@@ -73,7 +73,7 @@ describe('launch step contents (car 21.2)', () => {
     }
   });
 
-  it('step 1 carries identity, the global rules and the wrap sentinel', () => {
+  it('step 1 carries identity, the global rules and the wrap directive', () => {
     const { identity } = render();
     assert.match(identity, /# Session Start — steps-project/);
     assert.match(identity, /## Session Ownership/);
@@ -262,5 +262,25 @@ describe('launch step contents (car 21.2)', () => {
       const { state } = render({ mode: 'pull', handoffMethodology: dormant });
       assert.doesNotMatch(state, /Prawduct state was dormant/);
     });
+  });
+});
+
+describe('launch bootstrap authorizes a project-required startup message (#1874)', () => {
+  const sessions = require('../lib/sessions');
+  const lines = sessions.LAUNCH_BOOTSTRAP_LINES;
+
+  it('names the required message inside step (c), which the (a)-(c) authorization covers', () => {
+    const c = lines.find((l) => l.startsWith('(c) '));
+    assert.ok(c, 'step (c) exists');
+    assert.match(c, /tc start ready/);
+    assert.match(c, /require a startup message once READY/);
+    assert.match(c, /send exactly that right after attesting/);
+    const auth = lines.findIndex((l) => l.startsWith('(a) through (c) are routine initialization and are already authorized'));
+    assert.ok(auth > lines.indexOf(c), 'the authorization sentence follows and so covers it');
+  });
+
+  it('keeps project work behind (d): the message is the only addition to initialization', () => {
+    const d = lines.find((l) => l.startsWith('(d) '));
+    assert.equal(d, '(d) Propose the project action, and stop there.');
   });
 });

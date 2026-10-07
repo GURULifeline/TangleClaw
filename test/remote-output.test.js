@@ -20,7 +20,7 @@
  */
 
 const { test } = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 
 const { redactRemoteOutput, detailFromFailure, reasonFromFailure, stripRemoteCredentials, MAX_CHARS, REDACTED_PREFIX } = require('../lib/remote-output');
 

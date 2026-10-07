@@ -35,6 +35,52 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-06 — #1937: the operator's recovery-mode decision is recorded in the store (schema v55)
+
+<!-- prawduct: type=feature | scope=1937-recovery-state-store -->
+
+Chunk 02 of the #1937 plan (revision 6, sections 4.3 and 4.4), on PM dispatch (Medusa `3b2004a1`).
+
+- **What.** Table `project_recovery_state` and the v54→v55 migration (`lib/store.js`), with `store.projectRecoveryState` (`get`, `recordDecision`, `claimInheritedNotice`). `lib/project-config.js#resolveRecoveryMode` takes the decision as a second argument and answers with a source and, where the file disagrees with a decision on record, a discrepancy. `lib/sessions.js#_resolveLaunchRecoveryMode` reads the decision once per launch. `lib/projects.js#updateProject` writes the store before any other write of a request that names the mode, and the file after. `lib/launch-sequence.js#projectRecoveryNow` is the one live read behind `GET /api/launch-sequences` and `tc start status`.
+- **Unchanged.** The default mode is still `operator`. A project with no decision on record resolves exactly as before. The gate, its ordering and what each mode does are not touched.
+- **Built and not yet reachable.** The resolver's `inherited` row is keyed on the shipped default, so it cannot be reached while the default is `operator`, and nothing claims the notice marker in production. The claim, its transaction with the launch insert and its rollback are tested by setting the default for the duration of a block. The notice text is chunk 4's.
+- **Departures from the plan, each recorded in the chunk's build plan.** A launch that cannot read the decision takes `operator`; the plan did not name that case. With no decision on record a recognised file value keeps the source word `launchSequence`; plan 4.3's table calls the advisory case `default`, which describes the world after the default flips. Plan 4.4's test of a launch-level claim on a row "pinned once, then unpinned, never noticed" cannot occur since revision 6 made an unpin a recorded decision: that project resolves `chosen` and claims nothing. The claim statement is tested against such a row at the store level.
+- **The operator-bridge runbooks stay at schema 54, by ruling.** `test/operator-bridge-runbooks.test.js` tied the two Tier 3 runbooks to the store's current schema by asserting `lib/store.js` said 54. The Architect ruled (Medusa `3d27f665`, confirmed by the PM in `55c3bb6c`) that the v5.31.0 rollback boundary stays exact: the put-back procedure restores a snapshot from before v5.31.0, so accepting a store a later build has opened would present a rollback that drops later data as a supported path. The restore guard and step 5 keep 54. The test now pins 54 as a literal fact about v5.31.0 and no longer reads the store's version. `docs/runbooks/activate-the-operator-bridge.md` gains a check of the newest release before the update is started, with a stop for anything later than v5.31.0, and `docs/runbooks/put-back-the-build-before-the-operator-bridge.md` says why a schema above 54 is refused. No pasted block changed. A rollback procedure for later builds is separate work, not part of this chunk.
+- **The PATCH answers.** A store failure is `500 RECOVERY_DECISION_NOT_SAVED` with nothing applied. A file failure behind a saved decision is `200` with `recoveryMode.fileWritten: false` and a `RECOVERY_FILE_NOT_WRITTEN` warning. A failure elsewhere in the request after the decision is saved keeps its usual status and answers `RECOVERY_DECISION_SAVED_UPDATE_FAILED` with the decision in `recoveryMode`.
+- **Fixed after the cumulative review (`rev-20261006T234840Z-2d673a12`, 0 blocking, 4 warnings), on the PM's approval.** The route dropped `updateProject`'s statement that the decision had been saved on both later-failure exits; it now carries it as a field on each, with route-level tests. An unrecognised file value with no decision on record no longer sets a discrepancy, so the field means what its documentation says; the test that asserted the old behaviour changed with it. Every recorded decision writes a `project.recovery-mode-decided` activity event and a log line. The CHANGELOG no longer says the printed `tc start status` reports the source and the last decision: the status route's JSON carries them, and the printed verb adds a line only for a discrepancy.
+- **Contract change in an existing test.** `test/store-bridge-migration.test.js` pinned the store's schema version at 54 in three assertions. The bridge's own version is still asserted as exactly 54. Two of the three now assert that an upgraded store ends at `store.CURRENT_SCHEMA_VERSION`; the third asserts the store's version is no older than the bridge's.
+- **Carried from chunk 1's review.** The operator-path PATCH test sets its own state; `taskStepWithheld`'s JSDoc no longer claims every describer reads it; the A24 comment sentence on the GET is gone; the API reference has rows for the two routes.
+
+## 2026-10-06 — #1937: a held launch is not asked for what the gate refuses; the operator chooses the recovery mode
+
+<!-- prawduct: type=bugfix | scope=1937-recovery-gate-salvage -->
+
+Chunk 01 of the #1937 plan: the three pieces salvaged from PR #1986, which is to be closed in favour of this work.
+
+- **What.** `lib/launch-sequence.js#taskStepWithheld` is the recovery gate's own answer, carried on the status block as `taskWithheld`. The unready nudge (`lib/launch-unready.js#nudgeLine`) and `tc start status` (`lib/tc-verbs.js#renderStartStatus`) read it. `GET /api/launch-sequences` adds `projectRecoveryMode`. `PATCH /api/projects/:name` is operator-only when the body names `launchSequence.recoveryMode`.
+- **Not carried from #1986.** Its `ADVISORY_RECOVERY_HINT`, which told readers how to opt in to advisory mode, and every test assertion on that wording. The default recovery mode is about to change (operator ruling 2026-10-06), so the hint would have described an opt-in that is going away. Two tests now assert the opposite: the withheld nudge and status page do not mention advisory mode.
+- **Unchanged.** The default mode, the gate's ordering, and what advisory mode does.
+- **Tests.** Ported with the code: the gate's answer across operator, cleared and advisory launches; the nudge unit and end-to-end through the monitor; the status page with and without the field (an older server sends none); the GET before and after a setting change; the PATCH refusal for a session at a new value, at the current value, and beside another key, with the file unchanged each time.
+- **Mutations.** Six, one per guard or call-site argument, each turned a test red: the PATCH branch disabled; the presence check weakened to a change-of-value check; `projectRecoveryMode` hard-coded; the monitor's `taskWithheld` argument forced false; the status page's condition removed; `taskStepWithheld` widened to advisory.
+
+## 2026-10-04 — #1949: soak certification judge, successor to #2056
+
+<!-- prawduct: type=feature | scope=1949-soak-judge -->
+
+PM dispatch (Medusa 93e011e0), Architect ruling (011fef17) and corrections (6c0b466f). Supersedes #2056, whose code never landed.
+
+**Why.** The v5.30.0 soak's evidence was evaluated by hand, and `rc-cert host-finalize` certified without reading the bundle. #2056's judge would have closed that gap but failed the soak that shipped: it treated every failed event as fatal, with no path for an Operator to review one.
+
+**What.**
+- `lib/soak/judge.js`: verdicts `pass`, `awaiting-review`, `fail`. Terminal reasons are never waived, and any fault event that is not `ok` is terminal. A failed or skipped load event and the driver's ownership-unverified state are reviewable. A disposition proposal (`tc.soak-disposition/v1`) is validated and bound by digest, and never changes the verdict.
+- `lib/release-certification/state-machine.js#accept`, `scorecard.js`: the operator's acceptance binds the proposal's sha256 with the candidate and run, and the scorecard publishes it.
+- `lib/release-certification/host-checks.js`, `host-publish.js`: the finalization is `ok` for a pass or for covered findings; `certifiedFrom` certifies covered findings only when the acceptance names that exact digest.
+- `scripts/rc-cert.js`: `host-finalize --soak-bundle [--soak-disposition]`, `accept --soak-disposition-sha256`.
+- `lib/soak/bundle.js`, `lib/soak/driver.js`, `scripts/soak.js`: carried over from #2056. The bundle records its candidate SHA, and a run writes `end` at its horizon.
+- Docs: `deploy/soak/README.md` ("Judging the bundle"), ADR 0021 point 14, the bundle runbook.
+
+**Not done, by ruling.** v5.30.0 is not re-judged. RM09's monitoring layer stays outside the repo (#2079).
+
 ## 2026-09-28 — New installs default the projects directory to ~/Projects (#880)
 
 <!-- prawduct: type=feature | scope=default-projects-dir-880 -->
@@ -53,246 +99,60 @@ The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-project
 
 **Evidence.** The full suite is green on the final tree, after the merges of main (the last clean run is recorded tree-valid in the evidence store). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
 
-## 2026-09-27 — `tc branch check`: prove a local branch is safe to retire (#1878)
+## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
 
-<!-- prawduct: type=feature | scope=branch-retire-safety-1878 -->
+<!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->
 
-The PM dispatched this over Medusa. The Architect ruled on scope first (1+2+3 with nine binding refinements) because TangleClaw had no checkout-normalization code to fix. In the incident, a Builder ran `git branch -D` by hand on a PM "resync" instruction and lost an unpushed wrap commit to all but the reflog. Plan: `.tangleclaw/plans/1878-branch-retire-safety.md` (local, not tracked). `Refs #1878`: the issue stays open until the rule is approved and every acceptance case passes.
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane D), and the Architect's overnight drain directive carried it to completion. It re-lands PR #1972 on a fresh branch off main, taken after #1902 merged because both touch `public/landing.js` and `test/inline-handler-args.test.js`. The old diff applied cleanly on top of #1902, and its three toggles already pass their keys through `jsArg`. It follows up #1906/#1915.
 
-**The change.**
-- **Oracle.** `lib/branch-retire-safety.js#assess` returns exactly `safe | preserve | unknown`, with stable reason codes. Every error or ambiguity is `unknown`. Remote refs count only after a fresh `fetch --prune` of the branch's upstream remote, or of the only remote; two remotes with no upstream is `REMOTE_AMBIGUOUS`. Reachability runs `rev-list <oid> --not --exclude=<name> --branches --tags --remotes=<remote>`. A worktree that holds the branch, is detached at its tip, is mid-rebase of it or is missing from disk blocks `safe`, as does dirt in such a tree. An empty worktree list is `unknown`. The OID is re-resolved at the end. The oracle never deletes, resets or removes anything.
-- **Verb.** `tc branch check <name> [--json] [--repo]` runs in the pane's own checkout and exits 0 only for `safe`, 3 for `preserve` and 4 for `unknown`.
-- **Global rule** (`data/global-rules.md` plus its CLAUDE.md mirror). Check immediately before branch deletion, `reset --hard`, worktree removal or checkout normalization, and delete only on `safe`. A held worktree is retired by an explicit sequence: a clean check including `--ignored`, plain `git worktree remove` (never `--force`), then a re-check. Before a reset, pin the tip under a named branch. Retire one branch at a time. The rule states plainly that no shell interlock exists yet. Global rules have no `proposed` status, so the Architect ruled that the PR merge is the approval gate, with no auto-merge.
+**Problem.** `togglePortGroup`, `toggleGroupItem` and `toggleOpenclawItem` flipped state and re-rendered the whole panel. `innerHTML` replaced the pressed button, so keyboard focus fell to `<body>`. The same happened every 30 s when the polling loaders (`loadPorts`, `loadGroups`, `loadOpenclawConnections`) re-rendered.
 
-**Review.** The cumulative Critic had 0 blocking. Two verify-resolutions passes closed its findings: the first rule text made `reset --hard` and worktree removal permanently un-`safe` (a silent total ban, whose `--force` workaround loses the untracked plan); the check's advice contradicted the rule; an empty worktree list read as clean; and plain `worktree remove` deletes gitignored files. The one accepted item is that `tc` needs `TANGLECLAW_API` even for this local check.
+**The change** (`public/ui.js`, `public/landing.js`):
+- `foldToggleInPlace(button, open)` flips `aria-expanded`, the arrow and the row's content (`.toggle-row` then its next sibling) with no re-render. Each toggle takes the pressed button (`onclick="…(key, this)"`) and falls back to the old re-render when there's no button or row. Opening a group in place still calls `loadGroupDetail`.
+- `renderKeepingFoldFocus(container, render)` wraps the three polling renders: if focus was on a toggle inside the panel, it is returned to the new toggle with the same `data-fold-key` (added to each toggle). Focus elsewhere is never moved. The restore passes `preventScroll`, which #1972 did not: without it, an operator who focused a toggle and scrolled away would be pulled back on every poll. The Critic raised this as an observation and it was fixed before the first commit.
+- The render functions themselves are unchanged apart from the new attribute and handler argument.
 
-**Evidence.** The real-git tests reproduce every acceptance case the issue lists, plus the rule's own worktree sequence. Full suite on a5da892d: 0 failed, 1 ledgered skip. The prime golden fixtures changed only by the roster-derived `branch` verb name.
-## 2026-09-27 — Codex wakes observe the bound thread; a stalled wake is logged and reported (#1978)
+**Tests.** `test/panel-toggle-rows.test.js` runs the shipped functions against small fakes:
+- each toggle folds in place and never re-renders;
+- each still falls back to a re-render without a button;
+- a group opened in place loads its details, and closing loads nothing;
+- the rendered toggles carry `data-fold-key` and pass `this`;
+- focus is restored after a re-render without scrolling the page, left alone when it wasn't on a toggle, and not stolen when the toggle is gone;
+- all three loaders call the wrapper;
+- each panel's real rendered HTML puts the content element immediately after the toggle row, which is the adjacency in-place folding relies on.
 
-<!-- prawduct: type=bugfix | scope=codex-bound-thread-wake-1978 -->
+Against main's `ui.js` and `landing.js`, 15 of the file's 28 tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
 
-The PM dispatched it over Medusa as an Architect-prioritized v5.30 durable fix. Plan: `.tangleclaw/plans/1978-codex-bound-thread-wake.md` (local, not tracked).
+## 2026-10-04 — Release notes are measured before anything is tagged (#2080)
 
-**Problem.** `startup-control-codex.observeActivity()` required the launch's recorded thread to be the only thread loaded for the project directory. When a subagent or any other thread stayed loaded, every Medusa wake to that Codex session was skipped as `engine-thread-unknown`, silently (verified on the Architect's session 1183).
+<!-- prawduct: type=bugfix | scope=2080-release-notes-gate -->
 
-**The change.**
-- **Chunk 01.** The recorded thread is observed directly. Other loaded project threads can only hold the wake. An active one reads busy (`subagent-active` or `other-thread-active`, from the protocol's `parentThreadId` and `source` metadata), and one in a status outside `idle`, `systemError` and `notLoaded` reads unknown. The process, socket, version, launch and channel checks are unchanged, and so are the pane's composer and busy-turn gates. A binding made in the same observation still requires the sole thread.
-- **Chunk 02.** A session whose wake verdict has been `engine-thread-unknown` for 10 minutes with mail waiting logs one warning per episode and is reported read-only as `/api/server-info` `medusaWakeStalls`. The alert is derived from the verdict's `since`, clears itself, and never injects or sends. The unread count was descoped (a recorded plan DECISION). A dashboard banner was built and then removed on the Architect's ruling (active A24 UI freeze), so there is no UI change.
+PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out of #1951, which carried this gate together with the mkcert trust-anchor fix for governed hooks (#1947). The two halves share no code, and the trust-anchor change needs its own security review, so the gate lands alone and #1951 keeps the hooks work.
 
-**Evidence.** The targeted files pass. An integration case, a bound idle root plus an extra loaded thread, observes idle, and the new pins were mutation-checked. The cumulative Critic found 0 blocking; its 3 warnings were resolved or accepted, and verify-resolutions came back clean. On the full suite, `test/tmux.test.js` and `test/activity-observer.test.js` failed under load and pass 3/3 in isolation (untouched files), so that evidence was recorded as degraded. Uncontended full runs then passed at 1f5f21c6 and again at 0c547132 (after the banner removal), and CI passed at both.
+**Why.** v5.30.0's publish step failed with GitHub's `body is too long (maximum is 125000 characters)`: the promoted section was about 191,000 characters. `release.yml` pushes the tag before `gh release create`, so the tag existed with no Release until it was recovered by hand.
 
-## 2026-09-27 — The Codex approval/user-input wait test waits for acceptance, not a timer (#1846)
+**What.**
+- `scripts/release-notes-gate.js` and a `notes-gate` step between extraction and tagging, taken from #1951 unchanged apart from the issue it cites. It refuses empty notes and notes over 120,000 UTF-8 bytes, and never truncates (the Architect's earlier ruling on #1947). The tag step requires `steps.notes-gate.outcome == 'success'`.
+- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in a scratch copy and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
+- `docs/release-process.md`, `FEATURES.md`, `CHANGELOG.md`.
 
-<!-- prawduct: type=bugfix | scope=codex-wait-test-1846 -->
+**After review of PR #2085 (the Architect and Pilot-B1, independently).**
+- The size test counted the extractor's return value, one byte short of the file the workflow publishes, because the extractor command appends a newline. It now runs that command and counts the file it writes; 110,000 passes and 110,001 fails. The same file is also run through the gate CLI at the 120,000 boundary.
+- The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
 
-The PM dispatched this over Medusa. The Architect scoped it strictly to test determinism; the product question (should acceptance read a wait already in progress?) stays with #1825. Plan: `.tangleclaw/plans/1846-codex-wait-test-determinism.md` (local, not tracked).
+**Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
 
-**Problem.** In `test/startup-control-codex.test.js` the fake app-server sent `waitingOnApproval` on a 40 ms timer after `turn/start`. `_onNotification` drops status changes until the fire is accepted, and in this test acceptance comes only from the turn read-back. A slow runner (PR #1844, run 36052337183) accepted later than 40 ms, and `the approval wait was recorded` failed.
+## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
 
-**The change.** Test-only. The test calls `codex.fire` directly, awaits `handles.accepted`, and then sends the approval, resolve, user-input and completion sequence, waiting for each step's patch (`untilPatch`) instead of a wall-clock offset. Every assertion is unchanged. No product code changed.
+<!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
 
-**Evidence.** With the old test's timer shortened to 1 ms it failed 9 runs in 10, on the same assertion as CI. The new test passed 50 of 50 under 8 CPU-bound loads. `test/startup-control-codex.test.js`: 48 of 48.
-## 2026-09-27 — Deterministic sidecar and system-health timing tests (#1950)
+The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane C). It re-lands the fix from PR #1969 on a fresh branch off current main, because that branch had fallen dozens of merges behind; the test file had since changed under #1955 and #1978, so the fix was re-applied by hand rather than cherry-picked.
 
-<!-- prawduct: type=bugfix | scope=timing-flakes-1950 -->
+**Problem.** `test/startup-control-codex.test.js`, *accepted on the echoed clientId + bytes notification…*: the fake app-server sent `turn/started` and `item/completed` on a 20 ms timer, and the completion on an 80 ms one. On a slow runner both fired before the adapter's post-subscribe read-back, the fire settled, and the read-back was skipped, so `one read-back` saw 0.
 
-The PM dispatched it over Medusa. Both flakes were found in the #1836 suite run, where they were also red on clean base c5c05a70.
+**The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
 
-**Problem.** `test/sidecar.test.js` "re-arms the loop after every tick" counted failing ticks in a 220 ms wall-clock window, which the loop's own backoff (20, 40, 80 ms) and host load both shrink. `test/system-health.test.js` "never awaits the measurement" asserted `getHealth()` < 1000 ms while leaving the real git, filesystem and network probes live. Under 8-way concurrent load, clean base failed 8 of 8 runs.
-
-**The change.**
-- **Sidecar.** `lib/sidecar.js` gains a scheduler seam (`_seams.setTimeout` / `clearTimeout`, real timers by default) that the loop and both stop paths go through. The test keeps the real failing poll, observes each re-arm as an event, fires the next tick itself, and also asserts the backoff grows.
-- **System-health.** The test stubs the unrelated probes and asserts that `getHealth()` resolves while the never-settling probe was started, which is the proof of "not awaited". The wall-clock bound is gone.
-- **Both** keep a 30-second guard that exists only to turn a hang into a failure.
-
-**Evidence.**
-- 8-way concurrent stress: 0 of 8 runs fail, against 8 of 8 on clean base.
-- Mutation checks: removing `.finally(scheduleNext)`, and making `getHealth` await the in-flight measurement, each fail the test with its named message.
-
-## 2026-09-27 — Rule approval compare-and-set: approval ratifies only the text the operator saw (#1053)
-
-<!-- prawduct: type=bugfix | scope=rule-approval-cas-1053 -->
-
-Chunks 01 and 02. The PM dispatched it over Medusa (874d9163) and authorized Chunk 02 (dfa9976c). The Architect ruled A, B and C (3802bf4d): A and B are approved; C rejects folding the adjacent active-rule edit hole into this work, so it is recorded for the #1696/#1709 ruling instead. Plan: `.tangleclaw/plans/1053-rule-approval-cas.md` (local, not tracked).
-
-**Problem.** `PUT /api/session-rules/:id/status` activated whatever content the row held at the moment of approval. Both operator surfaces approve a snapshot (the wrap drawer's text from the wrap step, the Project Rules list's from its last fetch), and the content can change in between through the ungated `PUT /:id`, through `POST /:id/restore`, or across the drawer's own save-then-approve pair of writes.
-
-**The change.**
-- **Store.** `setStatus` takes `expectedContent`. For an approval the comparison is the UPDATE's own `WHERE id = ? AND content = ?`, and the rows it changed decide the result (ruling A: a true compare-and-set, not a read then a write). A mismatch throws `CONTENT_CHANGED` carrying `currentContent` and writes nothing, not even a version snapshot. The compare is exact because content is trimmed where it is written. A rejection is never compared.
-- **Route.** The token is passed through only after the password gate (ruling B), so a 403 never reveals whether, or how, the text changed. `CONTENT_CHANGED` maps to `409 RULE_CONTENT_CHANGED` with `currentContent`.
-- **Wrap drawer** (`resolveRuleProposal`). The approval sends the text shown, or after an edit the text the store persisted. A 409 swaps the current text into the row and leaves it undecided.
-- **Chunk 02: Project Rules list.** `renderProjectRulesList` records each proposed row's stored text in `projectRuleShownContent`, beside the render rather than read back out of escaped HTML. `resolveProjectRuleProposal` sends it, and on a 409 redraws the list with a status line saying nothing was approved.
-- **Chunk 02: mandatory (ruling B).** `setStatus` refuses an approval with no `expectedContent` (`EXPECTED_CONTENT_REQUIRED`, HTTP 400). It checks this after the authority refusals: the route's password gate and the store's own AI-approval `FORBIDDEN`. The existing approval tests now send the token; that is the contract change, not a weakened test.
-
-**Release level (Critic R-1, cumulative review rev-20260927T143212Z-c73a01ff).** R-1 warned that the mandatory token is a compatibility break for id-only callers, shipped without a major-bump marker. It was reviewed and resolved by Architect ruling (PM message d178d817): Option 2, keep it in the v5 minor line. The route is a privileged, password-gated operator surface and not a listed integration endpoint, so id-only scripts are unsupported callers that must name the text they authorize. There is no marker and no legacy fallback; the CHANGELOG entry keeps an explicit compatibility note instead.
-
-**Tests.** Store (7 cases plus a source pin on the conditional UPDATE, since a single-threaded test cannot tell a read-then-write from a compare-and-set). Route (6 cases: the PUT-swap race, 403 before 409 and before 400, a 409 with its body, a 400, and a rejection). Widget (5 behavioural cases that run the real function against a fake API). Mutation-checked: an unconditional UPDATE, a read-then-write, the route dropping the token, the widget omitting it, and the widget ignoring the 409 body each turn tests red.
-
-**Chunk 02 tests.** Store: a missing token is refused and changes nothing; an AI approval is still `FORBIDDEN` before the token is asked for. Route: a missing token gives 400 `EXPECTED_CONTENT_REQUIRED`, but 403 when the password is also missing. Modal (4 behavioural cases running the real `renderProjectRulesList` and `resolveProjectRuleProposal`): it sends the stored rather than the escaped text, a re-render replaces the remembered text, a 409 redraws the list, and a rejection sends no token. Mutation-checked five more mutants: token not required, token checked before the AI refusal, the modal omitting the token, not redrawing on a 409, and not remembering on render. Each turns tests red.
-
-## 2026-09-27 — dir-scanner deadline tests survive a loaded machine (#1884)
-
-<!-- prawduct: type=bugfix | scope=dir-scanner-flake-1884 -->
-
-The PM dispatched this over Medusa (61a61af3). Small, test-only change; no build plan.
-
-**Root cause.** `request()` arms its deadline as soon as `_ensureChild()` has spawned the replacement child, before that node process has booted. Two tests in the "the deadline kills" suite set a scanner-wide 300 ms deadline so that a hung request dies quickly, and their healthy `ping` requests inherited it. A `ping` on a cold child therefore had to fit a node boot inside 300 ms, and under fleet load it did not. The #1884 test was the one seen failing; the sibling `a request that never answers…` had the same exposure in its setup `ping`. Production's 5 s default absorbs a cold start, so the product is unaffected.
-
-**The change.** `COLD_START_MS` (10 s) is passed as the per-request deadline on both healthy pings. The hung requests keep the short deadline, which is the behaviour those tests check.
-
-**Evidence.**
-- A `--require` preload that busy-waits 500 ms on every node boot makes the old file fail 2/2 with the issue's exact error (`timed out after 300ms running ping`). The new file passes 2/2 under the same preload.
-- Mutating `_failFor` to sweep every pending request regardless of owner still fails the successor test, at normal and at slowed boot. The longer deadline did not blunt the guard.
-- The full declared suite is green.
-
-## 2026-09-26 — Stop tracking this repo's internal plans and evidence
-
-<!-- prawduct: type=chore | scope=untrack-internal-plans -->
-
-Operator decision: forward-only privacy cleanup with NO history rewrite. PM dispatch (ed7331a8) and Architect approval (e7ed90bb, merge gate a122a426). The merge waits for the PM's explicit go.
-
-**The change.** 170 files leave the index; their disk copies stay: 12 top-level plans, 126 in `plans/archive/`, 31 in `plans/1245-evidence/`, and the force-added `.tangleclaw/archive/1839-medusa-delivery-watchdog.md`. `.gitignore` drops `!.tangleclaw/plans/`, and its comments say why and that this is this repo's policy only. The 4 `.tangleclaw/priming/` files stay tracked pending their own audit. Nothing reads plans through git, and the wrap lists candidates with `git status --porcelain`, which omits ignored files, so no product behaviour changes.
-
-**Preservation.** A checksum-verified copy (170/170) is in private Shared storage. Before merging, the PM backed up every local checkout, because pulling a commit that stops tracking files deletes them from disk.
-
-**Tests.** `test/repo-governance-reference.test.js` asserts: nothing is tracked under either directory; new, nested, non-markdown and archive paths are ignored; and the committed `.gitignore` carries no re-include. Before the commit, the last assertion failed against the old `.gitignore`, which proves it detects the negation.
-## 2026-09-26 — Roadmap Board: tc-queue block, train version/status, per-car state (#1933)
-
-<!-- prawduct: type=feature | scope=1933-board-queue -->
-
-This is the one renderer PR the operator budgeted for the dynamic board, following the Architect's ruling on A–D. Three pieces stay outside this PR: the generator grouping by v5, v6 and v7 plus the queue data (Shared `build-board.py`); the PM-owned 10-minute scheduled job; and the privacy cleanup, which is on HOLD.
-
-**The change.** `lib/plan-train-card.js` gains the following.
-- Optional train `version`, a short label matching `VERSION_RE`.
-- Train `status`, a closed enum: `planned | ready | in-progress | blocked | shipped | sunset`.
-- Optional car `state`, a closed enum: `open | in-progress | blocked | closed`. It must agree with `closed`, and when omitted the car keeps its old behaviour. Each pill is labelled in words.
-- A `tc-queue` block with the same closed-schema and escaping discipline. `createdAt` must be ISO-8601 with a zone. Ages, the `isNew` mark (inclusive at `newDays`) and newest-first order are all computed at render time, so age never removes an item.
-
-The shared JSON, item and issue checks were factored into `_parseObject`, `_needItem` and `_needIssue`. `lib/plan-docs.js` routes `tc-queue` blocks and threads an optional `now` through `renderPlanBody` and `renderPlanPage`; the server passes none, so the current time applies.
-
-**Tests.** The new cases cover badges, every status, refused versions and statuses, car-state colours and words, state/closed disagreement, the old default, the queue summary pills and counts, newest-first order, ages in hours and days, the inclusive threshold, future-timestamp skew, a custom and an empty title, escaping, render-time ageing, and malformed queues. They caught a real bug before commit: the `<1h` age was emitted unescaped. Eight hand mutations each turned tests red: the status enum, state agreement, sort, threshold, age escape, label escape, the ISO check and the version pattern.
-
-## 2026-09-26 — Roadmap train cards on served plan pages, and unbroken table cells (#1930)
-
-<!-- prawduct: type=feature | scope=1930-train-cards -->
-
-Operator request (2026-09-26, with a reference screenshot). It follows the Architect's ruling that no raw-HTML passthrough is allowed and that the pill look comes from a typed, schema-validated block that escapes every value.
-
-**The change.** `lib/plan-train-card.js` is new. A ` ```tc-train ` fence holds one JSON object. `parseTrainBlock` validates it against a closed schema: unknown keys are refused (`__proto__` included), fields are type- and range-checked, sizes are bounded, and hrefs must be absolute https URLs that pass `_isSafeHref`. `renderTrainCard` builds a `<details>` card from fixed classes and escapes every string. The closed/total count is computed from `cars`. Thesis and sequencing go through the plan renderer's `renderInline`, which escapes first. An invalid block renders as escaped code, with the reason in a `block-error` paragraph. `lib/plan-docs.js` routes `tc-train` fences to it and appends its CSS. Table cells now use `overflow-wrap:normal`: the page-level `anywhere` had let a table column shrink to one character, splitting `#411`.
-
-**Tests.** `test/plan-train-card.test.js` asserts on output through `renderPlanBody`: card structure, count, badge, empty train, tilde fence, other fences unchanged, escaping of every field, a quote inside an accepted href, refused reasons not echoing markup, 13 hostile hrefs on both train and car, the closed schema, the bounds, and the page CSS. Four hand mutations each turned tests red: dropping the https check, unescaping the title, accepting unknown keys, and trusting the count.
-
-**Follow-up in the same branch.** Each car pill carries a `title` and an `aria-label` naming its number and open/closed state, so the state is not shown by colour alone. The State cell does not wrap, so `✅ closed` stays on one line.
-
-**Operator direction, same branch: green means done.** A closed issue's title in the expanded table is no longer struck through; the ✅ state and the green car carry it.
-
-**Visual check.** I rendered the real board, generated by the updated `build-board.py` from live GitHub state, through `renderPlanPage` and took headless-Chrome screenshots in dark mode at 760px (about phone width). All 7 trains became cards and no block was refused (94 closed cars, 40 open). The card row matches the operator's reference screenshot. In the expanded table, `#411` and `enhancement` no longer wrap. Light mode was not screenshotted; the card colours use the page's theme tokens, and only the closed-car green is fixed.
-
-**Out of scope here.** Emitting the blocks is a separate change in the shared `build-board.py`, in the Shared repo, which has no remote.
-
-## 2026-09-26 — Plan page "updated" stamp in the host's local time zone (#1928)
-
-<!-- prawduct: type=bugfix | scope=1928-plan-stamp -->
-
-PM dispatch over Medusa (f7dd1a06), under an Architect ruling (e0b2cb45 / 34c4efe1): host-resolved IANA zone as the default, the zone injectable for deterministic tests, and no new config key.
-
-**The change.** `lib/plan-docs.js` gains `formatPlanStamp(iso, timeZone?)`, which uses `Intl.DateTimeFormat` with `timeZoneName: 'short'` and gives `YYYY-MM-DD HH:MM:SS PDT/PST`. `renderPlanPage` takes an optional `timeZone`, and the server passes none, so the host zone applies. `<time datetime>` keeps the ISO UTC value, a `title` tooltip gives the UTC reading, and an unparseable value falls back to its UTC reading rather than failing the page.
-
-**Tests.** Unit: PDT and PST dates, the datetime and title attributes, host default equals the resolved zone, a zone ahead of UTC crossing the date line, and the unparseable fallback. The existing bar fixture now pins `timeZone: 'UTC'`, so its visible-string assertion is unchanged. API: with `TZ=America/Los_Angeles` set in-process, `GET /plans/:id/stamp.md` shows `PST` for a January mtime. This proves the server's call site takes the host zone. It also passes when the runner itself is on UTC.
-
-**Out of scope.** The Roadmap Board's raw-HTML rendering belongs to the shared generator; the PM is coordinating it.
-
-## 2026-09-26 — Fleet Workload Visibility, Phase A: launch-bound workload receipts, activity observer, composed fleet read (#1912)
-
-<!-- prawduct: type=feature | scope=1912-fleet-workload -->
-
-Chunks A1–A4 of `.tangleclaw/plans/1912-fleet-workload-core.md`, implementing ADR 0020, which the Architect accepted as FWV-A18 (PR #1916). The PM dispatched this over Medusa (806b9000).
-
-**The change.**
-- **A1:** `workload_receipts` (schema v50, append-only, `UNIQUE (launch_id, seq)`), the `lib/workload.js` write path, `POST/GET /api/tc/workload`, and `tc workload set/show`. `resolveAccess` now returns the verified `sessionId` and `launchId`.
-- **A2:** `lib/activity-observer.js`. A 10 s tick of asynchronous serial captures, each bounded by min(1 s, the tick budget left), with a 3 s tick budget and round-robin. The strict at-rest gate reuses `assessSessionIdle`. Observations older than 30 s read `unknown`. Measured capture latency on this host: p95 29 ms.
-- **A3:**
-  - `lib/workload-compose.js` (pure): receipt currency, base rules 1–11, and monotone operator narrowing.
-  - `lib/workload-fleet.js`: gathers the inputs.
-  - `GET /api/tc/sessions` carries engine, workload and composed blocks, and runs no tmux.
-  - `POST /api/tc/workload/narrowing` is operator-only, recorded in `workload_narrowings`.
-  - A guard test fails if shipped code parses clearance phrases.
-- **A4:** `workloadLine` in every engine's config, the `workload` capability, and the docs. The dashboard badge and detail row built in A4 were removed before merge under Architect ruling A24 (the operator UI freeze); the PM held them (Medusa message c9e2213a). They are preserved on `origin/held/ui-freeze-1912-dashboard-a3` (51c8b2dd) and tracked as #1923.
-- **A29/A30 display safety:** every free-text field (summary, waitDetail, task ids, branch, the narrowing reason) is display-safe through one predicate, `isSafeText`. It refuses Unicode `Cc`, `Cf`, `Zl`, `Zp` and `Default_Ignorable_Code_Point`, and requires a visible character. ADR 0020 §3 is amended in this PR as the authority. Stricter at write time: invisible-only text, and emoji that need a variation selector or zero-width joiner, now get a 400. Normalization and homoglyph detection are out of scope.
-- **Boundary-review fixes:** a wrap request supersedes a receipt even after the wrap drawer acknowledges it (`wrap-sentinel` keeps `requestedAt`). The guidance and capability text are built from the server's constants. One session's failed assessment no longer stalls the observer.
-
-**Reviews.** A Critic review per chunk; carried findings rode each next commit. A3 had one blocking finding (the lane line untested), cleared by `verify-resolutions` rev-20260926T202440Z-ecd5128a.
-
-**Deliberately not done.**
-- Typed assignment-dispatch supersession (ADR §4, a named dependency not authorized by FWV-A18).
-- Project Master workload (composes UNKNOWN).
-- Table retention: #1918.
-
-## 2026-09-26 — Detect, never auto-repair, legacy TangleClaw sections in governed CLAUDE.md (#1911)
-
-<!-- prawduct: type=bugfix | scope=engines-1911 -->
-
-The PM dispatched this over Medusa (d5b2a91a). The plan came first and stopped at Plan-Written. The Architect ruled A7–A10 (8869adf0). Plan: `.tangleclaw/plans/1911-governed-claude-md-legacy-copy.md`.
-
-**Problem.** When a CLAUDE.md written whole-file was later governed by the plugin, the first governed write appended the managed block. `spliceManagedBlock` treats all existing text as operator content, so TC's legacy guide stayed above the anchor, and the PortHub, Shared Documents and Session Memory sections and the bootstrap bullets all appeared twice. B1 reproduced it on main c600a7c6: 212 → 419 lines.
-
-**The change.**
-- **Analysis.** `lib/legacy-claude-md.js` does pure analysis. A candidate is a proven duplicate: a `##` heading or preamble bullet that the file's own managed block also carries. The scan skips fenced code, because the guides' samples contain `# ` comment lines. It refuses duplicate candidate headings, an unterminated fence, more than one anchor, an anchor inside or after the block, and malformed markers. The rules tiers are never candidates (A9).
-- **Guarded writer.** `applyLegacyRepair` takes a digest that covers both the file hash and the plan. It refuses on a mismatch or a read-only carrier (#1291). It writes a temp file, fsyncs it, re-hashes the target (compare-and-swap), then renames. It keeps the file mode, and a second run is a no-op. The header becomes neutral only when it is byte-identical (A8).
-- **Detection only (A10).** `engines.writeEngineConfig` warns after a governed write, and `sessions._ruleSourcesSection` adds a launch note. Nothing heals on launch, boot or PATCH.
-- **Operator action.** `scripts/repair-governed-claude-md.js` previews the removals, then `--apply <digest>` performs them.
-- **Docs.** The engine guide, FEATURES and CHANGELOG `### Fixed`.
-
-**Tests.** `test/legacy-claude-md.test.js` builds its fixtures with the real generators. It covers:
-- detection without mutation;
-- the digest binding, including a changed-after-preview refusal and a read-only refusal;
-- preservation of operator edits, including a section flagged as differing from the managed copy;
-- each ambiguous-bound refusal;
-- the neutral header versus an altered one;
-- idempotence and the preserved file mode;
-- the CLI's preview and apply, and its refusal of an ungoverned project.
-
-`test/sessions.test.js` covers the launch note, including that the prime never mutates the file. A mutation test that disabled the digest check turned the binding tests red.
-
-**Architect A22 correction.** The merge was rejected at a5993f55 on three repair-path safety blockers, and all three are fixed on the same branch:
-- `repairCommand` shellWord-quotes every argv word. A test sends hostile legal paths through `/bin/sh` and checks each arrives unchanged.
-- `_writeAll` writes every byte or refuses, and the fstat size is checked before the rename. Tests inject short, zero and ENOSPC writes.
-- A symlinked carrier is refused with `lstat`, before reading and again before the rename, and the preview refuses it too.
-
-A mutation check on each fix turned its tests red.
-
-**Cumulative review follow-up.** The preview always marked the legacy PortHub section as differing, because the whole-file layout put the API base URL and service-token lines after the PortHub guide with no heading between them, while the block keeps them in its first section. `_matchesManagedCopy` now accepts trailing lines that appear verbatim elsewhere in the block. Tests cover all four combinations of service token and Medusa on and off, plus an operator-edited PortHub body that must still be flagged.
-
-## 2026-09-26 — Caddy mode moves the tailnet host in two phases, with a strict check and an honest rollback (#1905, Chunk 2)
-
-<!-- prawduct: type=bugfix | scope=1905-magicdns-host-inventory -->
-
-Chunk 2 of `.tangleclaw/plans/1905-magicdns-host-inventory.md`, dispatched by the PM (d4027d15) after PR #1919 merged, the Rule 69 sync ran and health was verified. It is governed by Architect rulings A18 and A21 (addenda 1 and 2), plus the PM's A19 normalization request.
-
-**The change.**
-- **Prepare.** `reconcileTailnet: "prepare"` on generate-cert (caddy mode only) mints a transition cert with the old and new names and flips nothing. Caddy-mode `true` names prepare and apply in `next`.
-- **Apply.** `ingress-cutover.js --tailnet-host` refuses before any write, using `lib/tailnet-cutover.validateTailnetApply` (invalid, not observed, no change, ungated, cert missing). The Caddyfile site and `caddyTailnetHost` ride one `configPatch`.
-- **Verification.** After the reload, `strictHealth` accepts only HTTP 200 with `status: "ok"`, for the local site and for the candidate on 127.0.0.1 with SNI and Host set. The served cert must carry the name.
-- **Rollback.** On failure, `rollbackTailnetApply` restores the Caddyfile, the config and the reload. It reports `rolledBack: true` only when all three are proven; anything less is `tailnet-rollback-failed` with `residual` and `recovery`.
-- **Normalization.** `removeHosts` and the canonical check compare normalized names.
-
-**Tests.**
-- `test/tailnet-cutover.test.js` covers the refusals, strict health, retries, each injected rollback failure, the cutover's args, result fields and ordering, and parity through prepare, apply and rollback.
-- `test/api-setup-https.test.js` covers prepare in each mode, the caddy-mode `next`, and normalized conflicts and removals.
-
-**Fixed along the way.** Chunk 1's "removeHosts removes a carried name" test never reached its subject. The mkcert stub writes the same fixture cert every time, so a name added by an earlier request is never actually carried, and the test passed with removal disabled. It is rewritten as a one-request test and now turns red under that mutation.
-
-**Mutations.** Each of these turns its tests red: dropping normalization, dropping the incoming name from prepare, and dropping the removal filter.
-
-**Critic.** Cumulative review `rev-20260926T205207Z-2b1d8491` found 1 blocking issue, 3 warnings and 4 notes.
-- Blocking, fixed: the boot drift warning and FEATURES said the caddy-mode flow did not exist. Both now name prepare and apply.
-- Fixed: `--tailnet-host` is refused unless the install is already in caddy mode (`tailnet-not-caddy-mode`). Before this, a direct install could cut over and then report a clean rollback while the ingress stayed switched.
-- Fixed: `runTailnetVerification` takes injectable `verify`, `execFile` and `configStore`. It is now driven against a temp Caddyfile for success, a rolled-back move, a failed reload and an unhealthy reload, which replaces a parity test that could not fail. Skipping the config restore turns two of those tests red.
-- Fixed: `strictHealth` settles on an aborted response.
-- Fixed: the verification promise has a `.catch` that still writes a result file.
-- Fixed: the wording now says validation runs before the Caddyfile, the config or launchd is touched, since the cert is already staged by then.
-- Fixed: the tailnet backup is dropped after a success or a proven rollback, and kept only for recovery.
-- Warning (stale test evidence): resolved by recording the suite on the final tree.
+**Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
 
 ## 2026-08-20 — #990: forensic review of the ungoverned Antigravity window fixes 8 confirmed bugs
 
