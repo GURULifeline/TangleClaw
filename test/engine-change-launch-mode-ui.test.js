@@ -24,7 +24,10 @@ const store = require('../lib/store');
 const projects = require('../lib/projects');
 
 const PUBLIC = path.join(__dirname, '..', 'public');
-const ENGINE_IDS = ['claude', 'codex', 'antigravity', 'aider'];
+// Every bundled profile, read from the directory, so an engine added later is
+// compared without anyone remembering to list it here.
+const ENGINE_IDS = fs.readdirSync(path.join(__dirname, '..', 'data', 'engines'))
+  .filter((f) => f.endsWith('.json')).map((f) => f.replace(/\.json$/, '')).sort();
 
 /**
  * A bundled engine profile, as shipped.

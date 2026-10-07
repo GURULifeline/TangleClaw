@@ -57,6 +57,8 @@ All notable changes to TangleClaw are documented in this file.
   - This reverses what #731 recorded, which kept a confirmed Bypass across a switch to any engine with the same key. A launch mode is now treated as a choice about one engine.
   - The save's answer says when a mode was reset, naming both engines. The dashboard's settings modal shows Interactive when its engine dropdown moves to another engine, with a line saying why, and always sends the mode with an engine change, so one chosen for the new engine is kept even when its key matches the old one.
   - A save that names the engine the project already has is not an engine change and keeps the stored mode.
+  - A launch that overrides the engine for one session (`engineOverride` on the launch API) no longer picks up the project's stored default mode either; name a mode with that launch if you want one.
+  - Not covered: the Project Master's own launch mode still follows the old rule when the Master's engine changes (#2197).
   - If you rely on Bypass or another non-default mode after switching engines, choose it again for the new engine.
 
 ### Fixed

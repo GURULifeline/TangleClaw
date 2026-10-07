@@ -246,10 +246,22 @@ describe('launch-mode settings', () => {
       assert.match(told[0], /does not carry to Antigravity/);
     });
 
-    it('resets a warning-free mode too: the rule is per engine, not per warning (#2189)', async () => {
-      // Antigravity's `sandbox` carries no warning and Claude has no such key,
-      // so this one was already reset. `default` -> `default` is the case that
-      // must stay silent: nothing changed, so nothing is reported.
+    it('resets a warning-free mode that both engines define: the rule is per engine, not per warning (#2189)', async () => {
+      // The case that tells "reset every mode" from "reset only a warned one".
+      // Claude and OpenClaw both define `plan`, and neither warns on it, so the
+      // old keep-if-honored rule kept it and a warning-only rule would too.
+      mkProject('lm-reset-warning-free');
+      await projects.updateProject('lm-reset-warning-free', { defaultLaunchMode: 'plan' });
+      const openclaw = store.engines.get('openclaw');
+      assert.ok(openclaw.launchModes.plan && !openclaw.launchModes.plan.warning,
+        'OpenClaw must define a warning-free plan mode, or this test separates nothing');
+      const switched = await projects.updateProject('lm-reset-warning-free', { engine: 'openclaw' });
+      assert.deepEqual(switched.errors, []);
+      assert.equal(store.projectConfig.load(switched.project.path).defaultLaunchMode, 'default');
+      assert.equal((switched.warnings || []).filter((w) => /launch mode/i.test(w)).length, 1);
+    });
+
+    it('says nothing about a reset when the project was already on the default mode (#2189)', async () => {
       mkProject('lm-reset-quiet');
       const switched = await projects.updateProject('lm-reset-quiet', { engine: 'codex' });
       assert.deepEqual((switched.warnings || []).filter((w) => /launch mode/i.test(w)), [],
@@ -302,7 +314,7 @@ describe('launch-mode settings', () => {
       assert.equal(store.projectConfig.load(after.path).defaultLaunchMode, 'bypassPermissions');
     });
 
-    it('preserves a stored mode the new engine still honors', async () => {
+    it('leaves a project on the default mode there across a switch', async () => {
       mkProject('lm-switch-keep');
       // 'default' is valid for every engine — a switch must not disturb it.
       const switched = await projects.updateProject('lm-switch-keep', { engine: 'codex' });
@@ -320,8 +332,6 @@ describe('launch-mode settings', () => {
       // Switching to aider reconciles bypassPermissions -> default, so the
       // hidden picker no longer sits over a warning mode: the guard must not
       // block this switch-to-safe, and no re-confirm should be demanded.
-      // (Was codex until #731 gave codex a real bypass mode — see the sibling
-      // test below, where the guard now correctly refuses that target.)
       const result = await projects.updateProject('lm-switch-hide', {
         engine: 'aider',
         showLaunchModePicker: false
@@ -494,6 +504,23 @@ describe('launch-mode settings', () => {
       store.projectConfig.save(project.path, projConfig);
 
       assert.equal(launchAndReadMode('lm-launch-default'), 'plan');
+    });
+
+    it('does not apply the stored default to a launch that overrides the engine (#2189)', () => {
+      // `engineOverride` runs a different CLI for one session. The stored mode
+      // was chosen for the project's own engine, and Codex defines the same
+      // `bypassPermissions` key with a wider meaning, so before this the
+      // override launched Codex with its own bypass flag.
+      const project = mkProject('lm-launch-override');
+      const projConfig = store.projectConfig.load(project.path);
+      projConfig.defaultLaunchMode = 'bypassPermissions';
+      store.projectConfig.save(project.path, projConfig);
+
+      assert.equal(launchAndReadMode('lm-launch-override', { engineOverride: 'codex' }), 'default');
+      // The project's own engine still gets its stored default.
+      assert.equal(launchAndReadMode('lm-launch-override'), 'bypassPermissions');
+      // And a mode named with the override launch is the caller's choice.
+      assert.equal(launchAndReadMode('lm-launch-override', { engineOverride: 'codex', launchMode: 'fullAuto' }), 'fullAuto');
     });
 
     it('an explicit caller choice beats the configured default', () => {
