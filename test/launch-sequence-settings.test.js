@@ -76,17 +76,26 @@ describe('launch-sequence settings (Train 21, Chunk 02)', () => {
   });
 
   describe('resolveRecoveryMode', () => {
-    it('ships operator, per the operator\'s R3 ruling', () => {
+    it('seeds operator into a project file, and makes advisory the default only when told a login is in force', () => {
+      // The constant is what every save writes into `project.json`, so it must
+      // not be `advisory`: a file saying advisory chooses it wherever the login
+      // is in force, and the seed would then choose it for every project.
       assert.equal(projectConfig.DEFAULT_PROJECT_CONFIG.launchSequence.recoveryMode, 'operator');
-      assert.deepEqual(projectConfig.resolveRecoveryMode({}), { mode: 'operator', source: 'default' });
-      assert.deepEqual(projectConfig.resolveRecoveryMode(null), { mode: 'operator', source: 'default' });
+      assert.deepEqual(projectConfig.resolveRecoveryMode({}), { mode: 'operator', source: 'not-armed' });
+      assert.deepEqual(projectConfig.resolveRecoveryMode(null), { mode: 'operator', source: 'not-armed' });
+      const armed = { advisoryDefault: true };
+      assert.deepEqual(projectConfig.resolveRecoveryMode({}, null, armed), { mode: 'advisory', source: 'default' });
+      assert.deepEqual(projectConfig.resolveRecoveryMode(null, null, armed), { mode: 'advisory', source: 'default' });
     });
 
-    it('takes an explicit value and falls back to the BLOCKING side on a bad one', () => {
+    it('takes an explicit value where a login is in force, and falls back to the BLOCKING side on a bad one', () => {
       // The mirror of `resolvePasteRules`, and deliberately not the same word.
       // A typo there must not drop rule text; a typo here must not let a launch
       // with a bad handoff walk through unattended.
-      assert.equal(projectConfig.resolveRecoveryMode({ launchSequence: { recoveryMode: 'advisory' } }).mode, 'advisory');
+      const asked = { launchSequence: { recoveryMode: 'advisory' } };
+      assert.equal(projectConfig.resolveRecoveryMode(asked, null, { advisoryDefault: true }).mode, 'advisory');
+      assert.equal(projectConfig.resolveRecoveryMode(asked).mode, 'operator',
+        'the file alone does not choose advisory: its own session can write it');
       const bad = projectConfig.resolveRecoveryMode({ launchSequence: { recoveryMode: 'Advisory' } });
       assert.equal(bad.mode, 'operator', 'a value nobody recognises must not open the gate');
       assert.equal(bad.source, 'invalid');

@@ -193,6 +193,9 @@ describe('the launch reconciliation readback (#1937)', () => {
     const conf = store.projectConfig.load(dir) || {};
     conf.launchSequence = { ...(conf.launchSequence || {}), recoveryMode };
     store.projectConfig.save(dir, conf);
+    // The operator's choice of advisory is a decision on record, as their PATCH
+    // writes it. The file alone says advisory only while the login is in force.
+    if (recoveryMode === 'advisory') store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
     if (damaged) {
       fs.mkdirSync(lockfile.handoffDir(project), { recursive: true });
       fs.writeFileSync(lockfile.currentPath(project), '{"schema":"not-a-handoff"}\n', 'utf8');

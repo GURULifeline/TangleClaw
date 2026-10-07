@@ -121,6 +121,9 @@ describe('a preflight that could not be evaluated (#1650)', () => {
       const conf = store.projectConfig.load(project.path) || {};
       conf.launchSequence = { ...(conf.launchSequence || {}), recoveryMode };
       store.projectConfig.save(project.path, conf);
+      // The operator's choice of advisory is a decision on record, as their PATCH
+      // writes it. The file alone says advisory only while the login is in force.
+      if (recoveryMode === 'advisory') store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
     }
     const session = launch(name).session;
     const sequence = store.launchSequences.getBySession(session.id);

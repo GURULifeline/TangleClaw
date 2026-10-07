@@ -13,7 +13,7 @@
  * branch, and nothing defaulting to the permissive one.
  */
 
-const { describe, it, before, after, beforeEach } = require('node:test');
+const { describe, it, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -28,7 +28,10 @@ const openInstallToken = require('../lib/open-install-token');
 const lockfile = require('../lib/handoff-lockfile');
 const tmux = require('../lib/tmux');
 const enginesModule = require('../lib/engines');
-const { handleRequest } = require('../server');
+const { handleRequest, _recoveryGateProbeFor } = require('../server');
+const recoveryDefault = require('../lib/recovery-default');
+const authGate = require('../lib/auth-gate');
+const launchSequence = require('../lib/launch-sequence');
 
 const PASSWORD = 'correct-horse-battery';
 const HOST = 'localhost:3102';
@@ -180,6 +183,9 @@ describe('the recovery-clear route (Train 21, #1587)', () => {
     const conf = store.projectConfig.load(dir) || {};
     conf.launchSequence = { ...(conf.launchSequence || {}), recoveryMode };
     store.projectConfig.save(dir, conf);
+    // The operator's choice of advisory is a decision on record, as their PATCH
+    // writes it. The file alone says advisory only while the login is in force.
+    if (recoveryMode === 'advisory') store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
     fs.mkdirSync(lockfile.handoffDir(project), { recursive: true });
     fs.writeFileSync(lockfile.currentPath(project), '{"schema":"not-a-handoff"}\n', 'utf8');
     const session = launch(name).session;
@@ -462,5 +468,177 @@ describe('the recovery-clear route (Train 21, #1587)', () => {
       assert.equal(store.launchSequences.getBySession(sequence.sessionId).recovery, 'required',
         'neither reached the open-install branch');
     });
+  });
+
+  // What an operator-held launch is told must be true of the install it is told
+  // on. Each case below puts the install in one login gate state, reads the
+  // sentence through the probe `server.js` installs, and then drives the real
+  // clear and the real reconciliation readback to see whether the sentence
+  // described them. The states come from `GATE_STATES`, so a state added later
+  // fails here until it has a row.
+  describe('what a held launch is told, against what the routes do (#1937)', () => {
+    const readUrl = (project) => `/api/sessions/${encodeURIComponent(project.name)}/launch/reconciliation`;
+    const states = authGate.GATE_STATES;
+    let configBytes = null;
+
+    afterEach(() => {
+      recoveryDefault.setGateStateProbe(null);
+      if (configBytes !== null) {
+        fs.writeFileSync(store._getConfigPath(), configBytes);
+        configBytes = null;
+      }
+    });
+
+    /** How each gate state is reached from the open install every case starts on. */
+    const reach = {
+      [states.OPEN]: () => {},
+      [states.ARMED]: () => arm(),
+      [states.FALLBACK]: () => {
+        arm();
+        gateFallback.writeMarker(gateFallback.markerPath(), { createdAt: new Date().toISOString() });
+      },
+      [states.ACCOUNT_REQUIRED]: () => patchConfig({ authEnabled: true }),
+      [states.LOCKED]: () => {
+        arm();
+        store.getDb().prepare("UPDATE users SET disabled_at = datetime('now')").run();
+      },
+      [states.UNREADABLE]: () => {
+        configBytes = fs.readFileSync(store._getConfigPath());
+        fs.writeFileSync(store._getConfigPath(), '{ this is not json');
+      }
+    };
+
+    /**
+     * A held launch, the install moved to a gate state, and the sentence the
+     * launch is then told. The launch and the page token are taken while the
+     * install is open, so every case holds the credentials a caller could have.
+     * @param {string} state - The gate state to reach
+     * @returns {Promise<{project: object, sequence: object, body: object, token: string, hint: {text: string, clear: string}}>}
+     */
+    async function heldIn(state) {
+      const held = launchInRecovery('operator');
+      const token = await pageToken();
+      reach[state]();
+      // The probe a real server installs, on the listener every request in
+      // this file arrives on, so the launch-side answer and the request-side
+      // answer are read from the same door.
+      recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(listener()));
+      assert.equal(recoveryDefault.gateAnswer().gateState, state, 'the fixture must reach the state it is named for');
+      return { ...held, token, hint: launchSequence.operatorHeldHintFor(held.sequence) };
+    }
+
+    /**
+     * The two unauthenticated request shapes a local process can send.
+     * @param {string} url - The route
+     * @param {object} body - The request body
+     * @param {string} token - A page token
+     * @returns {Promise<{machine: object, imitation: object}>} A raw machine-shaped request, and one
+     *   imitating the dashboard (same origin, a page token it fetched itself)
+     */
+    async function bothShapes(url, body, token) {
+      return {
+        machine: await send('POST', url, { body, browser: false, headers: { 'x-tc-open-token': token } }),
+        imitation: await send('POST', url, { body, headers: { 'x-tc-open-token': token } })
+      };
+    }
+
+    const stillHeld = (sequence) => store.launchSequences.getBySession(sequence.sessionId).recovery === 'required';
+
+    it('has a row for every login gate state', () => {
+      assert.deepEqual(Object.keys(reach).sort(), Object.values(states).sort());
+    });
+
+    it('open: the clear is unverified and a local process can reproduce it, and the sentence claims no more', async () => {
+      const { project, sequence, body, token, hint } = await heldIn(states.OPEN);
+      assert.equal(hint.clear, 'unverified');
+      assert.match(hint.text, /Launch readiness panel/);
+      assert.match(hint.text, /recorded as unverified/);
+      assert.match(hint.text, /nothing shows who or what made it/);
+      assert.doesNotMatch(hint.text, /sign in|the operator to clear|operator-verified/,
+        'no operator is named as the one who clears: nothing here can tell who did');
+
+      const read = await bothShapes(readUrl(project), body, token);
+      assert.equal(read.machine.statusCode, 403);
+      assert.equal(json(read.machine).code, 'OPERATOR_REQUIRED');
+      assert.equal(read.imitation.statusCode, 403, 'the readback refuses the dashboard imitation too');
+      assert.equal(json(read.imitation).code, 'LOGIN_GATE_REQUIRED');
+
+      const machine = await send('POST', clearUrl(project), { body, browser: false, headers: { 'x-tc-open-token': token } });
+      assert.equal(machine.statusCode, 403, 'a raw machine-shaped clear is refused outright');
+      assert.equal(json(machine).code, 'OPERATOR_REQUIRED');
+      assert.ok(stillHeld(sequence));
+      const imitation = await send('POST', clearUrl(project), { body, headers: { 'x-tc-open-token': token } });
+      assert.equal(imitation.statusCode, 200, 'a request with the dashboard\'s shape clears, whoever sent it');
+      assert.equal(json(imitation).recoveryClearance, 'open-install-unverified');
+      assert.equal(json(imitation).recoveryClearedBy, null);
+    });
+
+    it('armed: a signed-in operator clears and reads back, nobody else does, and the sentence says sign in', async () => {
+      const { project, sequence, body, token, hint } = await heldIn(states.ARMED);
+      assert.equal(hint.clear, 'signed-in-operator');
+      assert.match(hint.text, /Ask the operator to sign in and clear it from this project's Launch readiness panel\./);
+      for (const url of [clearUrl(project), readUrl(project)]) {
+        const { machine, imitation } = await bothShapes(url, body, token);
+        assert.equal(machine.statusCode, 401, url);
+        assert.equal(imitation.statusCode, 401, url);
+      }
+      assert.ok(stillHeld(sequence));
+      const { cookie, csrf } = await signIn();
+      const read = await send('POST', readUrl(project), { body, headers: { cookie, 'x-csrf-token': csrf } });
+      assert.equal(json(read).code, 'NOT_ATTESTED', 'the readback served the operator: its only complaint is the launch');
+      const cleared = await send('POST', clearUrl(project), { body, headers: { cookie, 'x-csrf-token': csrf } });
+      assert.equal(cleared.statusCode, 200, cleared.body);
+      assert.equal(json(cleared).recoveryClearance, 'operator-verified');
+    });
+
+    for (const [state, code] of [
+      [states.FALLBACK, 'GATE_FALLBACK'],
+      [states.ACCOUNT_REQUIRED, 'GATE_STATE_UNSUPPORTED'],
+      [states.LOCKED, 'GATE_STATE_UNSUPPORTED'],
+      [states.UNREADABLE, null]
+    ]) {
+      it(`${state}: nothing clears or reads back, and the sentence does not point at the panel`, async () => {
+        // Signed in while the login still worked, so the case also holds the
+        // one credential that clears on an armed install.
+        let operator = null;
+        const { project, sequence, body, token, hint } = await (async () => {
+          if (state === states.FALLBACK || state === states.LOCKED) {
+            const held = launchInRecovery('operator');
+            const pageTok = await pageToken();
+            arm();
+            operator = await signIn();
+            if (state === states.FALLBACK) {
+              gateFallback.writeMarker(gateFallback.markerPath(), { createdAt: new Date().toISOString() });
+            } else {
+              store.getDb().prepare("UPDATE users SET disabled_at = datetime('now')").run();
+            }
+            recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(listener()));
+            assert.equal(recoveryDefault.gateAnswer().gateState, state, 'the fixture must reach the state it is named for');
+            return { ...held, token: pageTok, hint: launchSequence.operatorHeldHintFor(held.sequence) };
+          }
+          return heldIn(state);
+        })();
+        assert.equal(hint.clear, 'unavailable');
+        assert.match(hint.text, /It cannot be cleared/);
+        assert.doesNotMatch(hint.text, /Launch readiness panel/, 'the clear is refused here, so the panel is not a way through');
+        assert.doesNotMatch(hint.text, /has no login/, 'and this is not an install with no login');
+        if (state === states.FALLBACK) assert.match(hint.text, /stood down behind Caddy's/);
+        else assert.ok(hint.text.includes(`login gate is "${state}"`), hint.text);
+
+        for (const url of [clearUrl(project), readUrl(project)]) {
+          const attempts = Object.values(await bothShapes(url, body, token));
+          if (operator) {
+            attempts.push(await send('POST', url, { body, headers: { cookie: operator.cookie, 'x-csrf-token': operator.csrf } }));
+          }
+          for (const res of attempts) {
+            assert.ok(res.statusCode >= 400, `${url} answered ${res.statusCode}: ${res.body}`);
+          }
+          if (code) {
+            assert.equal(json(attempts[0]).code, code, `${url}: the machine-shaped request reaches the route's own refusal`);
+          }
+        }
+        assert.ok(stillHeld(sequence), 'nothing cleared it');
+      });
+    }
   });
 });
