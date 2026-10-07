@@ -215,6 +215,52 @@ still write it. One direction stays open to the file by design: an unrecognised 
 `operator`, so a session can make its own gate stricter and cannot make it looser. This is the first
 operator-authority setting moved out of the session's reach; the rest remain #1982.
 
+#### R3b — the operator can read what a session reconciled (Architect A83, 2026-10-06, #1937)
+
+In `advisory` mode the reconciliation is the whole of the gate, and until this ruling it was written
+and never read: stored in the launch's READY artifact, returned to nobody but the session replaying
+its own attestation. The Architect ruled that an oversight and made closing it a condition of
+`advisory` becoming the default.
+
+`POST /api/sessions/:project/launch/reconciliation` returns the stored text with the launch it
+belongs to: the sequence, the revision the attestation was accepted against, when it was accepted,
+the digest of the accepted attestation, the preflight verdict and how the recovery was cleared. Four
+properties are the ruling, and each is held by a test:
+
+- **Operator only.** The route runs the operator proof in `server.js` (`_requireOperatorWrite`) and
+  serves only a result of `operator-verified`: a signed-in session with its CSRF token. It is a `POST`
+  although it changes nothing, because that proof asserts the CSRF token and the dashboard sends the
+  token only with a state-changing method. The session that wrote the text is refused like any other
+  session: one agent reading another's reconciliation would be a channel between agents that no
+  operator sees.
+- **Refused where there is no login** (Architect, amending A83, 2026-10-06). On an install with no
+  enabled login the read is refused for every caller, the dashboard included, with
+  `403 LOGIN_GATE_REQUIRED`. Nothing on such an install identifies a person. The most a request can
+  show there is its shape (same-origin, browser-shaped, carrying a page token from
+  `GET /api/auth/me`), and a session on the same machine can produce that shape, so it cannot satisfy
+  "operator only". The refusal is keyed on the proof's result, not on the gate state that produced it,
+  so any future result other than a verified operator is refused too. The panel shows a line in place
+  of the button on such an install.
+- **Nowhere else.** The text is not added to `GET /api/launch-sequences`, which every caller may read,
+  nor to `tc start status`, `tc start review` or the activity log. A dedicated route was chosen over an
+  operator-only field on that list because the list has no caller check to get wrong while the text is
+  simply absent from it.
+- **An assertion, not evidence.** The server checks the text's length and nothing else. The answer
+  carries `provenance: agent-authored-unverified` as a constant, and the Launch readiness panel says
+  above the text that TangleClaw did not check it. The panel escapes it and fetches it only when the
+  operator asks.
+
+The read writes nothing: the READY artifact, its digest and the recovery columns are as they were, and
+no activity event is recorded.
+
+**What this does not settle.** The first version of this route served the request-shape proof on an
+install with no login, and its review showed a local process could read the text that way; the
+Architect ruled that shape cannot stand in for an operator here. The ruling is about this route. That
+the recovery clear accepts the same shape on such an install, recording `open-install-unverified`, is
+not a precedent for the read: the Architect named it a separate question, and it is not decided here.
+A consequence carried to the default flip: `advisory` is not to become the effective default on an
+install with no login, where the operator could not read what a session reconciled.
+
 ### #1650 — a preflight that could not run must not grant READY
 
 The evaluation-failure ruling (closed 2026-09-20) fixes a verdict inversion: a preflight that failed

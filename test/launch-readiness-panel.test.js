@@ -48,9 +48,10 @@ function liftFunction(src, decl) {
 /**
  * Render the panel for a list of sequences.
  * @param {object[]} sequences - Rows as `GET /api/launch-sequences` returns them
+ * @param {object} [opts] - The renderer's options, as the refresh cycle passes them
  * @returns {string} The container's markup
  */
-function render(sequences) {
+function render(sequences, opts) {
   const { doc } = makeDocument(['projLaunchSequencesList']);
   const ctx = { document: doc, window: {} };
   vm.createContext(ctx);
@@ -69,8 +70,10 @@ function render(sequences) {
   vm.runInContext(liftFunction(UI_SRC, 'function launchRecoveryHtml'), ctx);
   vm.runInContext(liftFunction(UI_SRC, 'function startupFireLabel'), ctx);
   vm.runInContext(liftFunction(UI_SRC, 'function launchStartupControlHtml'), ctx);
+  vm.runInContext(liftFunction(UI_SRC, 'function launchReconciliationControlHtml'), ctx);
   vm.runInContext(liftFunction(UI_SRC, 'function renderProjectLaunchSequences'), ctx);
-  ctx.renderProjectLaunchSequences(sequences);
+  if (opts === undefined) ctx.renderProjectLaunchSequences(sequences);
+  else ctx.renderProjectLaunchSequences(sequences, opts);
   return doc.getElementById('projLaunchSequencesList').innerHTML;
 }
 
@@ -458,12 +461,13 @@ describe('the launch-readiness panel renders (Train 21, car 21.5)', () => {
       ctx.projectRulesTargetId = 7;
       ctx.renderProjectLaunchSequences = () => order.push('render');
       ctx.wireLaunchRecoveryClears = () => order.push('wire');
+      ctx.wireLaunchReconciliationReads = () => order.push('wire-reads');
       ctx.wireStartupFires = () => order.push('wire-fires');
       vm.runInContext(liftFunction(UI_SRC, 'async function refreshProjectLaunchSequences'), ctx);
       return ctx.refreshProjectLaunchSequences(7).then((answer) => {
         assert.equal(answer, true);
-        assert.deepEqual(order, ['render', 'wire', 'wire-fires'],
-          'wiring runs after the render that produced the buttons, and runs at all — both button kinds');
+        assert.deepEqual(order, ['render', 'wire', 'wire-reads', 'wire-fires'],
+          'wiring runs after the render that produced the buttons, and runs at all — every button kind');
       });
     });
 
@@ -477,12 +481,280 @@ describe('the launch-readiness panel renders (Train 21, car 21.5)', () => {
       ctx.projectRulesTargetId = 7;
       ctx.renderProjectLaunchSequences = () => order.push('render');
       ctx.wireLaunchRecoveryClears = () => order.push('wire');
+      ctx.wireLaunchReconciliationReads = () => order.push('wire-reads');
       ctx.wireStartupFires = () => order.push('wire-fires');
       vm.runInContext(liftFunction(UI_SRC, 'async function refreshProjectLaunchSequences'), ctx);
       return ctx.refreshProjectLaunchSequences(7).then((answer) => {
         assert.equal(answer, false);
         assert.deepEqual(order, [], 'a degraded read wires nothing, because it rendered nothing');
       });
+    });
+  });
+
+  describe('the reconciliation readback (#1937)', () => {
+    const HOSTILE = '<img src=x onerror=alert(1)> I verified the handoff against </pre><script>steal()</script>';
+
+    /**
+     * An answer of the reconciliation route with every field the renderer reads.
+     * @param {object} [overrides] - Fields to replace
+     * @returns {object}
+     */
+    function readback(overrides = {}) {
+      return {
+        schema: 'tc.launch-reconciliation/1',
+        sequenceId: 9,
+        sessionId: 42,
+        revision: 2,
+        acceptedAt: '2026-10-06 19:05:00',
+        readyDigest: 'abcdef0123456789abcdef0123456789',
+        recovery: {
+          state: 'cleared', mode: 'advisory', verdict: 'handoff-corrupt', attestedVerdict: 'handoff-corrupt',
+          clearance: 'agent-reconciled', clearedAt: '2026-10-06 19:05:00', clearedBy: null
+        },
+        reconciliation: 'The previous handoff cannot be trusted; I rebuilt context from the plan.',
+        provenance: 'agent-authored-unverified',
+        ...overrides
+      };
+    }
+
+    /**
+     * Render one readback with the page's own `esc` and clearance wording.
+     * @param {object} r - The route's answer
+     * @returns {string} Markup
+     */
+    function renderReadback(r) {
+      const ctx = { window: {} };
+      vm.createContext(ctx);
+      vm.runInContext(liftFunction(LANDING_SRC, 'function esc(str)'), ctx);
+      vm.runInContext(liftFunction(UI_SRC, 'function launchClearanceLabel'), ctx);
+      const preview = UI_SRC.match(/^const LAUNCH_RECONCILIATION_PREVIEW_CHARS = \d+;$/m);
+      assert.ok(preview, 'the preview length is a top-level constant the renderer reads');
+      vm.runInContext(preview[0], ctx);
+      vm.runInContext(liftFunction(UI_SRC, 'function launchReconciliationHtml'), ctx);
+      return ctx.launchReconciliationHtml(r);
+    }
+
+    it('offers the read on an attested launch and on no other', () => {
+      const attested = render([row({ readyAt: '2026-10-06 19:05:00' })]);
+      assert.match(attested, /data-launch-reconciliation="9" data-session-id="42"/);
+      assert.match(attested, /data-launch-reconciliation-out="9"/, 'with a place for the answer');
+      assert.doesNotMatch(render([row()]), /data-launch-reconciliation/,
+        'a launch that has not attested has no accepted text to read');
+      assert.doesNotMatch(render([row({ applicability: 'not-applicable', readyAt: '2026-10-06 19:05:00' })]),
+        /data-launch-reconciliation/, 'nor has a launch that got no sequence');
+    });
+
+    it('offers no button on an install with no login, and says why', () => {
+      const html = render([row({ readyAt: '2026-10-06 19:05:00' })], { noLogin: true });
+      assert.doesNotMatch(html, /data-launch-reconciliation/, 'a control the server will refuse is not offered');
+      assert.doesNotMatch(html, /<button[^>]*>Read the session/);
+      assert.match(html, /cannot be read on an install with no login/);
+      assert.match(html, /Turn the login on/);
+      assert.doesNotMatch(render([row()], { noLogin: true }), /cannot be read on an install/,
+        'and a launch that has not attested gets neither');
+    });
+
+    it('offers the button unless the server said the gate is open: unknown is not "no login"', () => {
+      for (const opts of [{}, { noLogin: false }, { noLogin: undefined }, { noLogin: 'yes' }]) {
+        assert.match(render([row({ readyAt: '2026-10-06 19:05:00' })], opts), /data-launch-reconciliation="9"/,
+          JSON.stringify(opts));
+      }
+    });
+
+    it('the refresh cycle tells the renderer whether the install has a login, from the server\'s own word', async () => {
+      /**
+       * Run one refresh with a given `/api/auth/me` answer and report the options the renderer got.
+       * @param {object|null} me - What `/api/auth/me` answers with
+       * @returns {Promise<object>} The renderer's second argument
+       */
+      async function refreshWith(me) {
+        const { doc } = makeDocument(['projLaunchSequencesList']);
+        const ctx = { document: doc, window: {} };
+        vm.createContext(ctx);
+        let got;
+        ctx.api = async (url) => (url === '/api/auth/me' ? me : { sequences: [row({ readyAt: '2026-10-06 19:05:00' })] });
+        ctx.projectRulesTargetId = 7;
+        ctx.renderProjectLaunchSequences = (_sequences, opts) => { got = opts; };
+        ctx.wireLaunchRecoveryClears = () => {};
+        ctx.wireLaunchReconciliationReads = () => {};
+        ctx.wireStartupFires = () => {};
+        vm.runInContext(liftFunction(UI_SRC, 'async function refreshProjectLaunchSequences'), ctx);
+        assert.equal(await ctx.refreshProjectLaunchSequences(7), true);
+        return got;
+      }
+      assert.deepEqual({ ...(await refreshWith({ gateState: 'open', openInstallToken: 'page-token' })) }, { noLogin: true });
+      assert.deepEqual({ ...(await refreshWith({ gateState: 'armed', authenticated: true, openInstallToken: null })) }, { noLogin: false });
+      assert.deepEqual({ ...(await refreshWith(null)) }, { noLogin: false },
+        'a read that failed leaves it unknown, and the server still decides on the click');
+    });
+
+    it('never renders the text with the list, whatever a row carries', () => {
+      // The list comes from a route every caller may read. If a row ever did
+      // carry the text, the panel must still not show it unasked.
+      const html = render([row({
+        readyAt: '2026-10-06 19:05:00', reconciliation: 'SENTINEL-TEXT', readyArtifact: { reconciliation: 'SENTINEL-TEXT' }
+      })]);
+      assert.doesNotMatch(html, /SENTINEL-TEXT/);
+    });
+
+    it('labels the text as the session\'s own unchecked account, before the text', () => {
+      const html = renderReadback(readback());
+      const label = html.indexOf('TangleClaw did not check it');
+      assert.notEqual(label, -1);
+      assert.match(html, /not evidence that the account is true/);
+      assert.ok(label < html.indexOf('The previous handoff cannot be trusted'), 'the label comes first');
+    });
+
+    it('says which launch the text belongs to, and how its recovery was cleared', () => {
+      const html = renderReadback(readback());
+      assert.match(html, /Launch sequence 9, revision 2/);
+      assert.match(html, /accepted 2026-10-06 19:05:00/);
+      assert.match(html, /attestation digest <code>abcdef012345<\/code>/);
+      assert.match(html, /Preflight verdict: <code>handoff-corrupt<\/code>/);
+      assert.match(html, /cleared by the session's written reconciliation \(advisory mode\)/);
+    });
+
+    it('escapes every character of the text', () => {
+      const html = renderReadback(readback({ reconciliation: HOSTILE }));
+      assert.doesNotMatch(html, /<img src=x/);
+      assert.doesNotMatch(html, /<script>/);
+      assert.equal(html.split('</pre>').length, 2, 'the text cannot close the element it sits in');
+      assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+    });
+
+    it('escapes the facts around it too', () => {
+      const html = renderReadback(readback({
+        acceptedAt: '<b>when</b>', readyDigest: '<i>digest</i>',
+        recovery: { state: 'cleared', verdict: '<script>', attestedVerdict: '<em>', clearance: 'operator-verified', clearedBy: '<img>', clearedAt: '<u>' }
+      }));
+      for (const raw of ['<b>', '<i>', '<script>', '<em>', '<img>', '<u>']) {
+        assert.equal(html.includes(raw), false, raw);
+      }
+    });
+
+    it('keeps long text whole behind a details element, with a preview before it', () => {
+      const long = `${'a'.repeat(390)}MIDDLE${'b'.repeat(600)}END`;
+      const html = renderReadback(readback({ reconciliation: long }));
+      assert.match(html, new RegExp(`<details><summary>Show all ${long.length} characters</summary>`));
+      const [before, inside] = html.split('<details>');
+      assert.equal(before.includes('END'), false, 'the preview stops short');
+      assert.ok(inside.includes(long), 'and the whole text is inside the details');
+    });
+
+    it('shows short text whole, with nothing to open', () => {
+      const html = renderReadback(readback());
+      assert.doesNotMatch(html, /<details>/);
+    });
+
+    it('says so when the attestation carried no reconciliation, and claims no text', () => {
+      for (const reconciliation of [null, '', undefined]) {
+        const html = renderReadback(readback({ reconciliation }));
+        assert.match(html, /This attestation carried no reconciliation\./);
+        assert.doesNotMatch(html, /<pre/);
+        assert.doesNotMatch(html, /Written by the session/, 'no text, so nothing to label as the session\'s');
+      }
+    });
+
+    it('distinguishes a launch that needed no recovery from one cleared by the operator', () => {
+      const none = renderReadback(readback({ recovery: { state: 'none', verdict: 'ok', attestedVerdict: 'ok' } }));
+      assert.match(none, /this launch needed no recovery/);
+      const operator = renderReadback(readback({
+        recovery: { state: 'cleared', verdict: 'stale', attestedVerdict: 'stale', clearance: 'operator-verified', clearedBy: 'rosie' }
+      }));
+      assert.match(operator, /cleared by rosie/);
+      assert.doesNotMatch(operator, /advisory mode/);
+      for (const recovery of [undefined, {}, { state: null }]) {
+        const unknown = renderReadback(readback({ recovery }));
+        assert.match(unknown, /no recovery state was reported/, JSON.stringify(recovery));
+        assert.doesNotMatch(unknown, /needed no recovery/, 'an absent state is not reported as none');
+      }
+    });
+
+    it('shows a verdict the session attested differently from the preflight\'s', () => {
+      const html = renderReadback(readback({
+        recovery: { state: 'none', verdict: 'stale', attestedVerdict: 'ok' }
+      }));
+      assert.match(html, /the session attested <code>ok<\/code>/);
+    });
+
+    /**
+     * Run `wireLaunchReconciliationReads` against a button the panel would
+     * have rendered, and report what the handler sent and showed.
+     * @param {object} [opts]
+     * @param {string|null} [opts.openInstallToken] - What `/api/auth/me` answers with
+     * @param {object|null} [opts.answer] - What the route answers with
+     * @returns {Promise<{calls: object[], status: object[], btn: object, out: object}>}
+     */
+    async function clickRead(opts = {}) {
+      const ctx = { window: {} };
+      vm.createContext(ctx);
+      const calls = [];
+      const status = [];
+      const out = { innerHTML: '' };
+      const btn = {
+        disabled: false,
+        dataset: { launchReconciliation: '9', sessionId: '42' },
+        _click: null,
+        addEventListener(type, fn) { if (type === 'click') this._click = fn; }
+      };
+      ctx.api = async (url, fetchOpts) => {
+        calls.push({ url, fetchOpts });
+        if (url === '/api/auth/me') {
+          return { openInstallToken: opts.openInstallToken === undefined ? 'page-token' : opts.openInstallToken };
+        }
+        return opts.answer === undefined ? readback() : opts.answer;
+      };
+      ctx.api.lastError = 'Sign in to read a launch reconciliation.';
+      ctx.projectRulesTargetId = 7;
+      ctx.projectRulesTargetName = 'my project';
+      ctx._setProjectRulesStatus = (text, ok) => status.push({ text, ok });
+      ctx.launchReconciliationHtml = (r) => `RENDERED:${r.sequenceId}`;
+      vm.runInContext(liftFunction(UI_SRC, 'function wireLaunchReconciliationReads'), ctx);
+      const selectors = [];
+      ctx.wireLaunchReconciliationReads({
+        querySelectorAll: () => [btn],
+        querySelector: (sel) => { selectors.push(sel); return out; }
+      });
+      await btn._click();
+      return { calls, status, btn, out, selectors };
+    }
+
+    it('asks for the launch the button was rendered for, as numbers, in a declared JSON body', async () => {
+      const { calls } = await clickRead();
+      const post = calls.find((c) => c.url.includes('/launch/reconciliation'));
+      assert.ok(post, 'the handler asked');
+      assert.equal(post.url, '/api/sessions/my%20project/launch/reconciliation');
+      assert.equal(post.fetchOpts.method, 'POST', 'a POST, so the page sends its CSRF token with it');
+      assert.equal(post.fetchOpts.headers['Content-Type'], 'application/json');
+      assert.deepEqual(JSON.parse(post.fetchOpts.body), { sessionId: 42, sequenceId: 9 });
+    });
+
+    it('sends no page token and makes no other request: the route serves a signed-in operator only', async () => {
+      const { calls } = await clickRead({ openInstallToken: 'page-token' });
+      assert.deepEqual(calls.map((c) => c.url), ['/api/sessions/my%20project/launch/reconciliation']);
+      assert.deepEqual(Object.keys(calls[0].fetchOpts.headers), ['Content-Type']);
+    });
+
+    it('renders the answer into that launch\'s own output and leaves the button usable', async () => {
+      const { out, btn, status, selectors } = await clickRead();
+      assert.equal(out.innerHTML, 'RENDERED:9');
+      assert.deepEqual(selectors, ['[data-launch-reconciliation-out="9"]']);
+      assert.equal(btn.disabled, false);
+      assert.deepEqual(status, [], 'a read that worked is not announced as a change');
+    });
+
+    it('shows the server\'s refusal and renders nothing', async () => {
+      const { out, btn, status } = await clickRead({ answer: null });
+      assert.equal(out.innerHTML, '');
+      assert.equal(btn.disabled, false);
+      assert.deepEqual(status, [{ text: 'Sign in to read a launch reconciliation.', ok: false }]);
+    });
+
+    it('renders nothing for an answer about a different launch', async () => {
+      const { out, status } = await clickRead({ answer: readback({ sequenceId: 10 }) });
+      assert.equal(out.innerHTML, '');
+      assert.equal(status.length, 1);
+      assert.equal(status[0].ok, false);
     });
   });
 });
