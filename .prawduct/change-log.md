@@ -51,6 +51,8 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 **Review.** Two cumulative Critic reviews, on `29c7e9581` and then on the tree with main merged in: 0 blocking in both. From the first: the fleet read's no-login refusal was aligned with the reconciliation read's (`403 LOGIN_GATE_REQUIRED`) and the API reference row completed; the Launch readiness panel still offering Clear recovery for an ended session's launch is filed as #2178, a panel change outside this chunk. From the second, carried to the batch-write chunk: the rule for which launches an operator may clear is stated in the fleet list's SQL and in `clearOneLaunch`, and the two differ on archived projects.
 
+**Architect hold A133, fixed.** The fleet read had built its own four-field copy of the preflight record, dropping `requiresRecovery`, `requiresReconciliation` and `worktreeDirty` and turning an unparseable record into a null verdict with two false flags. A96 had asked for the stored evidence unchanged. It now sends the stored record as it is, and null when the store cannot parse it; tests pin the three fields, that `worktreeDirty` null stays null, and that an unknown field passes through.
+
 **Not verified.** No live request was made against the running install: this checkout's primary is the running server, and the route has no page yet.
 ## 2026-10-07 — #2059: version-qualified Codex pane fixtures and pinned refusals
 

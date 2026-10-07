@@ -181,11 +181,66 @@ describe('the fleet recovery read (#2049)', () => {
       assert.equal(entry.recovery, 'required');
       assert.equal(entry.recoveryMode, 'operator');
       assert.deepEqual(entry.sessionStatus, { value: 'active', basis: 'stored-session-status' });
-      assert.equal(entry.preflight.verdict, held.sequence.preflight.verdict);
-      assert.equal(entry.preflight.reason, held.sequence.preflight.reason);
-      assert.ok(entry.preflight.verdict, 'the fixture has a verdict to show');
-      assert.equal(typeof entry.preflight.evaluationFailed, 'boolean');
-      assert.equal(typeof entry.preflight.evaluationMissing, 'boolean');
+      assert.ok(held.sequence.preflight.verdict, 'the fixture has a verdict to show');
+      assert.deepEqual(entry.preflight, held.sequence.preflight, 'the preflight record as the launch stored it');
+    });
+
+    describe('the preflight evidence is the stored record, unchanged', () => {
+      /**
+       * Overwrite a launch's stored preflight record.
+       * @param {object} held - A launch from the fixture
+       * @param {string} json - The column's new text
+       * @returns {void}
+       */
+      function storePreflight(held, json) {
+        store.getDb().prepare('UPDATE launch_sequences SET preflight = ? WHERE id = ?').run(json, held.sequence.id);
+      }
+
+      it('carries the predicates the gate obeyed, which the verdict alone does not give', async () => {
+        const held = fixture.launchInRecovery(env);
+        const stored = store.launchSequences.getBySession(held.sequence.sessionId).preflight;
+        assert.equal(typeof stored.requiresRecovery, 'boolean', 'the launch path stores the predicate');
+        assert.equal(typeof stored.requiresReconciliation, 'boolean');
+        assert.ok('worktreeDirty' in stored);
+        const entry = entryFor(await readAsOperator(), held);
+        assert.equal(entry.preflight.requiresRecovery, stored.requiresRecovery);
+        assert.equal(entry.preflight.requiresReconciliation, stored.requiresReconciliation);
+        assert.ok('worktreeDirty' in entry.preflight, 'the field is sent even when it is null');
+        assert.equal(entry.preflight.worktreeDirty, stored.worktreeDirty);
+      });
+
+      for (const worktreeDirty of [null, true, false]) {
+        it(`sends worktreeDirty ${worktreeDirty} as ${worktreeDirty}: never measured, dirty and clean stay three answers`, async () => {
+          const held = fixture.launchInRecovery(env);
+          const record = {
+            verdict: 'workspace-unavailable', reason: 'the recorded worktree is gone',
+            requiresRecovery: worktreeDirty !== false, requiresReconciliation: true,
+            worktreeDirty, evaluationFailed: false, evaluationMissing: false
+          };
+          storePreflight(held, JSON.stringify(record));
+          const entry = entryFor(await readAsOperator(), held);
+          assert.deepEqual(entry.preflight, record);
+          assert.strictEqual(entry.preflight.worktreeDirty, worktreeDirty);
+        });
+      }
+
+      it('sends a field this read has never heard of, because nothing is picked out', async () => {
+        const held = fixture.launchInRecovery(env);
+        const record = { ...held.sequence.preflight, addedLater: { nested: null } };
+        storePreflight(held, JSON.stringify(record));
+        assert.deepEqual(entryFor(await readAsOperator(), held).preflight, record);
+      });
+
+      it('sends null for a record the store cannot parse, and invents no verdict or flags', async () => {
+        // The column is NOT NULL, so a launch always stored something. What the
+        // store hands back for text it cannot parse is null, and that is what
+        // is sent: not a null verdict beside two false flags.
+        const held = fixture.launchInRecovery(env);
+        storePreflight(held, '{not json');
+        assert.strictEqual(store.launchSequences.getBySession(held.sequence.sessionId).preflight, null);
+        const entry = entryFor(await readAsOperator(), held);
+        assert.strictEqual(entry.preflight, null);
+      });
     });
 
     it('leaves out an advisory launch, a cleared launch, an ended session and an archived project', async () => {
