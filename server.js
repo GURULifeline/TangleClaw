@@ -269,6 +269,7 @@ const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
 const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
+const launchRecoveryClear = require('./lib/launch-recovery-clear');
 const recoveryDefault = require('./lib/recovery-default');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
@@ -8120,10 +8121,14 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
     log.warn('Refused a recovery clear', { code: 'NOT_FOUND', project: params.project, reason: 'no such project' });
     return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
   }
-  const sequence = store.launchSequences.getBySession(sessionId);
-  // Project-scoped on purpose: the path names a project, and a sequence id from
-  // another one must not be clearable through it.
-  if (!sequence || sequence.id !== sequenceId || sequence.projectId !== project.id) {
+  // The checks and the write are `clearOneLaunch`'s, shared with every other
+  // route that offers this decision. Project-scoped on purpose: the path names
+  // a project, and a sequence id from another one must not be clearable
+  // through it.
+  const { outcome, sequence } = launchRecoveryClear.clearOneLaunch({
+    project, sessionId, sequenceId, recoveryRevision, clearance, clearedBy
+  });
+  if (outcome === launchRecoveryClear.OUTCOMES.NOT_FOUND) {
     // Logged like the rest, and for a sharper reason than tidiness: on an open
     // install a page-token holder can walk `sequenceId` values against another
     // project's launches, and every probe answers 404. Silent, that sweep leaves
@@ -8134,7 +8139,7 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
     return errorResponse(res, 404,
       'That launch sequence does not belong to this project, or no longer exists.', 'NOT_FOUND');
   }
-  if (sequence.recoveryMode === 'advisory') {
+  if (outcome === launchRecoveryClear.OUTCOMES.ADVISORY) {
     log.warn('Refused a recovery clear', {
       code: 'RECOVERY_MODE_ADVISORY', project: params.project, sequence: sequence.id
     });
@@ -8142,7 +8147,7 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
       'This launch clears recovery by reconciliation: the session writes one into its READY attestation. The '
       + 'two paths never cross, so there is nothing here for an operator to clear.', 'RECOVERY_MODE_ADVISORY');
   }
-  if (sequence.recovery !== 'required') {
+  if (outcome === launchRecoveryClear.OUTCOMES.NOT_REQUIRED) {
     log.warn('Refused a recovery clear', {
       code: 'STALE_RECOVERY', project: params.project, sequence: sequence.id, recovery: sequence.recovery
     });
@@ -8150,11 +8155,7 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
       `This launch's recovery is "${sequence.recovery}", not "required"; nothing was changed.`,
       'STALE_RECOVERY');
   }
-
-  const cleared = store.launchSequences.clearRecovery(sequence.id, {
-    sessionId, recoveryRevision, clearance, clearedBy
-  });
-  if (!cleared) {
+  if (outcome === launchRecoveryClear.OUTCOMES.BINDING_MOVED) {
     log.warn('Refused a recovery clear', {
       code: 'STALE_RECOVERY', project: params.project, sequence: sequence.id,
       asked: recoveryRevision, current: sequence.recoveryRevision
@@ -8167,12 +8168,11 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
       + `${sequence.recoveryRevision}. Re-read the launch and clear it again if it still needs one.`,
       'STALE_RECOVERY');
   }
-  store.activity.log({
-    projectId: project.id,
-    sessionId: cleared.sessionId,
-    eventType: 'launch.recovery-cleared',
-    detail: { sequenceId: cleared.id, clearance, clearedBy, recoveryRevision }
-  });
+  if (outcome !== launchRecoveryClear.OUTCOMES.CLEARED) {
+    // An outcome this route has no answer for must never be reported as a clear.
+    throw new Error(`clearOneLaunch returned an outcome this route does not handle: ${outcome}`);
+  }
+  const cleared = sequence;
   log.info('Launch recovery cleared', {
     project: project.name, sequence: cleared.id, clearance, clearedBy
   });
