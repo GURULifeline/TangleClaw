@@ -246,6 +246,53 @@ describe('launch-mode settings', () => {
       assert.match(told[0], /does not carry to Antigravity/);
     });
 
+    it('reports the reset for the dashboard\'s request, which names the default alongside the engine (#2189)', async () => {
+      // The settings modal resets its mode control when the engine dropdown
+      // moves and then sends what the control shows: engine AND the default
+      // mode, by name. The operator touched only the engine, so the answer to
+      // that request must say the mode was reset, exactly as it does for a
+      // request that leaves the mode out.
+      mkProject('lm-reset-dashboard', 'codex');
+      await projects.updateProject('lm-reset-dashboard', { defaultLaunchMode: 'bypassPermissions' });
+
+      const switched = await projects.updateProject('lm-reset-dashboard', { engine: 'antigravity', defaultLaunchMode: 'default' });
+      assert.deepEqual(switched.errors, []);
+      assert.equal(store.projectConfig.load(switched.project.path).defaultLaunchMode, 'default');
+      const told = (switched.warnings || []).filter((w) => /reset to Interactive/.test(w));
+      assert.equal(told.length, 1, `the dashboard-shaped save must report the reset, got: ${JSON.stringify(switched.warnings)}`);
+      assert.match(told[0], /Bypass was chosen for Codex/);
+      assert.match(told[0], /does not carry to Antigravity/);
+
+      // The engine-only request still reports it, once.
+      mkProject('lm-reset-engine-only', 'codex');
+      await projects.updateProject('lm-reset-engine-only', { defaultLaunchMode: 'bypassPermissions' });
+      const bare = await projects.updateProject('lm-reset-engine-only', { engine: 'antigravity' });
+      assert.equal((bare.warnings || []).filter((w) => /reset to Interactive/.test(w)).length, 1);
+    });
+
+    it('does not call a mode the request chose for the new engine a reset (#2189)', async () => {
+      // Bypass named again for the new engine, or a different non-default mode:
+      // both are choices, and "reset to Interactive" would be false of each.
+      mkProject('lm-chosen-same-key', 'codex');
+      await projects.updateProject('lm-chosen-same-key', { defaultLaunchMode: 'bypassPermissions' });
+      const same = await projects.updateProject('lm-chosen-same-key', { engine: 'antigravity', defaultLaunchMode: 'bypassPermissions' });
+      assert.deepEqual(same.errors, []);
+      assert.equal(store.projectConfig.load(same.project.path).defaultLaunchMode, 'bypassPermissions');
+      assert.deepEqual((same.warnings || []).filter((w) => /reset to/i.test(w)), []);
+
+      mkProject('lm-chosen-other-key', 'codex');
+      await projects.updateProject('lm-chosen-other-key', { defaultLaunchMode: 'bypassPermissions' });
+      const other = await projects.updateProject('lm-chosen-other-key', { engine: 'antigravity', defaultLaunchMode: 'sandbox' });
+      assert.equal(store.projectConfig.load(other.project.path).defaultLaunchMode, 'sandbox');
+      assert.deepEqual((other.warnings || []).filter((w) => /reset to/i.test(w)), []);
+
+      // And a project that was already on the default is told nothing even
+      // when the request names the default.
+      mkProject('lm-default-named');
+      const quiet = await projects.updateProject('lm-default-named', { engine: 'codex', defaultLaunchMode: 'default' });
+      assert.deepEqual((quiet.warnings || []).filter((w) => /reset to/i.test(w)), []);
+    });
+
     it('resets a warning-free mode that both engines define: the rule is per engine, not per warning (#2189)', async () => {
       // The case that tells "reset every mode" from "reset only a warned one".
       // Claude and OpenClaw both define `plan`, and neither warns on it, so the

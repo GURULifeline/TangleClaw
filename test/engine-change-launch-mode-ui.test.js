@@ -206,6 +206,80 @@ describe('#2189 — the settings modal and an engine change', () => {
     });
   });
 
+  describe('request and response, end to end', () => {
+    let tmpDir;
+    before(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-2189-e2e-'));
+      store._setBasePath(path.join(tmpDir, 'tangleclaw'));
+      store.init();
+    });
+    after(() => {
+      store.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    /**
+     * The PATCH body the real `doSaveSettings` builds for a modal in this state.
+     * @param {object} project - The project as the dashboard holds it
+     * @param {string} engineValue - The engine dropdown's value
+     * @param {string} modeValue - The mode control's value
+     * @returns {Promise<object>}
+     */
+    async function savedBody(project, engineValue, modeValue) {
+      const els = {
+        settingsName: { value: project.name },
+        settingsEngine: { value: engineValue },
+        settingsTags: { value: '' },
+        settingsDefaultLaunchMode: { value: modeValue },
+        settingsShowLaunchPicker: { checked: project.showLaunchModePicker !== false }
+      };
+      const sent = [];
+      const ctx = {
+        document: { getElementById: (id) => els[id] || null },
+        state: { projects: [project], engines: ENGINE_IDS.map(profile) },
+        settingsTarget: project.name,
+        async _submitSettings(body) { sent.push(body); },
+        tcSettingDisposition: () => ({ applies: false }),
+        tcLaunchModePatch: helpers.tcLaunchModePatch,
+        collectWrapSectionsSelection: () => undefined,
+        openBypassHiddenModal() { assert.fail('no confirmation is expected for a reset to the default mode'); }
+      };
+      vm.createContext(ctx);
+      vm.runInContext(`${functionSource(ui, 'async function doSaveSettings(')}; this.run = doSaveSettings;`, ctx);
+      await ctx.run();
+      assert.equal(sent.length, 1, 'the save must have been submitted');
+      return JSON.parse(JSON.stringify(sent[0]));
+    }
+
+    it('the save the dashboard really sends for an engine switch is answered with the reset', async () => {
+      // The whole path an operator takes: a Codex project on Bypass, the engine
+      // dropdown moved to Antigravity (the mode control resets), Save. The
+      // modal's own body goes to the server's own update, and the answer must
+      // say what happened to the mode. A note shown before the save is not
+      // that: it is gone once the modal closes.
+      const dir = path.join(tmpDir, 'p-e2e');
+      fs.mkdirSync(dir, { recursive: true });
+      store.projects.create({ name: 'p-e2e', path: dir, engine: 'codex' });
+      const cfg = store.projectConfig.load(dir);
+      cfg.engine = 'codex';
+      store.projectConfig.save(dir, cfg);
+      assert.deepEqual((await projects.updateProject('p-e2e', { defaultLaunchMode: 'bypassPermissions' })).errors, []);
+
+      const held = { ...projectOn('codex', 'bypassPermissions'), name: 'p-e2e' };
+      const shown = helpers.tcLaunchModeForEngine(held, 'antigravity');
+      const body = await savedBody(held, 'antigravity', shown);
+      assert.equal(body.engine, 'antigravity');
+      assert.equal(body.defaultLaunchMode, 'default', 'the dashboard names the default mode with the engine');
+
+      const answer = await projects.updateProject('p-e2e', body);
+      assert.deepEqual(answer.errors, []);
+      assert.equal(store.projectConfig.load(dir).defaultLaunchMode, 'default');
+      const told = (answer.warnings || []).filter((w) => /reset to Interactive/.test(w));
+      assert.equal(told.length, 1, `the answer to the dashboard's save must report the reset: ${JSON.stringify(answer.warnings)}`);
+      assert.match(told[0], /Bypass was chosen for Codex and does not carry to Antigravity/);
+    });
+  });
+
   describe('wiring', () => {
     it('the engine-change handler asks the rule for the mode instead of reading the control', () => {
       const start = ui.indexOf("document.getElementById('settingsEngine').addEventListener('change', (e) => {");
