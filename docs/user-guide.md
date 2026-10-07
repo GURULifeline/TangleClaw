@@ -700,8 +700,11 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. A `bucket` or `unconfigured` card must have no `train`, so a Topic Bucket never shows or borrows a train number; `train` and `pilot` cards need one.
   - `version`: a short label such as `v6`, shown as a badge.
   - `status`: one of `planned`, `ready`, `in-progress`, `blocked`, `shipped` or `sunset`, shown as a badge.
+  - `owner`: the lane that owns the work, up to 60 characters, shown as **lane: name** at the end of the row. Leave it out when no lane is assigned.
 
-  A car may carry `state`: `open`, `in-progress` (amber), `blocked` (red) or `closed` (green). It must agree with `closed`. Without it, `closed` alone decides, as before. Each car is labelled with its state in words, so colour is never the only signal.
+  A car may carry `state`: `open`, `in-progress` (amber), `in-review` (purple: a pull request is open for review), `blocked` (red), `closed` (green) or `dropped` (grey and struck through: the issue was closed as not planned). It must agree with `closed`: `closed` and `dropped` need `"closed": true`, and every other state needs `"closed": false`. Without `state`, `closed` alone decides, as before, so a closed car is only drawn as dropped when the block says so. Each car is labelled with its state in words, so colour is never the only signal.
+
+  A dropped car is left out of the count on both sides: a train of five cars with one dropped and two closed reads **(2/4)**, and the expanded card adds **1 dropped**. A train whose cars were all dropped reads **(0/0)**.
 - The **new cards queue** is a fenced block tagged `tc-queue`: `{"newDays": 14, "issues": [{"issue": 1932, "title": "…", "href": "https://…", "type": "bug", "labels": ["…"], "createdAt": "2026-09-27T09:30:00Z"}]}`, with an optional `title`.
   - It lists every open issue that is not in a train, newest first.
   - Issues filed within `newDays` are marked **new** and appear as blue pills on the card.

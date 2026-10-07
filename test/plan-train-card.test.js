@@ -531,3 +531,115 @@ describe('ID-less Topic Buckets (#2006)', () => {
     assert.match(render(train({ kind: 'pilot', train: 'B2' })), /class="train-card"/);
   });
 });
+
+describe('in-review and dropped cars, and the owning lane (#2165)', () => {
+  /**
+   * The plan page's stylesheet.
+   * @returns {string}
+   */
+  const stylesheet = () => planDocs.renderPlanPage({
+    project: { id: 1, name: 'p' }, file: 'x.md', relative: 'x.md', modifiedAt: '2026-09-27T00:00:00.000Z', markdown: '', timeZone: 'UTC'
+  });
+
+  it('draws an in-review car and a dropped car with their own class, words and table cell', () => {
+    const html = render(train({
+      cars: [
+        { issue: 1, closed: false, state: 'in-review' },
+        { issue: 2, closed: true, state: 'dropped' }
+      ]
+    }));
+    assert.match(html, /<span class="train-car in-review" title="#1 in review" aria-label="#1 in review">#1<\/span>/);
+    assert.match(html, /<span class="train-car dropped" title="#2 dropped" aria-label="#2 dropped">#2<\/span>/);
+    assert.match(html, /<td class="train-state">◆ in review<\/td>/);
+    assert.match(html, /<td class="train-state">⊘ dropped<\/td>/);
+  });
+
+  it('colours in-review purple, and marks dropped with a line-through as well as a colour that is not green', () => {
+    const page = stylesheet();
+    assert.match(page, /\.train-car\.in-review\{background:#8250df;border-color:#8250df;color:#fff\}/);
+    assert.match(page, /\.train-car\.dropped\{background:#57606a;border-color:#57606a;color:#fff;text-decoration:line-through\}/);
+  });
+
+  it('has words, a table cell and a style for every state in the enum', () => {
+    const page = stylesheet();
+    const html = render(train({
+      cars: trainCard.CAR_STATES.map((state, i) => ({ issue: i + 1, closed: trainCard.CLOSED_CAR_STATES.includes(state), state }))
+    }));
+    trainCard.CAR_STATES.forEach((state, i) => {
+      const pill = html.match(new RegExp(`<span class="train-car ${state}" title="#${i + 1} ([a-z ]+)" aria-label="#${i + 1} ([a-z ]+)">`));
+      assert.ok(pill, `${state} has a labelled pill`);
+      assert.equal(pill[1], pill[2]);
+      assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
+      if (state !== 'open') assert.match(page, new RegExp(`\\.train-car\\.${state}\\{`), `${state} has a style`);
+    });
+  });
+
+  it('requires a closed issue to be closed or dropped, and an open one to be anything else', () => {
+    for (const state of ['open', 'in-progress', 'in-review', 'blocked']) {
+      assert.match(render(train({ cars: [{ issue: 1, closed: false, state }] })), /class="train-card"/);
+      refused(train({ cars: [{ issue: 1, closed: true, state }] }), /cars\[0\]\.state must agree with closed/);
+    }
+    for (const state of ['closed', 'dropped']) {
+      assert.match(render(train({ cars: [{ issue: 1, closed: true, state }] })), /class="train-card"/);
+      refused(train({ cars: [{ issue: 1, closed: false, state }] }), /cars\[0\]\.state must agree with closed/);
+    }
+    refused(train({ cars: [{ issue: 1, closed: false, state: 'done' }] }),
+      /cars\[0\]\.state must be one of open, in-progress, blocked, closed, in-review, dropped\./);
+  });
+
+  it('counts a state-less closed car as closed, never as dropped', () => {
+    const html = render(train({ cars: [{ issue: 6, closed: true }] }));
+    assert.match(html, /train-car closed" title="#6 closed"/);
+    assert.match(html, /\(1\/1\)/);
+  });
+
+  it('leaves a dropped car out of both figures of the count and reports it separately', () => {
+    const html = render(train({
+      cars: [
+        { issue: 1, closed: true, state: 'closed' },
+        { issue: 2, closed: true, state: 'dropped' },
+        { issue: 3, closed: false, state: 'in-review' },
+        { issue: 4, closed: false },
+        { issue: 5, closed: true }
+      ]
+    }));
+    assert.match(html, /<span class="train-count">\(2\/4\)<\/span>/);
+    assert.match(html, /<strong>2 open \(1 in review\) · 2 closed · 1 dropped<\/strong>/);
+  });
+
+  it('lets a train finish when its only unfinished car was dropped', () => {
+    const html = render(train({ cars: [{ issue: 1, closed: true }, { issue: 2, closed: true, state: 'dropped' }] }));
+    assert.match(html, /<span class="train-count">\(1\/1\)<\/span>/);
+    assert.match(html, /<strong>0 open · 1 closed · 1 dropped<\/strong>/);
+  });
+
+  it('reads 0/0 with the dropped count when every car was dropped', () => {
+    const html = render(train({ cars: [{ issue: 1, closed: true, state: 'dropped' }, { issue: 2, closed: true, state: 'dropped' }] }));
+    assert.match(html, /<span class="train-count">\(0\/0\)<\/span>/);
+    assert.match(html, /<strong>0 open · 0 closed · 2 dropped<\/strong>/);
+  });
+
+  it('says nothing about dropped cars when there are none', () => {
+    assert.doesNotMatch(render(train()), /dropped/);
+  });
+
+  it('shows the owning lane in words after the badges, escaped', () => {
+    const html = render(train({ owner: 'TangleClaw-BuilderRule' }));
+    assert.match(html, /<span class="train-badge">verified<\/span><span class="train-owner">lane: TangleClaw-BuilderRule<\/span><\/summary>/);
+    const hostile = render(train({ owner: '<img src=x onerror=alert(1)>' }));
+    assert.match(hostile, /<span class="train-owner">lane: &lt;img src=x onerror=alert\(1\)&gt;<\/span>/);
+    assert.doesNotMatch(hostile, /<img/);
+  });
+
+  it('draws no lane when there is no owner', () => {
+    assert.doesNotMatch(render(train()), /train-owner|lane:/);
+  });
+
+  it('refuses an owner that is not a string, is blank, or is longer than the bound', () => {
+    refused(train({ owner: 7 }), /owner must be a string/);
+    refused(train({ owner: '   ' }), /owner must not be blank/);
+    refused(train({ owner: '' }), /owner must not be blank/);
+    refused(train({ owner: 'x'.repeat(trainCard.LIMITS.owner + 1) }), /owner is longer than 60 characters/);
+    assert.match(render(train({ owner: 'x'.repeat(trainCard.LIMITS.owner) })), /class="train-owner"/);
+  });
+});
