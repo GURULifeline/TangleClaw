@@ -3661,7 +3661,7 @@ function openGlobalSettings() {
     </div>
     <div class="form-group">
       <label class="form-label" for="gsProjectsDir">Projects directory</label>
-      <input type="text" class="form-input" id="gsProjectsDir" value="${esc(c.projectsDir || '~/Documents/Projects')}"
+      <input type="text" class="form-input" id="gsProjectsDir" value="${esc(c.projectsDir || '~/Projects')}"
              autocomplete="off" autocorrect="off" spellcheck="false">
     </div>
 

@@ -260,10 +260,10 @@ describe('deploy/install.sh', () => {
     });
 
     it('expands a stored "~/" path before classifying it — the quiet-wrong-answer case', () => {
-      // This is the mutation the guard exists to survive. lib/store.js ships
-      // projectsDir as the literal "~/Documents/Projects"; classified without
-      // expansion it matches nothing and reports safe, so the default config —
-      // the one case that matters most — would silently skip the warning.
+      // This is the mutation the guard exists to survive. A projectsDir stored
+      // as a "~/" literal, classified without expansion, matches nothing and
+      // reports safe, so a protected folder an operator typed would silently
+      // skip the warning.
       assert.equal(runShellFn('/Users/tester', 'expand_tilde "~/Documents/Projects"'),
         '/Users/tester/Documents/Projects');
       assert.equal(runShellFn('/Users/tester', 'expand_tilde "~"'), '/Users/tester');
@@ -276,16 +276,65 @@ describe('deploy/install.sh', () => {
         runShellFn('/Users/tester',
           'tcc_protected_path "$(expand_tilde "~/Documents/Projects")" && echo YES || echo NO'),
         'YES',
-        'the shipped default projectsDir must be classified TCC-protected once expanded'
+        'a "~/Documents" projectsDir must be classified TCC-protected once expanded'
       );
     });
 
     it('reads projectsDir from config and falls back to the shipped default', () => {
-      assert.ok(/PROJECTS_DIR_RAW="\$HOME\/Documents\/Projects"/.test(script),
+      // Derived from the store, never restated: the fallback exists to mirror
+      // it, and a literal here would pin the mirror to a value the store left.
+      const { DEFAULT_CONFIG } = require('../lib/store');
+      const shipped = DEFAULT_CONFIG.projectsDir;
+      assert.ok(shipped.startsWith('~/'), 'the store ships a home-relative default');
+      const rest = shipped.slice(2);
+      assert.ok(script.includes(`PROJECTS_DIR_RAW="$HOME/${rest}"`),
         'must default to the same path lib/store.js ships as projectsDir');
+      assert.equal(script.split(`"${shipped}"`).length - 1, 2,
+        'both config-read fallbacks name the shipped default');
+      assert.ok(script.includes(`echo "$HOME/${rest}"`), 'and so does the fallback when node cannot run');
+      // The one other path named here is the directory installs used before
+      // #880, and only for a config file that has no projectsDir key at all.
+      const { LEGACY_PROJECTS_DIR } = require('../lib/store');
+      const block = script.slice(script.indexOf('PROJECTS_DIR_RAW='), script.indexOf('PROJECTS_DIR="$(expand_tilde'));
+      const code = block.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+      assert.deepEqual(code.match(/"[^"]*Documents\/Projects"/g), [`"${LEGACY_PROJECTS_DIR}"`],
+        'the old default appears once, as the keyless-config fallback, and nowhere else');
+      // #880: the shipped default must not itself trip the protected-folder note.
+      assert.equal(
+        runShellFn('/Users/tester', `tcc_protected_path "$(expand_tilde "${shipped}")" && echo YES || echo NO`),
+        'NO',
+        'a fresh install must not warn about the directory it ships'
+      );
       assert.ok(/c\.projectsDir/.test(script), 'must read projectsDir out of config.json when it exists');
       assert.ok(/PROJECTS_DIR="\$\(expand_tilde "\$PROJECTS_DIR_RAW"\)"/.test(script),
         'the config value must go through expand_tilde before classification');
+    });
+
+    it('answers for an existing config the way the server does (#880)', () => {
+      // Run the installer's own inline reader against real files. An install
+      // whose config has no projectsDir key is kept on the old directory by
+      // lib/store.js, so the note must be judged against that directory too.
+      const { execFileSync } = require('node:child_process');
+      const os = require('node:os');
+      const store = require('../lib/store');
+      const m = script.match(/PROJECTS_DIR_RAW="\$\("\$NODE_PATH" -e '\n([\s\S]*?)\n    ' "\$HOME\/\.tangleclaw\/config\.json"/);
+      assert.ok(m, 'the inline config reader is where this test expects it');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-install-cfg-'));
+      sandboxRoots.push(dir);
+      const file = path.join(dir, 'config.json');
+      const read = (body) => {
+        fs.writeFileSync(file, body);
+        return execFileSync(process.execPath, ['-e', m[1], file], { encoding: 'utf8' });
+      };
+      assert.equal(read(JSON.stringify({ serverPort: 3101 })), store.LEGACY_PROJECTS_DIR, 'no key: the old directory');
+      assert.equal(read(JSON.stringify({ projectsDir: '~/code' })), '~/code', 'a chosen directory is read as written');
+      assert.equal(read(JSON.stringify({ projectsDir: '' })), store.DEFAULT_CONFIG.projectsDir, 'an empty value is not a pre-#880 file');
+      assert.equal(read('not json'), store.DEFAULT_CONFIG.projectsDir, 'an unreadable file falls back to the shipped default');
+      assert.equal(
+        runShellFn('/Users/tester', `tcc_protected_path "$(expand_tilde "${store.LEGACY_PROJECTS_DIR}")" && echo YES || echo NO`),
+        'YES',
+        'so the keyless install still gets the protected-folder note'
+      );
     });
 
     it('warns that the install can SUCCEED and the server still stop responding', () => {

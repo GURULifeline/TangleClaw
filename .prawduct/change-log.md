@@ -133,6 +133,26 @@ PM dispatch (Medusa 93e011e0), Architect ruling (011fef17) and corrections (6c0b
 
 **Not done, by ruling.** v5.30.0 is not re-judged. RM09's monitoring layer stays outside the repo (#2079).
 
+## 2026-09-28 — New installs default the projects directory to ~/Projects (#880)
+
+<!-- prawduct: type=feature | scope=default-projects-dir-880 -->
+
+The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-projects-dir.md` (local, not tracked).
+
+**Problem.** The shipped `projectsDir` was `~/Documents/Projects`, under a macOS TCC-protected folder. The setup wizard cautions on protected paths by shape alone, so every fresh Mac opened the wizard with a caution about its own pre-filled value.
+
+**The change.**
+- The default is `~/Projects`. The Create-it offer makes it, and existing installs keep their persisted value.
+- The new `lib/tcc-folders.js` owns the protected-folder list and prose. `server.js` builds `config.protectedRoots` from it, and the server-side messages read it.
+- Hand copies that cannot import it are held by `test/tcc-folders.test.js`: the wizard's caution, the EACCES hint, `install.sh`'s `case` arms, and the default's install.sh and browser fallbacks. The installer's default check now derives from `DEFAULT_CONFIG` instead of a literal.
+- #880 said the wizard held its own folder list. It no longer did (it reads `config.protectedRoots`); the real duplicates were server-side prose.
+
+**Review.** The first Critic pass (rev-20260928T000124Z-734ba1ca) found 0 blocking. Its observations were fixed: a helper only tests called was replaced by the roots builder the server uses; an unpinned third copy; two wrong comments. The verify pass (rev-20260928T000637Z-0f0b6f70) was clean.
+
+**Evidence.** The full suite is green on the final tree, after the merges of main (the last clean run is recorded tree-valid in the evidence store). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
+
+**Added 2026-10-06, before merge.** Review found "existing installs keep their directory" asserted but unpinned: `config.load()` merges defaults, so a `config.json` with no `projectsDir` key would have moved to `~/Projects` on upgrade, with its projects still on disk and none listed. `load()` now gives a file that exists but lacks the key `LEGACY_PROJECTS_DIR` (`~/Documents/Projects`), and the next save writes it out. Only a missing file, a new install, gets the new default. `deploy/install.sh` read the same file with the new default as its keyless fallback, which would have silenced its protected-folder note for that same install; it now answers the way the server does. Tests: `test/projects-dir-upgrade.test.js`, and an executed case in `test/install-sh.test.js` that runs the installer's inline reader against real files. One assertion there changed on purpose: it refused any `Documents/Projects` in the block, and now allows exactly one, the keyless fallback. Removing either guard fails two tests. `public/` is unchanged from the diff the Architect cleared under A24.
+
 ## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
 
 <!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->

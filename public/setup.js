@@ -192,7 +192,7 @@ function checkSetupWizard() {
  * Show the wizard overlay.
  */
 function showWizard() {
-  wizard.projectsDir = state.config ? state.config.projectsDir || '~/Documents/Projects' : '~/Documents/Projects';
+  wizard.projectsDir = state.config ? state.config.projectsDir || '~/Projects' : '~/Projects';
   wizard.engines = state.engines || [];
   // Seed from config, but never carry in a default this machine can't run — the
   // shipped config default is 'claude', which on a Codex-only machine had the
@@ -435,7 +435,7 @@ function renderProjectsDir(body) {
         <label class="form-label" for="setupProjectsDir">Projects Root</label>
         <input type="text" class="form-input" id="setupProjectsDir"
                value="${esc(wizard.projectsDir)}"
-               placeholder="~/Documents/Projects"
+               placeholder="~/Projects"
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         <div class="form-hint">Full path or ~ for home directory</div>
         <div id="setupDirProtected" class="form-error hidden" role="status"></div>
@@ -554,8 +554,7 @@ async function wizardValidateDir() {
     err.classList.remove('hidden');
     // A folder that is merely ABSENT is the one failure the operator can fix
     // from here, in one click — and it is the one a stock Mac hits first, since
-    // the pre-filled ~/Documents/Projects does not exist until someone makes
-    // it. Telling them it is missing and stopping is accurate and useless.
+    // the pre-filled default does not exist until someone makes it. Telling them it is missing and stopping is accurate and useless.
     _showCreateDirOffer(dir, api.lastErrorCode === 'DIR_MISSING');
     return;
   }

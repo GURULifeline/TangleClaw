@@ -111,7 +111,8 @@ an Architect, some Builders, a PR reviewer — on a machine that already runs Ta
 ## Phase 2 — the agents
 
 4. Resolve the configured projects directory, then clone one per role into it. Do not assume
-   `~/Documents/Projects` — that is only the default, and the store records a tilde it does not
+   `~/Projects` — that is only the default for a new install (older installs may have
+   `~/Documents/Projects`), and the store records a tilde it does not
    expand for you:
 
    ```sh
