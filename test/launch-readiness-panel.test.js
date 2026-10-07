@@ -48,9 +48,10 @@ function liftFunction(src, decl) {
 /**
  * Render the panel for a list of sequences.
  * @param {object[]} sequences - Rows as `GET /api/launch-sequences` returns them
+ * @param {object} [opts] - The renderer's options, as the refresh cycle passes them
  * @returns {string} The container's markup
  */
-function render(sequences) {
+function render(sequences, opts) {
   const { doc } = makeDocument(['projLaunchSequencesList']);
   const ctx = { document: doc, window: {} };
   vm.createContext(ctx);
@@ -71,7 +72,8 @@ function render(sequences) {
   vm.runInContext(liftFunction(UI_SRC, 'function launchStartupControlHtml'), ctx);
   vm.runInContext(liftFunction(UI_SRC, 'function launchReconciliationControlHtml'), ctx);
   vm.runInContext(liftFunction(UI_SRC, 'function renderProjectLaunchSequences'), ctx);
-  ctx.renderProjectLaunchSequences(sequences);
+  if (opts === undefined) ctx.renderProjectLaunchSequences(sequences);
+  else ctx.renderProjectLaunchSequences(sequences, opts);
   return doc.getElementById('projLaunchSequencesList').innerHTML;
 }
 
@@ -542,6 +544,50 @@ describe('the launch-readiness panel renders (Train 21, car 21.5)', () => {
         /data-launch-reconciliation/, 'nor has a launch that got no sequence');
     });
 
+    it('offers no button on an install with no login, and says why', () => {
+      const html = render([row({ readyAt: '2026-10-06 19:05:00' })], { noLogin: true });
+      assert.doesNotMatch(html, /data-launch-reconciliation/, 'a control the server will refuse is not offered');
+      assert.doesNotMatch(html, /<button[^>]*>Read the session/);
+      assert.match(html, /cannot be read on an install with no login/);
+      assert.match(html, /Turn the login on/);
+      assert.doesNotMatch(render([row()], { noLogin: true }), /cannot be read on an install/,
+        'and a launch that has not attested gets neither');
+    });
+
+    it('offers the button unless the server said the gate is open: unknown is not "no login"', () => {
+      for (const opts of [{}, { noLogin: false }, { noLogin: undefined }, { noLogin: 'yes' }]) {
+        assert.match(render([row({ readyAt: '2026-10-06 19:05:00' })], opts), /data-launch-reconciliation="9"/,
+          JSON.stringify(opts));
+      }
+    });
+
+    it('the refresh cycle tells the renderer whether the install has a login, from the server\'s own word', async () => {
+      /**
+       * Run one refresh with a given `/api/auth/me` answer and report the options the renderer got.
+       * @param {object|null} me - What `/api/auth/me` answers with
+       * @returns {Promise<object>} The renderer's second argument
+       */
+      async function refreshWith(me) {
+        const { doc } = makeDocument(['projLaunchSequencesList']);
+        const ctx = { document: doc, window: {} };
+        vm.createContext(ctx);
+        let got;
+        ctx.api = async (url) => (url === '/api/auth/me' ? me : { sequences: [row({ readyAt: '2026-10-06 19:05:00' })] });
+        ctx.projectRulesTargetId = 7;
+        ctx.renderProjectLaunchSequences = (_sequences, opts) => { got = opts; };
+        ctx.wireLaunchRecoveryClears = () => {};
+        ctx.wireLaunchReconciliationReads = () => {};
+        ctx.wireStartupFires = () => {};
+        vm.runInContext(liftFunction(UI_SRC, 'async function refreshProjectLaunchSequences'), ctx);
+        assert.equal(await ctx.refreshProjectLaunchSequences(7), true);
+        return got;
+      }
+      assert.deepEqual({ ...(await refreshWith({ gateState: 'open', openInstallToken: 'page-token' })) }, { noLogin: true });
+      assert.deepEqual({ ...(await refreshWith({ gateState: 'armed', authenticated: true, openInstallToken: null })) }, { noLogin: false });
+      assert.deepEqual({ ...(await refreshWith(null)) }, { noLogin: false },
+        'a read that failed leaves it unknown, and the server still decides on the click');
+    });
+
     it('never renders the text with the list, whatever a row carries', () => {
       // The list comes from a route every caller may read. If a row ever did
       // carry the text, the panel must still not show it unasked.
@@ -683,11 +729,10 @@ describe('the launch-readiness panel renders (Train 21, car 21.5)', () => {
       assert.deepEqual(JSON.parse(post.fetchOpts.body), { sessionId: 42, sequenceId: 9 });
     });
 
-    it('carries the page token of an open install, and none where none was issued', async () => {
-      const open = (await clickRead({ openInstallToken: 'page-token' })).calls.find((c) => c.url.includes('/launch/reconciliation'));
-      assert.equal(open.fetchOpts.headers['X-TC-Open-Token'], 'page-token');
-      const armed = (await clickRead({ openInstallToken: null })).calls.find((c) => c.url.includes('/launch/reconciliation'));
-      assert.equal(armed.fetchOpts.headers['X-TC-Open-Token'], undefined);
+    it('sends no page token and makes no other request: the route serves a signed-in operator only', async () => {
+      const { calls } = await clickRead({ openInstallToken: 'page-token' });
+      assert.deepEqual(calls.map((c) => c.url), ['/api/sessions/my%20project/launch/reconciliation']);
+      assert.deepEqual(Object.keys(calls[0].fetchOpts.headers), ['Content-Type']);
     });
 
     it('renders the answer into that launch\'s own output and leaves the button usable', async () => {

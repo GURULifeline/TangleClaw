@@ -7949,7 +7949,8 @@ registerMedusaRoutes('/api/master/medusa', resolveMasterMedusaTarget);
  * (the launch recovery clear, the startup prompt), so the proof cannot drift
  * between them. The launch reconciliation read uses it too, although it
  * changes nothing: what it serves is for the operator alone, and it is sent as
- * a POST so that this proof applies to it whole.
+ * a POST so that this proof applies to it whole. That route serves only an
+ * `operator-verified` result and refuses the open-install one.
  *
  * The branches key on the GATE STATE first, never on "is there a
  * session". An `armed` install with a failed authentication has no
@@ -8168,9 +8169,13 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
 // so it is served to the operator and to nobody else: one session reading
 // another's would be a channel between agents that no operator sees. That is
 // why it has a route of its own and is absent from `GET /api/launch-sequences`,
-// which every caller class may read. "Nobody else" is as strong as the install's
-// gate: with no login the proof below is of a request's shape, not of a person,
-// and a local process that imitates the dashboard is served (ADR 0017 R3b).
+// which every caller class may read.
+//
+// It is refused outright on an install with no enabled login (ADR 0017 R3b).
+// There the proof below is of a request's SHAPE — same-origin, browser-shaped,
+// carrying a page token — and a session on this machine can produce that
+// shape, so it cannot establish that the reader is the operator. Only a
+// reader the proof names `operator-verified` is served.
 //
 // A POST although it changes nothing. The operator proof is the recovery
 // clear's, branch for branch, and on an armed install that proof asserts the
@@ -8179,6 +8184,9 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
 // drift from the first.
 route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params, body) => {
   const refusal = 'Refused a launch reconciliation read';
+  const noLoginReadback = 'This install has no login, so a session\'s reconciliation cannot be read here: '
+    + 'nothing would establish that the reader is the operator. Turn the login on, sign in, and read it '
+    + 'from the Launch readiness panel.';
   const proof = _requireOperatorWrite(req, res, {
     logEvent: refusal,
     logContext: { project: params.project },
@@ -8187,13 +8195,19 @@ route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params,
     unauthenticated: 'Sign in to read a launch reconciliation: this install requires a login, and a session\'s '
       + 'reconciliation is served to the operator only.',
     machineClient: 'A session\'s reconciliation is served to the operator only, and a local process is not one. '
-      + 'Read it from the Launch readiness panel on the dashboard.',
-    openToken: 'This install has no login, so a reconciliation read must carry the anti-forgery token its '
-      + 'dashboard was issued. Reload the dashboard and try again.',
+      + noLoginReadback,
+    openToken: noLoginReadback,
     gateUnsupported: (gateState) =>
       `A launch reconciliation cannot be read while the login gate is "${gateState}". Resolve the gate first.`
   });
   if (!proof) return;
+  // Keyed on what the proof established, not on the gate state that led to it:
+  // any clearance other than a verified operator is refused, so a clearance
+  // added to the proof later is refused here until someone decides otherwise.
+  if (proof.clearance !== 'operator-verified') {
+    log.warn(refusal, { code: 'LOGIN_GATE_REQUIRED', project: params.project, readerProof: proof.clearance });
+    return errorResponse(res, 403, noLoginReadback, 'LOGIN_GATE_REQUIRED');
+  }
 
   const sessionId = Number(body && body.sessionId);
   const sequenceId = Number(body && body.sequenceId);

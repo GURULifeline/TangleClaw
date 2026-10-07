@@ -224,16 +224,23 @@ its own attestation. The Architect ruled that an oversight and made closing it a
 
 `POST /api/sessions/:project/launch/reconciliation` returns the stored text with the launch it
 belongs to: the sequence, the revision the attestation was accepted against, when it was accepted,
-the digest of the accepted attestation, the preflight verdict and how the recovery was cleared. Three
+the digest of the accepted attestation, the preflight verdict and how the recovery was cleared. Four
 properties are the ruling, and each is held by a test:
 
-- **Operator only.** The route proves the operator with the recovery clear's own function, so the two
-  cannot drift. It is a `POST` although it changes nothing, because that proof asserts the CSRF token
-  on an install with a login, and the dashboard sends the token only with a state-changing method. On
-  an install with a login the session that wrote the text is refused like any other session: one agent
-  reading another's reconciliation would be a channel between agents that no operator sees. On an
-  install with no login that holds only against a caller that does not imitate the dashboard (see the
-  limit below).
+- **Operator only.** The route runs the operator proof in `server.js` (`_requireOperatorWrite`) and
+  serves only a result of `operator-verified`: a signed-in session with its CSRF token. It is a `POST`
+  although it changes nothing, because that proof asserts the CSRF token and the dashboard sends the
+  token only with a state-changing method. The session that wrote the text is refused like any other
+  session: one agent reading another's reconciliation would be a channel between agents that no
+  operator sees.
+- **Refused where there is no login** (Architect, amending A83, 2026-10-06). On an install with no
+  enabled login the read is refused for every caller, the dashboard included, with
+  `403 LOGIN_GATE_REQUIRED`. Nothing on such an install identifies a person. The most a request can
+  show there is its shape (same-origin, browser-shaped, carrying a page token from
+  `GET /api/auth/me`), and a session on the same machine can produce that shape, so it cannot satisfy
+  "operator only". The refusal is keyed on the proof's result, not on the gate state that produced it,
+  so any future result other than a verified operator is refused too. The panel shows a line in place
+  of the button on such an install.
 - **Nowhere else.** The text is not added to `GET /api/launch-sequences`, which every caller may read,
   nor to `tc start status`, `tc start review` or the activity log. A dedicated route was chosen over an
   operator-only field on that list because the list has no caller check to get wrong while the text is
@@ -246,13 +253,13 @@ properties are the ruling, and each is held by a test:
 The read writes nothing: the READY artifact, its digest and the recovery columns are as they were, and
 no activity event is recorded.
 
-**The limit, stated so nobody reads "operator only" as more than it is.** On an install with no login
-nothing identifies a person. What the route proves there is the shape of the request: same-origin,
-browser-shaped, carrying a page token. A process on the machine that sends that shape with a token it
-fetched from `GET /api/auth/me` is served, and a session is such a process. So on an open install the
-channel between agents is narrowed to callers willing to imitate the dashboard, and is not closed.
-Every operator-only route has this limit; it matters more here because the thing served is one agent's
-text. A test records it (`test/launch-reconciliation-readback.test.js`), and only a login closes it.
+**What this does not settle.** The first version of this route served the request-shape proof on an
+install with no login, and its review showed a local process could read the text that way; the
+Architect ruled that shape cannot stand in for an operator here. The ruling is about this route. That
+the recovery clear accepts the same shape on such an install, recording `open-install-unverified`, is
+not a precedent for the read: the Architect named it a separate question, and it is not decided here.
+A consequence carried to the default flip: `advisory` is not to become the effective default on an
+install with no login, where the operator could not read what a session reconciled.
 
 ### #1650 — a preflight that could not run must not grant READY
 

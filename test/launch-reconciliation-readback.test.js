@@ -7,8 +7,9 @@
  * advisory mode it is what clears the launch's recovery. This route is the one
  * place that text leaves the store, and it leaves for the operator only. So
  * the property under test is mostly a negative one: every caller that is not
- * the operator is refused, by the same branch order the recovery clear has,
- * and no refusal and no other surface carries the text.
+ * a signed-in operator is refused, and no refusal and no other surface carries
+ * the text. That includes everyone on an install with no login, where a
+ * request can show only its shape and a session can produce that shape.
  *
  * The text is a sentinel string, so "does not carry it" is a substring check
  * on whole response bodies rather than a check of the fields somebody thought
@@ -258,6 +259,16 @@ describe('the launch reconciliation readback (#1937)', () => {
   }
 
   /**
+   * Turn the login on and sign in: the one caller the route serves.
+   * @returns {Promise<object>} The headers a signed-in operator's browser sends
+   */
+  async function asOperator() {
+    arm();
+    const { cookie, csrf } = await signIn();
+    return { cookie, 'x-csrf-token': csrf };
+  }
+
+  /**
    * The token an open install's dashboard would have been issued.
    * @returns {Promise<string>}
    */
@@ -293,9 +304,9 @@ describe('the launch reconciliation readback (#1937)', () => {
   });
 
   describe('what the operator reads', () => {
-    it('reads the text with the launch it belongs to, on an open install with the page token', async () => {
+    it('reads the text with the launch it belongs to, as a signed-in operator', async () => {
       const { project, sequence, body } = reconciled();
-      const res = await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': await pageToken() } });
+      const res = await send('POST', readUrl(project), { body, headers: await asOperator() });
       assert.equal(res.statusCode, 200, res.body);
       assert.deepEqual(json(res), {
         schema: launchSequence.RECONCILIATION_READBACK_SCHEMA,
@@ -320,15 +331,6 @@ describe('the launch reconciliation readback (#1937)', () => {
         'and none of those facts is an empty stand-in');
     });
 
-    it('reads it as a signed-in operator on an armed install', async () => {
-      const { project, body } = reconciled();
-      arm();
-      const { cookie, csrf } = await signIn();
-      const res = await send('POST', readUrl(project), { body, headers: { cookie, 'x-csrf-token': csrf } });
-      assert.equal(res.statusCode, 200, res.body);
-      assert.equal(json(res).reconciliation, RECONCILIATION);
-    });
-
     it('answers null, not an empty text, for an attestation that carried no reconciliation', async () => {
       const fixture = launched({ damaged: false });
       ackAll(fixture.id);
@@ -337,9 +339,7 @@ describe('the launch reconciliation readback (#1937)', () => {
         artifact: { schema: 'tc.ready/1', preflightVerdict: fixture.sequence.preflight.verdict, proposedFirstAction: 'start' }
       });
       assert.equal(answer.status, 200, answer.body.error);
-      const res = await send('POST', readUrl(fixture.project), {
-        body: fixture.body, headers: { 'x-tc-open-token': await pageToken() }
-      });
+      const res = await send('POST', readUrl(fixture.project), { body: fixture.body, headers: await asOperator() });
       assert.equal(res.statusCode, 200, res.body);
       assert.equal(json(res).reconciliation, null);
       assert.equal(json(res).recovery.state, 'none');
@@ -364,14 +364,71 @@ describe('the launch reconciliation readback (#1937)', () => {
         }
       });
       assert.equal(answer.status, 200, answer.body.error);
-      const read = json(await send('POST', readUrl(fixture.project), { body: fixture.body, headers: { 'x-tc-open-token': token } }));
+      const res = await send('POST', readUrl(fixture.project), { body: fixture.body, headers: await asOperator() });
+      assert.equal(res.statusCode, 200, res.body);
+      const read = json(res);
       assert.equal(read.recovery.clearance, 'open-install-unverified');
       assert.equal(read.recovery.mode, 'operator');
       assert.equal(read.provenance, 'agent-authored-unverified');
     });
   });
 
-  describe('open install: who is refused', () => {
+  describe('an install with no login: nobody is served', () => {
+    // There is nothing on such an install that identifies a person. The most
+    // the operator proof can establish is the SHAPE of a request, and a session
+    // on the same machine can produce that shape, so the route serves none of
+    // them. The two cases that matter most come first: the dashboard itself,
+    // and a local process imitating it.
+    it('refuses the dashboard\'s own request, page token and all, and says a login is what is missing', async () => {
+      const { project, body } = reconciled();
+      const res = await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': await pageToken() } });
+      assertRefused(res, 403, 'LOGIN_GATE_REQUIRED', 'the dashboard on an open install');
+      assert.match(json(res).error, /no login/);
+      assert.match(json(res).error, /Turn the login on/);
+    });
+
+    it('refuses a local process that imitates the dashboard, the author\'s own session included', async () => {
+      // The request the earlier design served: browser-shaped, same-origin, a
+      // page token fetched from `/api/auth/me`. Bound headers or not, it is refused.
+      const mine = reconciled();
+      const other = launched({ damaged: false });
+      const token = await pageToken();
+      for (const [who, extra] of [
+        ['an unbound imitation', {}],
+        ['the author imitating the dashboard', boundHeaders(mine)],
+        ['another session imitating the dashboard', boundHeaders(other)],
+        ['an imitation that also claims the dashboard header', { 'x-tangleclaw-client': 'dashboard' }]
+      ]) {
+        assertRefused(
+          await send('POST', readUrl(mine.project), { body: mine.body, headers: { ...extra, 'x-tc-open-token': token } }),
+          403, 'LOGIN_GATE_REQUIRED', who);
+      }
+    });
+
+    it('refuses the recovery clear\'s clearance by name: only a verified operator is served', async () => {
+      // The clear accepts this same request and records `open-install-unverified`.
+      // The read is keyed on the proof's result, so that result is refused here
+      // while the clear goes on working as it did.
+      const fixture = launched({ recoveryMode: 'operator' });
+      const token = await pageToken();
+      const clear = await send('POST', `/api/sessions/${encodeURIComponent(fixture.project.name)}/launch/recovery-clear`, {
+        body: { ...fixture.body, recoveryRevision: fixture.sequence.recoveryRevision }, headers: { 'x-tc-open-token': token }
+      });
+      assert.equal(clear.statusCode, 200, clear.body);
+      assert.equal(json(clear).recoveryClearance, 'open-install-unverified');
+      ackAll(fixture.id);
+      const answer = launchSequence.ready({
+        ...fixture.id,
+        artifact: {
+          schema: 'tc.ready/1', preflightVerdict: fixture.sequence.preflight.verdict,
+          proposedFirstAction: 'start', reconciliation: RECONCILIATION
+        }
+      });
+      assert.equal(answer.status, 200, answer.body.error);
+      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers: { 'x-tc-open-token': token } }),
+        403, 'LOGIN_GATE_REQUIRED', 'the same request the clear just accepted');
+    });
+
     it('refuses a read with no page token, and one with a token this process never minted', async () => {
       const { project, body } = reconciled();
       assertRefused(await send('POST', readUrl(project), { body }), 403, 'OPEN_INSTALL_TOKEN_INVALID', 'no token');
@@ -411,22 +468,6 @@ describe('the launch reconciliation readback (#1937)', () => {
       }
     });
 
-    it('cannot tell a local process that imitates the dashboard from the dashboard: the limit of an install with no login', async () => {
-      // Recorded as a test so nobody reads the refusals above as more than
-      // they are. An install with no login has nothing that identifies a
-      // person, so what the open branch proves is the SHAPE of the request: a
-      // same-origin browser request carrying a page token. A process on this
-      // machine that sends that shape, with a token it fetched itself, is
-      // served. Only a login closes this, which is what the armed block shows.
-      const mine = reconciled();
-      const token = await pageToken();
-      const res = await send('POST', readUrl(mine.project), {
-        body: mine.body, headers: { ...boundHeaders(mine), 'x-tc-open-token': token }
-      });
-      assert.equal(res.statusCode, 200, res.body);
-      assert.equal(json(res).reconciliation, RECONCILIATION);
-    });
-
     it('refuses a browser that will not vouch for its own origin', async () => {
       const { project, body } = reconciled();
       const token = await pageToken();
@@ -440,7 +481,7 @@ describe('the launch reconciliation readback (#1937)', () => {
     });
   });
 
-  describe('armed install: who is refused', () => {
+  describe('an install with a login: who is refused', () => {
     it('refuses an unauthenticated browser and never reaches the open-install branch', async () => {
       const { project, body } = reconciled();
       const token = await pageToken();
@@ -499,7 +540,7 @@ describe('the launch reconciliation readback (#1937)', () => {
       const mine = launched({ damaged: false });
       const theirs = reconciled();
       assertRefused(
-        await send('POST', readUrl(mine.project), { body: theirs.body, headers: { 'x-tc-open-token': await pageToken() } }),
+        await send('POST', readUrl(mine.project), { body: theirs.body, headers: await asOperator() }),
         404, 'NOT_FOUND', 'another project\'s launch through this project\'s path');
     });
 
@@ -507,27 +548,27 @@ describe('the launch reconciliation readback (#1937)', () => {
       const { project, body } = reconciled();
       assertRefused(
         await send('POST', readUrl(project), {
-          body: { ...body, sequenceId: body.sequenceId + 1000 }, headers: { 'x-tc-open-token': await pageToken() }
+          body: { ...body, sequenceId: body.sequenceId + 1000 }, headers: await asOperator()
         }),
         404, 'NOT_FOUND', 'a mismatched pair');
     });
 
     it('refuses a project that does not exist, and a body that names no launch', async () => {
       const { project, body } = reconciled();
-      const token = await pageToken();
+      const headers = await asOperator();
       assertRefused(await send('POST', '/api/sessions/no-such-project/launch/reconciliation', {
-        body, headers: { 'x-tc-open-token': token }
+        body, headers
       }), 404, 'NOT_FOUND', 'an unknown project');
       for (const bad of [{}, { sessionId: 'one', sequenceId: body.sequenceId }, { sessionId: body.sessionId }]) {
-        assertRefused(await send('POST', readUrl(project), { body: bad, headers: { 'x-tc-open-token': token } }),
+        assertRefused(await send('POST', readUrl(project), { body: bad, headers }),
           400, 'BAD_REQUEST', JSON.stringify(bad));
       }
     });
 
     it('refuses a launch that has not attested, including one whose attempt was rejected', async () => {
       const fixture = launched();
-      const token = await pageToken();
-      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers: { 'x-tc-open-token': token } }),
+      const headers = await asOperator();
+      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers }),
         409, 'NOT_ATTESTED', 'never attested');
       // A reconciliation offered before the steps were read is refused and stored nowhere.
       const early = launchSequence.ready({
@@ -538,7 +579,7 @@ describe('the launch reconciliation readback (#1937)', () => {
         }
       });
       assert.notEqual(early.status, 200, 'the fixture\'s attempt must really have been refused');
-      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers: { 'x-tc-open-token': token } }),
+      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers }),
         409, 'NOT_ATTESTED', 'a rejected attempt');
     });
   });
@@ -553,12 +594,14 @@ describe('the launch reconciliation readback (#1937)', () => {
 
     it('leaves the launch row and the activity log exactly as they were', async () => {
       const { project, sequence, body } = reconciled();
-      const token = await pageToken();
+      const headers = await asOperator();
       const before = rawRow(sequence.id);
       const eventsBefore = store.activity.query({ projectId: project.id, limit: 200 }).length;
       for (let i = 0; i < 2; i++) {
-        assert.equal((await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': token } })).statusCode, 200);
+        assert.equal((await send('POST', readUrl(project), { body, headers })).statusCode, 200);
       }
+      // A refused read changes nothing either.
+      assert.equal((await send('POST', readUrl(project), { body, browser: false })).statusCode, 401);
       assert.deepEqual(rawRow(sequence.id), before, 'the READY artifact, its digest and the recovery columns are untouched');
       assert.equal(store.activity.query({ projectId: project.id, limit: 200 }).length, eventsBefore,
         'a read writes no activity event');
@@ -566,7 +609,7 @@ describe('the launch reconciliation readback (#1937)', () => {
 
     it('leaves a replayed attestation a duplicate with the same digest', async () => {
       const { project, sequence, id, body } = reconciled();
-      await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': await pageToken() } });
+      assert.equal((await send('POST', readUrl(project), { body, headers: await asOperator() })).statusCode, 200);
       const replay = launchSequence.ready({
         ...id,
         artifact: {
@@ -581,14 +624,15 @@ describe('the launch reconciliation readback (#1937)', () => {
 
     it('leaves an operator-mode launch held and clearable exactly as before', async () => {
       const fixture = launched({ recoveryMode: 'operator' });
-      const token = await pageToken();
-      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers: { 'x-tc-open-token': token } }),
+      const headers = await asOperator();
+      assertRefused(await send('POST', readUrl(fixture.project), { body: fixture.body, headers }),
         409, 'NOT_ATTESTED', 'a held launch');
       assert.equal(store.launchSequences.getBySession(fixture.sequence.sessionId).recovery, 'required');
       const clear = await send('POST', `/api/sessions/${encodeURIComponent(fixture.project.name)}/launch/recovery-clear`, {
-        body: { ...fixture.body, recoveryRevision: fixture.sequence.recoveryRevision }, headers: { 'x-tc-open-token': token }
+        body: { ...fixture.body, recoveryRevision: fixture.sequence.recoveryRevision }, headers
       });
       assert.equal(clear.statusCode, 200, clear.body);
+      assert.equal(json(clear).recoveryClearance, 'operator-verified');
     });
   });
 
@@ -637,14 +681,18 @@ describe('the launch reconciliation readback (#1937)', () => {
 
     it('is absent from the server log, for a read that worked and for one that was refused', async () => {
       const { project, body } = reconciled();
+      // Captured in both gate states: a refusal on an install with no login
+      // (the dashboard's own request), then a read and a refusal with one on.
       const token = await pageToken();
       const lines = [];
       const level = getLevel();
       setConsoleStream({ write: (line) => { lines.push(String(line)); } });
       setLevel('debug');
       try {
-        assert.equal((await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': token } })).statusCode, 200);
-        assert.equal((await send('POST', readUrl(project), { body, browser: false })).statusCode, 403);
+        assert.equal((await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': token } })).statusCode, 403);
+        const headers = await asOperator();
+        assert.equal((await send('POST', readUrl(project), { body, headers })).statusCode, 200);
+        assert.equal((await send('POST', readUrl(project), { body, browser: false })).statusCode, 401);
       } finally {
         setLevel(level);
         setConsoleStream(null);
