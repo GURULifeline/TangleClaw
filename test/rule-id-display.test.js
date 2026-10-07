@@ -215,8 +215,11 @@ describe('Rule #<id> on every surface (#2029)', () => {
     /** Render the list for the given rules and return its HTML. */
     function render(list) {
       const el = { innerHTML: '' };
+      // #1709: renderProjectRulesList calls renderRulesGraveyard as a free
+      // variable — lift it first and pass it in as a dep.
+      const renderRulesGraveyard = lift(UI_SRC, 'function renderRulesGraveyard(', 'retired, byId', { esc, ...labelDeps });
       const renderProjectRulesList = lift(UI_SRC, 'function renderProjectRulesList(', 'kind, rules', {
-        document: { getElementById: () => el }, esc, projectRuleShownContent: new Map(), ...labelDeps
+        document: { getElementById: () => el }, esc, projectRuleShownContent: new Map(), renderRulesGraveyard, ...labelDeps
       });
       renderProjectRulesList('startup', list);
       return el.innerHTML;
