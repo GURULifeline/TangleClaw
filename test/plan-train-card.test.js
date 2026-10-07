@@ -844,6 +844,11 @@ describe('release panels (#2165)', () => {
     });
 
     it('refuses a train identity used twice, however the number is written', () => {
+      /**
+       * A train workstream as raw JSON text, so the identity keeps the spelling given.
+       * @param {string} id - The `train` value, as it is to appear in the source.
+       * @returns {string}
+       */
       const entry = (id) => `{"kind":"train","train":${id},"title":"T","cars":[]}`;
       refusedRelease(`{"version":"5.32.0","trains":[${entry('16')},${entry('16.0')}]}`,
         /trains\[1\]\.train repeats another train in this release/);
@@ -901,6 +906,12 @@ describe('release panels (#2165)', () => {
     it('leaves a tc-train and a tc-queue block on the same page as they were', () => {
       const queue = { newDays: 14, issues: [{ issue: 9, createdAt: '2026-09-27T09:30:00Z' }] };
       const now = Date.parse('2026-09-28T00:00:00Z');
+      /**
+       * One fenced block.
+       * @param {string} info - Info string.
+       * @param {object} body - Block object.
+       * @returns {string}
+       */
       const fence = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
       const alone = [fence('tc-train', train()), fence('tc-queue', queue)].map((md) => planDocs.renderPlanBody(md, 0, { now }));
       const page = planDocs.renderPlanBody(
@@ -911,6 +922,12 @@ describe('release panels (#2165)', () => {
     });
 
     it('does not let a refused release stop the cards around it', () => {
+      /**
+       * One fenced block.
+       * @param {string} info - Info string.
+       * @param {object} body - Block object.
+       * @returns {string}
+       */
       const fence = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
       const page = planDocs.renderPlanBody([fence('tc-release', release({ version: 'v1' })), fence('tc-train', train())].join('\n\n'));
       assert.match(page, /Release block not rendered: /);
