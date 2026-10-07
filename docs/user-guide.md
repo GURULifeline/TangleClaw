@@ -702,9 +702,11 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   - `status`: one of `planned`, `ready`, `in-progress`, `blocked`, `shipped` or `sunset`, shown as a badge.
   - `owner`: the lane that owns the work, up to 60 characters, shown as **lane: name** at the end of the train's name line. Leave it out when no lane is assigned.
 
-  A car may carry `state`: `open`, `in-progress` (amber), `in-review` (purple: a pull request is open for review), `blocked` (red), `closed` (green) or `dropped` (grey and struck through: the issue was closed as not planned). It must agree with `closed`: `closed` and `dropped` need `"closed": true`, and every other state needs `"closed": false`. Without `state`, `closed` alone decides, as before, so a closed car is only drawn as dropped when the block says so. A car's state is given in words in its detail, in the card's issue table and in the legend, so colour is never the only signal.
+  A car may carry `state`: `open`, `in-progress` (amber), `in-review` (purple: a pull request is open for review), `blocked` (red), `closed` (green) or `dropped` (grey and struck through: the issue was closed as not planned). It must agree with `closed`: `closed` and `dropped` need `"closed": true`, and every other state needs `"closed": false`. Without `state`, `closed` alone decides, as before, so a closed car is only drawn as dropped when the block says so. Every car shows its state in words beside its number, for example **#2104 blocked**, so you never have to tell cars apart by colour.
 
   A dropped car is left out of the count on both sides: a train of five cars with one dropped and two closed reads **(2/4)**, and the expanded card adds **1 dropped**. A train whose cars were all dropped reads **(0/0)**.
+
+  Each car is a pill showing the issue number and its state in words, such as **#2104 blocked** or **#411 open**. A long train therefore takes more lines than a row of bare numbers would.
 
   Press a car to open its **detail**: click it, tap it, or move to it with the Tab key and press Enter or Space. Press it again to close it. Moving the pointer over a car does nothing. The detail appears in the row, directly under the line its car is on; the car you pressed stays where it is and the cars after it move down to make room. It gives the issue number and title, the car's state with what that state means (the same words as the legend), and the lane that owns the train when the block names an `owner`. A car may also carry `reason`, up to 300 characters, saying why it needs attention; the detail shows it as **Reason: …**. A car with no `title` and no `reason` still shows its number, state and meaning. Nothing in a detail is cut off, however long. Opening one car's detail does not close another's, so several can be open at once. The cars in a release panel work the same way.
 
@@ -731,12 +733,12 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 
   One mistake anywhere refuses the whole block, which is then shown as code with the reason, naming the workstream (`trains[1].cars[0].href must be an absolute https URL`). A panel is never drawn with a row missing.
 - A page with at least one train card or release panel shows a **legend** of the car states, once, directly above the first of them. You don't write it: TangleClaw adds it, so a plan never has to explain the colours itself. Each entry is a sample car with its state in words and what that state means:
-  - **open**: not started.
-  - **in progress**: under way: a draft pull request, or claimed.
-  - **in review**: written, pull request open for review.
-  - **blocked**: needs attention: merge conflicts, a failed check, or labelled blocked.
-  - **closed**: the issue is closed. This is not proof that the code is written, ready or shipped.
-  - **dropped**: closed as not planned.
+  - **open**: not started
+  - **in progress**: under way: a draft pull request, or claimed
+  - **in review**: written, pull request open for review
+  - **blocked**: needs attention: merge conflicts, a failed check, or labelled blocked
+  - **closed**: issue closed — not proof the code is written, ready or shipped
+  - **dropped**: closed as not planned
 
   A page whose only cards are the new cards queue or progress cards has no legend, and neither does a page whose train or release blocks were all refused.
 - The **new cards queue** is a fenced block tagged `tc-queue`: `{"newDays": 14, "issues": [{"issue": 1932, "title": "…", "href": "https://…", "type": "bug", "labels": ["…"], "createdAt": "2026-09-27T09:30:00Z"}]}`, with an optional `title`.
