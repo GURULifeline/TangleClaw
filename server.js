@@ -8225,7 +8225,9 @@ route('GET', '/api/launch/recovery-held', (req, res) => {
   }
   if (gateState !== authGate.GATE_STATES.ARMED) {
     if (authGate.isOpen(gateState)) {
-      return refuse(409, 'LOGIN_REQUIRED',
+      // The status and code the reconciliation read gives the same condition,
+      // so a client handles "this needs a login" once for both operator reads.
+      return refuse(403, 'LOGIN_GATE_REQUIRED',
         'This install has no login, so the launches waiting on an operator cannot be listed here: nothing would '
         + 'establish that the reader is the operator. Turn the login on and sign in. Each project\'s Launch '
         + 'readiness panel still shows its own launches.');

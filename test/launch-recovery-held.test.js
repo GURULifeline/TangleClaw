@@ -115,10 +115,22 @@ describe('the fleet recovery read (#2049)', () => {
 
     it('refuses an install with no login, with or without the dashboard\'s page token', async () => {
       const held = fixture.launchInRecovery(env);
-      assertRefused(await client.send('GET', URL), 409, 'LOGIN_REQUIRED', held);
+      assertRefused(await client.send('GET', URL), 403, 'LOGIN_GATE_REQUIRED', held);
       const token = await client.pageToken();
       assertRefused(
-        await client.send('GET', URL, { headers: { 'x-tc-open-token': token } }), 409, 'LOGIN_REQUIRED', held);
+        await client.send('GET', URL, { headers: { 'x-tc-open-token': token } }), 403, 'LOGIN_GATE_REQUIRED', held);
+    });
+
+    it('answers "this needs a login" as the reconciliation read does, so a client handles it once', async () => {
+      const held = fixture.launchInRecovery(env);
+      const token = await client.pageToken();
+      const sibling = await client.send(
+        'POST', `/api/sessions/${encodeURIComponent(held.project.name)}/launch/reconciliation`,
+        { body: { sessionId: held.binding.sessionId, sequenceId: held.binding.sequenceId },
+          headers: { 'x-tc-open-token': token } });
+      const mine = await client.send('GET', URL);
+      assert.equal(mine.statusCode, sibling.statusCode);
+      assert.equal(client.json(mine).code, client.json(sibling).code);
     });
 
     it('refuses an armed install\'s caller who is not signed in, browser or local process', async () => {
