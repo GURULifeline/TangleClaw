@@ -35,7 +35,7 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
-## 2026-10-07 — #2165: release panels, two more car states and a car-state legend on served plan pages
+## 2026-10-07 — #2165: release panels, two more car states, a car-state legend and a car info popover on served plan pages
 
 <!-- prawduct: type=feature | scope=2165-release-panel -->
 
@@ -58,6 +58,7 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 **Not verified here.** The Shared-repo board generator does not emit `tc-release` yet, so the block has been exercised with fixtures only. Operator verification `VRF-2165-C3` is pending.
 
 **Found while building.** `test/checkout-freshness.test.js` "two clones of one repository read the same observed upstream" compares two `describe()` calls whose wording carries a wall-clock age, so it fails when a second boundary falls between them. It failed once in a full run on a loaded host and passes in isolation. This branch does not touch it. Filed as #2175. A second full run on the final tree passed that test and failed one other, `test/startup-control-codex.test.js` "an accepted turn whose end no notification reports is still settled from the record by the poll", the known load race in #2057, which also passes in isolation and which this branch does not touch. Each run passed every other test. No uncontended full run was possible on the host that day, so the local evidence is recorded as degraded and CI on the PR head is the full-suite evidence.
+
 ## 2026-10-07 — #2059: version-qualified Codex pane fixtures and pinned refusals
 
 <!-- prawduct: type=debt | scope=2059-codex-wake-fixtures -->

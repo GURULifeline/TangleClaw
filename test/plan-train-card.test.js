@@ -1270,6 +1270,11 @@ describe('a car\'s info popover (#2165)', () => {
       assert.doesNotMatch(info, /Reason:|lane:/);
     });
 
+    it('draws no reason line for a reason that is only spaces', () => {
+      const info = infoOf(render(train({ cars: [{ issue: 9, closed: false, state: 'blocked', reason: '   ' }] })), 9);
+      assert.doesNotMatch(info, /Reason:/);
+    });
+
     it('shows a reason on a car in any state', () => {
       const info = infoOf(render(train({ cars: [{ issue: 3, closed: false, state: 'in-progress', reason: 'Waiting on #2' }] })), 3);
       assert.match(info, /<span class="car-info-line">Reason: Waiting on #2<\/span>$/);
