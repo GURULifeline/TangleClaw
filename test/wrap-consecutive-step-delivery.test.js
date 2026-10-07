@@ -12,7 +12,7 @@
  */
 
 const test = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 
 const aiContent = require('../lib/wrap-steps/ai-content');
 

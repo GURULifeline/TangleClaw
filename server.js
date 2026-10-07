@@ -17,6 +17,7 @@ if (Number.isFinite(_nodeMajor) && _nodeMajor < 22) {
 
 const { createLogger, setLevel, initFileLogging } = require('./lib/logger');
 const store = require('./lib/store');
+const { ruleLabel } = require('./lib/rule-label');
 
 // --- Shared Docs Watcher ---
 const sharedDocWatchers = new Map();
@@ -257,6 +258,7 @@ function refreshSharedDocWatchers() {
 
 const system = require('./lib/system');
 const systemHealth = require('./lib/system-health');
+const ptyActivity = require('./lib/pty-activity');
 const engines = require('./lib/engines');
 const { isInsideProject } = require('./lib/project-paths');
 const gitHooks = require('./lib/git-hooks');
@@ -265,13 +267,19 @@ const tmux = require('./lib/tmux');
 const projects = require('./lib/projects');
 const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
+const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
-const ciStatus = require('./lib/ci-status');
+const recoveryDefault = require('./lib/recovery-default');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
+const coordinatorRotation = require('./lib/coordinator-rotation');
+const bridgeApi = require('./lib/bridge-api');
+const bridgeGateway = require('./lib/bridge-gateway');
+const bridgeNotify = require('./lib/bridge-notify');
 const { workloadSentence } = require('./lib/ecosystem-primer');
 const workloadFleet = require('./lib/workload-fleet');
+const sessionFinalize = require('./lib/session-finalize');
 // The one live fleet activity observer (#1912, ADR 0020 §5): started with the
 // other monitors, read by the fleet surfaces, never captured from on a request.
 const activityObserver = require('./lib/activity-observer').createObserver();
@@ -291,6 +299,7 @@ const serverInfo = require('./lib/server-info');
 const behindOrigin = require('./lib/behind-origin');
 const checkoutState = require('./lib/checkout-state');
 const checkoutFreshness = require('./lib/checkout-freshness');
+const launchWarmup = require('./lib/launch-warmup');
 const checkoutFleet = require('./lib/checkout-fleet');
 const bindPolicy = require('./lib/bind-policy');
 const wrapRunRegistry = require('./lib/wrap-run-registry');
@@ -316,9 +325,10 @@ const adminCredential = require('./lib/admin-credential');
 const ttydWatcher = require('./lib/ttyd-watcher');
 const ttydAttach = require('./lib/ttyd-attach');
 const ttydBind = require('./lib/ttyd-bind');
-const wrapSentinel = require('./lib/wrap-sentinel');
+const engineErrorMonitor = require('./lib/engine-error-monitor');
 const { WRAP_STREAM_EVENTS } = require('./public/wrap-stream-events');
 const medusaWake = require('./lib/medusa-wake');
+const deliveryDisposition = require('./lib/medusa-delivery-disposition');
 const launchUnready = require('./lib/launch-unready');
 const authIdentity = require('./lib/auth-identity');
 const authSession = require('./lib/auth-session');
@@ -330,6 +340,7 @@ const openInstallToken = require('./lib/open-install-token');
 const passwordHashing = require('./lib/password');
 const sessionOwnership = require('./lib/session-ownership');
 const planDocs = require('./lib/plan-docs');
+const scorecardCache = require('./lib/scorecard-cache');
 const strandedWraps = require('./lib/stranded-wraps');
 const strandedCheck = require('./lib/stranded-check');
 const serviceToken = require('./lib/service-token');
@@ -577,7 +588,7 @@ let _gateFallbackReadFailure = null;
  * subprocess on a recovery path is cheaper than that, and it is bounded by
  * `caddy-drift`'s adapt timeout.
  *
- * The listener is read from the socket's own server, not from config: what
+ * The listener is read from the server that is bound, not from config: what
  * decides who can reach TangleClaw is the address actually bound.
  *
  * A marker or Caddyfile that exists but cannot be `stat`ed or read answers "not
@@ -585,10 +596,11 @@ let _gateFallbackReadFailure = null;
  * an honoured fallback is logged when its marker goes, so the log shows both
  * edges of a stand-down.
  *
- * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @param {net.Server|null|undefined} server - The listener the question is
+ *   asked of: a request's own, or the bound server when no request exists.
  * @returns {{ honoured: boolean, reason: string|null }}
  */
-function _gateFallback(socket) {
+function _gateFallbackForListener(server) {
   const refuseOnce = (what, err) => {
     const failure = `${what}:${err.code || err.message}`;
     if (_gateFallbackReadFailure !== failure) {
@@ -609,7 +621,6 @@ function _gateFallback(socket) {
     _gateFallbackReadFailure = null;
     return { honoured: false, reason: null };
   }
-  const server = socket && socket.server;
   const bound = server && typeof server.address === 'function' ? server.address() : null;
   const listenerAddress = bound && typeof bound === 'object' ? bound.address : null;
   const upstreamPort = bound && typeof bound === 'object' ? bound.port : null;
@@ -659,6 +670,32 @@ function _gateFallback(socket) {
   }
   _gateFallbackCache = { key, value };
   return value;
+}
+
+/**
+ * {@link _gateFallbackForListener} for a request, asked of the listener that
+ * request arrived on.
+ * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @returns {{ honoured: boolean, reason: string|null }}
+ */
+function _gateFallback(socket) {
+  return _gateFallbackForListener(socket && socket.server);
+}
+
+/**
+ * The login gate's state as a request on `server` would find it, for a caller
+ * that has no request: a launch deciding whether advisory recovery is the
+ * default (`lib/recovery-default.js`).
+ *
+ * The same four inputs `handleRequest` passes, with the fallback asked of the
+ * bound listener itself. A launch is not always inside a request, and a
+ * request's socket would say nothing a launch can rely on once it is gone.
+ * @param {net.Server} server - The bound listener
+ * @returns {() => string} A probe returning a member of `authGate.GATE_STATES`
+ */
+function _recoveryGateProbeFor(server) {
+  return () => authGate.resolveGateState(_gateConfig, store.authSessions, _gateIngress,
+    () => _gateFallbackForListener(server));
 }
 
 let _servedHostsCache = null;
@@ -905,6 +942,7 @@ function route(method, pattern, handler, options) {
   });
   routes.push({
     method: method.toUpperCase(),
+    pattern,
     regex: new RegExp(`^${regexStr}$`),
     paramNames,
     handler,
@@ -1304,7 +1342,8 @@ function servePlanPage(res, pathname) {
     file,
     relative: resolved.relative,
     modifiedAt: resolved.modifiedAt,
-    markdown
+    markdown,
+    scorecard: () => scorecardCache.readScorecardCache(scorecardCache.cachePath(store._getBasePath()))
   }));
 }
 
@@ -1465,6 +1504,9 @@ route('GET', '/api/server-info', (_req, res) => {
   // fetch, and the payload says which.
   info.liveCheckout = checkoutState.withUpstreamObservation(
     checkoutState.snapshot(serverInfo.getRepoRoot()), info.behindOrigin);
+  // #1949: which checkout this server runs from, as a digest of its real path,
+  // so release certification can prove the server is the worktree it certifies.
+  info.checkoutId = serverInfo.getCheckoutId();
   // #1678: whether a restart would load anything, for the commits the running
   // process has not loaded. Only asked when disk is known or suspected ahead.
   info.restartImpact = info.isStale === true
@@ -1476,6 +1518,14 @@ route('GET', '/api/server-info', (_req, res) => {
   } catch (err) { // prawduct:allow prawduct/broad-except -- a store error must not cost the dashboard its whole status poll
     log.warn('Could not summarize Medusa escalations', { error: err.message });
     info.medusaEscalations = null;
+  }
+  // #1978: sessions whose wakes have been held for want of an engine answer,
+  // with mail waiting — read-only evidence; no dashboard UI renders it.
+  try {
+    info.medusaWakeStalls = medusaWake.wakeStallSummary();
+  } catch (err) { // prawduct:allow prawduct/broad-except -- a monitor read must not cost the dashboard its whole status poll
+    log.warn('Could not summarize Medusa wake stalls', { error: err.message });
+    info.medusaWakeStalls = null;
   }
   jsonResponse(res, 200, info);
 });
@@ -1556,9 +1606,12 @@ route('POST', '/api/master/kill', (_req, res) => {
 
 // POST /api/master/rules/restore-defaults — replace every master Hard rule
 // with the shipped baseline (the recovery path if an edit ever weakened the
-// boundary). History survives in session_rule_versions. A live master picks
-// the change up on the next ensure (identity regeneration).
-route('POST', '/api/master/rules/restore-defaults', (_req, res) => {
+// boundary). History survives in session_rule_versions. The Master's identity
+// file is regenerated on the next ensure, but a running Master read it when it
+// was launched: the change reaches it at its next launch.
+route('POST', '/api/master/rules/restore-defaults', (req, res) => {
+  // It deletes every master rule the operator added, so it is theirs to run.
+  if (!operatorProjectCaller(req, res, 'restore the Project Master\'s default rules')) return;
   const rules = master.restoreDefaultMasterRules();
   jsonResponse(res, 200, { ok: true, rules });
 });
@@ -1755,13 +1808,7 @@ function _protectedRoots() {
   // read simply never returns (#859), which is why this is worth saying BEFORE
   // someone points the product at one of them rather than only after.
   if (process.platform !== 'darwin') return [];
-  const home = process.env.HOME || '';
-  const roots = [];
-  for (const name of ['Documents', 'Desktop', 'Downloads']) {
-    roots.push(`~/${name}`);
-    if (home) roots.push(path.join(home, name));
-  }
-  return roots;
+  return protectedRootsFor(process.env.HOME || '');
 }
 
 /**
@@ -3634,8 +3681,8 @@ route('POST', '/api/setup/generate-cert', (_req, res, _params, body) => {
 // POST /api/setup/scan — Scan a directory for existing projects
 //
 // The scan itself lives in lib/projects because it must run off the main thread
-// under a deadline: this route reads a directory the operator types in, and the
-// value the wizard pre-fills (~/Documents/Projects) is TCC-protected on macOS,
+// under a deadline: this route reads a directory the operator types in, and on
+// macOS that can be a TCC-protected folder (~/Documents and its siblings),
 // where a read does not fail — it never returns. Inline and synchronous, that
 // blocked the event loop and took the whole server down on the first click of a
 // fresh install (#859).
@@ -3657,8 +3704,8 @@ route('POST', '/api/setup/scan', async (_req, res, _params, body) => {
 
 // POST /api/setup/create-dir — Create the projects directory the operator named.
 //
-// The shipped default is ~/Documents/Projects and a stock Mac does not have it,
-// so the first thing a new install does — accept the pre-filled path, press
+// The shipped default (~/Projects) does not exist on a stock Mac, so the first
+// thing a new install does — accept the pre-filled path, press
 // Next — used to answer "Directory does not exist" and stop, with no action
 // available anywhere in the product.
 //
@@ -4396,7 +4443,10 @@ route('GET', '/api/rules/global', (_req, res) => {
 // same per-route override pattern — see `/api/audit/ingest` at the
 // 512 KB cap (`server.js:2834`) and the upload route at 15 MB
 // (`server.js:1574`).
-route('PUT', '/api/rules/global', (_req, res, _params, body) => {
+route('PUT', '/api/rules/global', (req, res, _params, body) => {
+  // The document binds every project on the install. A Builder may draft or
+  // propose its text; applying it is the operator's.
+  if (!operatorProjectCaller(req, res, 'change the global rules')) return;
   if (typeof body.content !== 'string') {
     return errorResponse(res, 400, 'content (string) is required', 'BAD_REQUEST');
   }
@@ -4405,7 +4455,10 @@ route('PUT', '/api/rules/global', (_req, res, _params, body) => {
 }, { maxBodySize: 256 * 1024 });
 
 // POST /api/rules/global/reset
-route('POST', '/api/rules/global/reset', (_req, res) => {
+route('POST', '/api/rules/global/reset', (req, res) => {
+  // A no-op today, but its intent is privileged: it stays the operator's so a
+  // future implementation inherits the gate rather than having to add one.
+  if (!operatorProjectCaller(req, res, 'reset the global rules')) return;
   const content = store.globalRules.reset();
   jsonResponse(res, 200, { content });
 });
@@ -4575,7 +4628,13 @@ route('GET', '/api/launch-sequences', (req, res) => {
       ...(readsStartupControl ? { startupControl: _startupControlForLaunch(sequence, access) } : {})
     };
   });
-  return jsonResponse(res, 200, { sequences });
+  // #1937: each row carries the mode its launch FROZE; this is the project's
+  // CURRENT setting beside them, so a reader can tell a launch that started in
+  // operator mode from a project that is operator now (the setting applies from
+  // the next launch). It is a live read, separate from any launch's frozen
+  // one. Every field is `null` for a project this install does not have: no
+  // mode is not the default mode.
+  return jsonResponse(res, 200, { sequences, ...launchSequence.projectRecoveryNow(projectId) });
 });
 
 /**
@@ -4751,6 +4810,7 @@ route('POST', '/api/tc/start/ready', (req, res, _params, body) => {
 // that launch (`lib/workload.js`). An assertion, never evidence, and it grants
 // nothing.
 route('POST', '/api/tc/workload', (req, res, _params, body) => {
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'workload-set')) return;
   const result = workload.record({ req, body });
   return jsonResponse(res, result.status, result.body);
 });
@@ -4767,6 +4827,206 @@ route('GET', '/api/tc/workload', (req, res) => {
   const project = session ? store.projects.get(session.projectId) : null;
   const lane = session ? _composedLane(session, project ? project.name : null) : null;
   return jsonResponse(res, 200, { ...result.body, ...(lane || {}) });
+});
+
+// The operator bridge's HTTP surface (ADR 0023, #2031). Three callers, each
+// with its own proof and none standing in for another; `lib/bridge-api.js`
+// holds the handlers.
+
+/** How often the operator bridge's gateway runs its pass: often enough that a route never waits long on it, rarely enough to cost nothing while idle. */
+const BRIDGE_TICK_MS = 15 * 1000;
+
+// Each route is declared in `lib/bridge-api.js` with the principal it belongs
+// to, and `bridgeApi.handle` proves that principal before the handler runs.
+// The fleet-idle notification reads the same lane composition the fleet roster
+// does, so the two cannot disagree about whether a lane is clear. Wired where
+// the routes are, not at boot, so anything that loads the server has it.
+bridgeNotify.setLaneReader(() => bridgeNotify.readLanes(_composedLane));
+// Which pane verbs the operator has switched on. Read from the bridge's own
+// settings each time a pane's instructions are written.
+require('./lib/ecosystem-primer').setSwitchReader(() => (bridgeApi.candidatesPrimed() ? ['bridge-candidates'] : []));
+
+for (const entry of bridgeApi.ROUTES) {
+  route(entry.method, entry.path, async (req, res, params, body) => {
+    const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
+    const result = await bridgeApi.handle(entry, { req, headers: req.headers, params, query, body });
+    return jsonResponse(res, result.status, result.body);
+  });
+}
+
+// Governed coordinator context rotation (#2032). A coordinator prepares its
+// own rotation with a structured checkpoint; the server fences its new
+// dispatch, types /clear, binds the one replacement thread it can prove and
+// delivers a re-entry turn; the replacement context resumes with a receipt the
+// server cross-checks before lifting the fence. Prepare, show, advance and
+// resume are bound to the caller's own verified launch, like workload; the
+// relaunch claim, abandon and the operator reads are the operator's alone.
+
+/**
+ * The caller's verified launch for a rotation route, or a refusal written to
+ * `res`.
+ * @param {object} req - The request.
+ * @param {object} res - The response.
+ * @returns {object|null} The access, or null when refused.
+ */
+function _rotationAccess(req, res) {
+  const access = sharedDocsAccess.resolveAccess(req);
+  if (access.kind === sharedDocsAccess.KINDS.PROJECT) return access;
+  const why = access.kind === sharedDocsAccess.KINDS.INVALID ? access.reason : access.kind;
+  errorResponse(res, 403, 'A coordinator rotation is prepared, read and resumed only by the session\'s own verified launch '
+    + `(x-tangleclaw-project-id and x-tangleclaw-launch-id). This caller is ${why}.`, 'ROTATION_BINDING_REQUIRED', { reason: why });
+  return null;
+}
+
+/**
+ * The engine thread a request says it came from — the header `tc` forwards
+ * from `CODEX_THREAD_ID` — or null.
+ * @param {object} req - The request.
+ * @returns {string|null}
+ */
+function _engineThread(req) {
+  const v = req.headers && req.headers['x-tangleclaw-engine-thread'];
+  return typeof v === 'string' && v ? v : null;
+}
+
+/**
+ * Apply the coordinator epoch gate (#2032, rulings A2/A11/A12) to a
+ * coordinator-authority mutation, writing the refusal to `res`.
+ * @param {object} req - The request.
+ * @param {object} res - The response.
+ * @param {number|null} projectId - The coordinator project the mutation acts for.
+ * @param {string} action - The gated action.
+ * @param {object} [extra] - `inReplyTo`, `messageIds` or `exchangeId`.
+ * @returns {boolean} True when refused.
+ */
+function coordinatorGateRefused(req, res, projectId, action, extra = {}) {
+  // Only a VERIFIED operator is exempt, by control's proof tiers: an
+  // operator-shaped request that control would not accept is judged as an
+  // unbound caller, never waved through.
+  const access = sharedDocsAccess.resolveAccess(req);
+  const operator = resolveControlCaller(req).kind === 'operator';
+  const judged = operator ? { kind: 'operator' } : (access.kind === 'operator' ? { kind: 'unbound' } : access);
+  const refusal = coordinatorRotation.gate({ projectId, access: judged, threadId: _engineThread(req), action, ...extra });
+  if (!refusal) return false;
+  log.info('Coordinator epoch gate refused a mutation', { projectId, action, code: refusal.body.code, rotationId: refusal.body.rotationId });
+  jsonResponse(res, refusal.status, refusal.body);
+  return true;
+}
+
+/**
+ * The project a caller acts for, when it is a verified project launch.
+ * @param {object} req - The request.
+ * @returns {number|null}
+ */
+function _callerProjectId(req) {
+  const access = sharedDocsAccess.resolveAccess(req);
+  return access.kind === sharedDocsAccess.KINDS.PROJECT ? access.projectId : null;
+}
+
+// POST /api/tc/rotation/prepare — `{attemptKey, checkpoint}`: begin a rotation
+// of the caller's own session and start the server's side of it.
+route('POST', '/api/tc/rotation/prepare', async (req, res, _params, body) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const result = await coordinatorRotation.prepare({ access, body });
+  if (result.status === 201 || result.status === 200) coordinatorRotation.drive(result.body.rotation.rotationId);
+  return jsonResponse(res, result.status, result.body);
+}, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
+
+// GET /api/tc/rotation — the caller's open rotation, checkpoint included (what
+// the replacement context reconciles against), or `rotation: null` when none
+// is open; `latest` is the most recent one in any state, and `generation` the
+// project's current generation.
+route('GET', '/api/tc/rotation', (req, res) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const open = coordinatorRotation.openRotation(access.projectId);
+  const channel = store.startupControlChannels.getOpenBySession(access.sessionId);
+  const channelThread = channel && channel.adapterState ? channel.adapterState.threadId || null : null;
+  const forwardedThread = _engineThread(req);
+  return jsonResponse(res, 200, {
+    rotation: coordinatorRotation.view(open, { checkpoint: true }),
+    // The most recent rotation whatever its state, so a caller that has just
+    // resumed (or lost a response) can still see where it stands.
+    latest: coordinatorRotation.view(store.coordinatorRotations.latestForProject(access.projectId)),
+    generation: store.coordinatorRotations.currentGeneration(access.projectId),
+    // Read-only binding evidence for the caller's own launch: the thread tc
+    // forwarded beside the one its control channel records. The live-Codex
+    // integration check reads it (scripts/rotation-live-check.js).
+    binding: { forwardedThread, channelThread, matches: !!forwardedThread && forwardedThread === channelThread }
+  });
+});
+
+// POST /api/tc/rotation/advance — retry the server's side of the caller's open
+// rotation after a failure it has since fixed (a busy thread, a refused clear).
+route('POST', '/api/tc/rotation/advance', async (req, res) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const open = coordinatorRotation.openRotation(access.projectId);
+  if (!open) return errorResponse(res, 404, 'This project has no rotation in progress.', 'ROTATION_NOT_FOUND');
+  const r = await coordinatorRotation.advance(open.rotationId);
+  if (r && (r.state === 'fenced' || r.state === 'rebinding')) coordinatorRotation.drive(r.rotationId);
+  return jsonResponse(res, 200, { rotation: coordinatorRotation.view(r) });
+});
+
+// POST /api/tc/rotation/resume — `{rotationId, attemptKey, generation, receipt}`:
+// the replacement context's proof. Accepted only when every fact the server can
+// observe agrees; that acceptance is what lifts the fence.
+route('POST', '/api/tc/rotation/resume', async (req, res, _params, body) => {
+  const access = _rotationAccess(req, res);
+  if (!access) return;
+  const result = await coordinatorRotation.resume({ access, body, threadId: _engineThread(req) });
+  return jsonResponse(res, result.status, result.body);
+}, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
+
+// POST /api/tc/rotation/relaunch — `{rotationId}`: the operator's explicit
+// relaunch transition for a `relaunch` rotation. Launches the successor and
+// binds exactly that session and launch to the rotation; nothing else is ever
+// claimed. Operator only.
+route('POST', '/api/tc/rotation/relaunch', async (req, res, _params, body) => {
+  const result = await coordinatorRotation.claimRelaunch({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+// GET /api/rotations — the operator's read surface for coordinator rotations
+// (ruling A13): each recent rotation's state, blocker, checkpoint digest,
+// receipt verdict and the one command that moves it. Operator only.
+route('GET', '/api/rotations', (req, res) => {
+  const caller = resolveControlCaller(req);
+  if (caller.kind !== 'operator') return errorResponse(res, 403, 'Only the operator reads every coordinator rotation.', 'OPERATOR_ONLY');
+  const rows = store.coordinatorRotations.listRecent(50);
+  return jsonResponse(res, 200, {
+    rotations: rows.map((r) => {
+      const project = store.projects.get(r.projectId);
+      return { project: project ? project.name : null, ...coordinatorRotation.view(r) };
+    })
+  });
+});
+
+// POST /api/tc/rotation/abandon — `{rotationId, reason}`: the operator ends a
+// rotation that cannot finish, lifting the fence. Operator only.
+route('POST', '/api/tc/rotation/abandon', (req, res, _params, body) => {
+  const result = coordinatorRotation.abandon({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+// Coordinator-role contracts (#2032, ruling A6a): the operator's durable
+// statement that a project is a coordinator, which a rotation's prepare
+// requires and its resume re-checks. Operator only.
+route('GET', '/api/coordinator-roles', (req, res) => {
+  const caller = resolveControlCaller(req);
+  if (caller.kind !== 'operator') return errorResponse(res, 403, 'Only the operator lists coordinator roles.', 'OPERATOR_ONLY');
+  return jsonResponse(res, 200, { roles: store.coordinatorRoles.list() });
+});
+
+route('POST', '/api/coordinator-roles', (req, res, _params, body) => {
+  const result = coordinatorRotation.grantRole({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
+});
+
+route('POST', '/api/coordinator-roles/revoke', (req, res, _params, body) => {
+  const result = coordinatorRotation.revokeRole({ caller: resolveControlCaller(req), body });
+  return jsonResponse(res, result.status, result.body);
 });
 
 // POST /api/tc/workload/narrowing — the operator narrows (or clears a
@@ -4929,7 +5189,7 @@ route('GET', '/api/tc/whoami', (req, res) => {
     {
       id: 'session-rules', enabled: !!project,
       detail: project
-        ? `durable project rules: GET/POST ${api}/api/session-rules?projectId=${project.id} (AI proposals land as status='proposed' until the operator approves)`
+        ? `durable project rules: GET/POST ${api}/api/session-rules?projectId=${project.id} (a POST needs x-tangleclaw-project-id and x-tangleclaw-launch-id; your rules land as status='proposed' until the operator approves, and only the operator changes, disables or removes a governing rule)`
         : 'unavailable: this call did not resolve to a registered project'
     },
     {
@@ -5201,7 +5461,7 @@ route('GET', '/api/tc/sessions', (_req, res) => {
  */
 function _composedLane(session, projectName) {
   try {
-    return workloadFleet.laneFor(session, { observer: activityObserver, projectName });
+    return { ...workloadFleet.laneFor(session, { observer: activityObserver, projectName }), ..._laneRotation(session) };
   } catch (err) { // prawduct:allow prawduct/broad-except -- one lane's store failure must not take the fleet roster down; it composes UNKNOWN, fail-closed, and is logged
     log.warn('workload composition failed for a lane', { sessionId: session.id, error: err.message });
     return {
@@ -5210,6 +5470,26 @@ function _composedLane(session, projectName) {
       composed: { availability: 'UNKNOWN', clearance: 'unknown', reasons: ['compose-failed'] }
     };
   }
+}
+
+/**
+ * A lane's coordinator rotation, for the fleet read (#2032, ruling A13):
+ * present while one is open, with its state, blocker, digest, receipt verdict
+ * and the one next command, so a coordinator reading `tc sessions` sees a
+ * rotating peer as exactly that.
+ * @param {object} session - The session row.
+ * @returns {{rotation?: object}}
+ */
+function _laneRotation(session) {
+  const open = coordinatorRotation.openRotation(session.projectId);
+  if (!open) return {};
+  const v = coordinatorRotation.view(open);
+  return {
+    rotation: {
+      rotationId: v.rotationId, state: v.state, mode: v.mode, generation: v.generation, checkpointDigest: v.checkpointDigest,
+      binding: v.binding, receiptVerdict: v.receiptVerdict, blocker: v.blocker, nextCommand: v.nextCommand
+    }
+  };
 }
 
 // GET /api/checkouts — the fleet's checkouts in one answer (#1678, #993): one
@@ -5276,10 +5556,49 @@ route('GET', '/api/medusa/deliveries', (req, res) => {
     if (query.limit !== undefined) options.limit = Number(query.limit);
     return jsonResponse(res, 200, { deliveries: store.medusaDeliveries.listForSession(query.sessionId, options) });
   }
-  return jsonResponse(res, 200, {
-    undelivered: store.medusaDeliveries.sessionsWithUndeliveredMail().filter(_stillHasUnhandledMail)
-  });
+  // #2086: the same rows, in the same order, each one classified, and the same
+  // items again partitioned by class. `undelivered` is still the complete list.
+  const rows = store.medusaDeliveries.sessionsWithUndeliveredMail().filter(_stillHasUnhandledMail);
+  const view = deliveryDisposition.buildView(rows, { factsFor: _deliveryFacts, monitorRunning: medusaWake.isRunning(), now: Date.now() });
+  for (const code of view.summary.unknownReasons) {
+    if (_unknownDeliveryReasons.has(code)) continue;
+    _unknownDeliveryReasons.add(code);
+    log.warn('An undelivered Medusa wake carries a reason no class is declared for; shown as configuration, to be investigated', { reason: code });
+  }
+  return jsonResponse(res, 200, view);
 });
+
+/** Reason codes already reported as having no declared class, so each is logged once. */
+const _unknownDeliveryReasons = new Set();
+
+/**
+ * What is known about the session an undelivered row belongs to (#2086), for
+ * `deliveryDisposition.buildView`. Reads the store and the wake monitor's
+ * memory; it asks tmux nothing and writes nothing.
+ *
+ * `live` is false only when something positively says so: the store has no
+ * active session under that id, or the monitor's last tick found the Master
+ * not running. Anything that could not be established is null, never false.
+ *
+ * @param {{sessionId: (string|number)}} row - A `sessionsWithUndeliveredMail` row
+ * @returns {{live: (boolean|null), restartable?: boolean, lastAssessedAt: (string|null)}}
+ */
+function _deliveryFacts(row) {
+  const key = String(row.sessionId);
+  if (/^\d+$/.test(key)) {
+    const session = store.sessions.get(Number(key));
+    const live = Boolean(session) && session.status === store.SESSION_STATUS.ACTIVE;
+    const verdict = live ? medusaWake.verdictFor(Number(key)) : null;
+    return { live, lastAssessedAt: verdict ? verdict.observedAt : null };
+  }
+  if (key === master.MASTER_MEDUSA_KEY) {
+    // The Master is one identity that stops and starts. Stopped, its mail waits
+    // for it, so it is something to start and never a historical record.
+    const verdict = medusaWake.verdictFor(key);
+    return { live: medusaWake.masterIsLive(), restartable: true, lastAssessedAt: verdict ? verdict.observedAt : null };
+  }
+  return { live: null, lastAssessedAt: null };
+}
 
 // GET /api/medusa/escalations — every open Medusa exchange the delivery
 // watchdog has escalated (#1839), oldest first: priority, age, sender and
@@ -5307,8 +5626,105 @@ function _stillHasUnhandledMail(row) {
     .some((x) => !medusaExchanges.hasFact(x.exchange_id, ['acknowledged']));
 }
 
+/**
+ * Resolve who is changing a session rule, and refuse a caller the change is
+ * not theirs to make (#2013). A startup rule governs every future session of
+ * its project, so only the operator may create a governing rule or change,
+ * disable, delete, demote, restore or approve one. A session bound to a
+ * project keeps the one role the proposal model gives it: it may propose a
+ * rule for its OWN project, and revise, withdraw or decline an AI proposal in
+ * that project while it is still a proposal. Unbound, invalid and Project Master
+ * callers change nothing.
+ *
+ * The binding is checked before the rule is looked up, so a refused caller
+ * learns nothing about the rule it named; a rule that does not exist then
+ * answers 404. Attribution comes from the verified caller, never from the
+ * request body — a body saying `changedBy: 'operator'` is a claim, and a
+ * local process can make it.
+ *
+ * The operator is recognised the way every operator-only project route
+ * recognises it (`sharedDocsAccess.resolveAccess`, #1752). Approval keeps its
+ * password on top of that, at its own route.
+ * @param {http.IncomingMessage} req - The request
+ * @param {http.ServerResponse} res - The response, written only on refusal
+ * @param {object} target - What the caller is changing
+ * @param {number} [target.ruleId] - The rule being changed; omitted for a create
+ * @param {*} [target.projectId] - For a create: the project the rule is for
+ * @param {string} [target.kind] - For a create: the rule's kind
+ * @param {boolean} target.proposalAction - Whether a bound session may do this
+ *   to a still-proposed AI rule in its own project (a create is always a proposal)
+ * @param {string} target.action - Completes "Only the operator can …"
+ * @returns {{operator: boolean, changedBy: string, rule: (object|null)}|null}
+ *   The caller, or null when the request was answered
+ */
+function sessionRuleCaller(req, res, target) {
+  const access = sharedDocsAccess.resolveAccess(req);
+  const isCreate = target.ruleId === undefined;
+  const operator = access.kind === sharedDocsAccess.KINDS.OPERATOR;
+  if (!operator) {
+    const refusal = sharedDocsAccess.projectRefusalFor(access, sharedDocsAccess.NEEDS.OWN_PROJECT);
+    if (refusal) {
+      _refuseProjectWrite(req, res, refusal, _callerLogFields(req, access));
+      return null;
+    }
+  }
+  const rule = isCreate ? null : store.sessionRules.get(target.ruleId);
+  if (!isCreate && !rule) {
+    errorResponse(res, 404, `Session rule ${target.ruleId} not found`, 'NOT_FOUND');
+    return null;
+  }
+  if (operator) return { operator: true, changedBy: 'operator', rule };
+
+  const operatorOnly = {
+    status: 403,
+    code: 'OPERATOR_ONLY',
+    message: `Only the operator can ${target.action}${rule ? ` (${ruleLabel(rule.id)})` : ''}. `
+      + 'A session may propose rules for its own project, '
+      + 'and revise, withdraw or decline AI proposals in that project while they are still proposals; approving, '
+      + 'changing or removing a rule that governs sessions is the operator\'s, from the TangleClaw dashboard.'
+  };
+  const details = { callerProjectId: access.projectId, ruleId: rule ? rule.id : null };
+  // Project Master rules have no project, so no project session owns one.
+  const masterRule = isCreate ? target.kind === 'master' : rule.kind === 'master';
+  if (masterRule) {
+    _refuseProjectWrite(req, res, operatorOnly, details);
+    return null;
+  }
+  const targetProjectId = isCreate ? target.projectId : rule.projectId;
+  // A create with no projectId falls through to the store, which answers the
+  // same 400 it gives the operator.
+  const present = targetProjectId !== undefined && targetProjectId !== null;
+  if (present && String(targetProjectId) !== String(access.projectId)) {
+    _refuseProjectWrite(req, res, {
+      status: 403,
+      code: 'OTHER_PROJECT',
+      message: 'This session is bound to another project, so it cannot change that project\'s rules. '
+        + 'A project\'s rules are proposed by that project\'s own session, or set by the operator from the '
+        + 'TangleClaw dashboard.'
+    }, { ...details, targetProjectId });
+    return null;
+  }
+  const ownProposal = isCreate
+    || (rule.status === 'proposed' && rule.createdBy === 'ai');
+  if (!target.proposalAction || !ownProposal) {
+    _refuseProjectWrite(req, res, operatorOnly, details);
+    return null;
+  }
+  return { operator: false, changedBy: 'ai', rule };
+}
+
 // POST /api/session-rules — create { content, projectId, createdBy?, kind? }
-route('POST', '/api/session-rules', (_req, res, _params, body) => {
+route('POST', '/api/session-rules', (req, res, _params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
+  const caller = sessionRuleCaller(req, res, {
+    projectId: body ? body.projectId : undefined,
+    kind: body ? body.kind : undefined,
+    proposalAction: true,
+    action: 'create a Project Master rule'
+  });
+  if (!caller) return;
   if (!body || typeof body.content !== 'string' || !body.content.trim()) {
     return errorResponse(res, 400, 'content (non-empty string) is required', 'BAD_REQUEST');
   }
@@ -5318,7 +5734,9 @@ route('POST', '/api/session-rules', (_req, res, _params, body) => {
       // Required for every kind except 'master' (singleton-scoped, projectId
       // forbidden) — the store enforces both directions with BAD_REQUEST.
       projectId: body.projectId,
-      createdBy: body.createdBy || 'operator',
+      // The operator may record an explicit author; anyone else's rule is an
+      // AI proposal whatever the body says, so it lands 'proposed'.
+      createdBy: caller.operator ? (body.createdBy || 'operator') : 'ai',
       // CC-6 (#381): 'startup' (default) | 'wrap' | 'master'. Invalid → store throws BAD_REQUEST.
       kind: body.kind,
       // SR-7K2P: optional Critic-gate attestation. Invalid → store throws BAD_REQUEST.
@@ -5353,20 +5771,31 @@ function refuseUnconfirmedBaselineEdit(rule, confirmed) {
 }
 
 // PUT /api/session-rules/:id — update { content?, enabled?, confirmBaselineEdit? }
-route('PUT', '/api/session-rules/:id', (_req, res, params, body) => {
+route('PUT', '/api/session-rules/:id', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || typeof body !== 'object') {
     return errorResponse(res, 400, 'Request body must be a JSON object', 'BAD_REQUEST');
   }
+  // A bound session may revise the text of an AI proposal in its project; enabling or
+  // disabling is never a proposal-level act.
+  const caller = sessionRuleCaller(req, res, {
+    ruleId: Number(params.id),
+    proposalAction: body.enabled === undefined,
+    action: 'change or disable a session rule'
+  });
+  if (!caller) return;
   try {
-    const existing = store.sessionRules.get(Number(params.id));
+    const existing = caller.rule;
     const weakens = body.content !== undefined || body.enabled === false || body.enabled === 0;
     if (weakens && refuseUnconfirmedBaselineEdit(existing, body.confirmBaselineEdit === true)) {
       return errorResponse(res, 400,
         'This is a shipped Master boundary rule — editing or disabling it requires confirmBaselineEdit: true (Restore defaults always recovers the baseline)',
         'CONFIRM_REQUIRED');
     }
-    const { confirmBaselineEdit, ...updates } = body;
-    const rule = store.sessionRules.update(Number(params.id), updates);
+    const { confirmBaselineEdit, changedBy: _claimedBy, ...updates } = body;
+    const rule = store.sessionRules.update(Number(params.id), { ...updates, changedBy: caller.changedBy });
     jsonResponse(res, 200, rule);
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
@@ -5382,15 +5811,25 @@ route('PUT', '/api/session-rules/:id', (_req, res, params, body) => {
 // DELETE /api/session-rules/:id — ?confirm=true required for shipped Master
 // baseline rules (see refuseUnconfirmedBaselineEdit)
 route('DELETE', '/api/session-rules/:id', (req, res, params) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
+  // A bound session may withdraw an AI proposal in its project, and nothing else.
+  const caller = sessionRuleCaller(req, res, {
+    ruleId: Number(params.id),
+    proposalAction: true,
+    action: 'delete a session rule'
+  });
+  if (!caller) return;
   try {
     const query = parseQuery(reqUrl(req).search);
-    const existing = store.sessionRules.get(Number(params.id));
+    const existing = caller.rule;
     if (refuseUnconfirmedBaselineEdit(existing, query.confirm === 'true')) {
       return errorResponse(res, 400,
         'This is a shipped Master boundary rule — deleting it requires ?confirm=true (Restore defaults always recovers the baseline)',
         'CONFIRM_REQUIRED');
     }
-    store.sessionRules.delete(Number(params.id));
+    store.sessionRules.delete(Number(params.id), { changedBy: caller.changedBy });
     jsonResponse(res, 200, { ok: true, id: Number(params.id) });
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
@@ -5407,15 +5846,23 @@ route('DELETE', '/api/session-rules/:id', (req, res, params) => {
 // `docs/session-rules-self-improvement.md`.
 
 // POST /api/session-rules/promote — promote a learning into a rule (operator-confirmed)
-route('POST', '/api/session-rules/promote', (_req, res, _params, body) => {
+route('POST', '/api/session-rules/promote', (req, res, _params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
+  // This route mints a LIVE rule from AI-authored text, so it is the
+  // operator's, exactly as approval is: the operator as the caller, then the
+  // password. The password alone is no gate on an install that has none set.
+  const caller = sessionRuleCaller(req, res, {
+    projectId: body ? body.projectId : undefined,
+    kind: body ? body.kind : undefined,
+    proposalAction: false,
+    action: 'promote a learning into a rule that governs sessions'
+  });
+  if (!caller) return;
   if (!body || body.learningId === undefined) {
     return errorResponse(res, 400, 'learningId is required', 'BAD_REQUEST');
   }
-  // This route mints a LIVE rule from AI-authored text, so it carries the same
-  // operator gate as approval. It previously asserted operator authority simply
-  // because the route had been reached — but this API is on localhost and this
-  // project instructs in-session agents to call it, so "a request arrived" is
-  // not evidence a human sent it.
   const promoteCheck = projects.checkDeletePassword(body ? body.password : undefined);
   if (!promoteCheck.allowed) return errorResponse(res, 403, promoteCheck.error, 'FORBIDDEN');
   try {
@@ -5449,26 +5896,32 @@ route('POST', '/api/session-rules/promote', (_req, res, _params, body) => {
 // shown, and is refused (409) if the rule no longer holds it (#1053). A
 // rejection is RECORDED rather than deleted: the wrap proposes from recurring
 // learnings, so a deleted decision would simply be re-proposed at the next wrap.
-route('PUT', '/api/session-rules/:id/status', (_req, res, params, body) => {
+route('PUT', '/api/session-rules/:id/status', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || typeof body.status !== 'string') {
     return errorResponse(res, 400, 'status is required', 'BAD_REQUEST');
   }
-  // Approving a proposal grants it authority over every future session, so it
-  // is gated like TangleClaw's other privileged operations (project delete,
-  // session kill, wrap) rather than inferred from a caller-supplied field.
-  // `changedBy` is the caller describing itself — an agent that omits it is
-  // recorded as the operator — so it cannot be what decides this.
-  //
-  // Declining a proposal needs no gate: it grants nothing.
+  // Declining an AI proposal in its project is the one status change a bound
+  // session may make. Approving, and moving a governing rule out of 'active', are the
+  // operator's: either one decides what every future session is told.
+  const caller = sessionRuleCaller(req, res, {
+    ruleId: Number(params.id),
+    proposalAction: body.status !== 'active',
+    action: body.status === 'active' ? 'approve a proposed rule' : 'change the status of a governing rule'
+  });
+  if (!caller) return;
+  // Approving a proposal grants it authority over every future session, so on
+  // top of the operator caller it takes the password, like TangleClaw's other
+  // privileged operations (project delete, session kill, wrap).
   if (body.status === 'active') {
     const check = projects.checkDeletePassword(body ? body.password : undefined);
     if (!check.allowed) return errorResponse(res, 403, check.error, 'FORBIDDEN');
   }
   try {
     const rule = store.sessionRules.setStatus(Number(params.id), body.status, {
-      // Passing the gate IS the operator acting; recording anything else would
-      // misattribute a decision the gate just authorised.
-      changedBy: body.status === 'active' ? 'operator' : body.changedBy,
+      changedBy: caller.changedBy,
       changeReason: body.changeReason,
       criticGate: body.criticGate,
       // The text the operator was shown. Read only AFTER the password gate
@@ -5513,8 +5966,10 @@ route('GET', '/api/learnings', (req, res) => {
 // PUT /api/learnings/:id/tier — correct a learning's tier by hand.
 // The loop advances tiers on its own via recurrence; this is the operator's
 // override for when it advanced something they disagree with, or held back
-// something they want live now.
-route('PUT', '/api/learnings/:id/tier', (_req, res, params, body) => {
+// something they want live now. An active learning is rendered into its
+// project's session primes, so the override is the operator's alone (#2018).
+route('PUT', '/api/learnings/:id/tier', (req, res, params, body) => {
+  if (!operatorProjectCaller(req, res, 'change a learning\'s tier')) return;
   if (!body || typeof body.tier !== 'string') {
     return errorResponse(res, 400, 'tier is required', 'BAD_REQUEST');
   }
@@ -5553,12 +6008,21 @@ route('GET', '/api/session-rules/:id/versions', (_req, res, params) => {
 // the same eyes-open gate when the restore would weaken them (content change
 // or restoring a disabled snapshot) — the gate predicates must stay symmetric
 // across every path that can alter a rule, or the confirm is bypassable.
-route('POST', '/api/session-rules/:id/restore', (_req, res, params, body) => {
+route('POST', '/api/session-rules/:id/restore', (req, res, params, body) => {
+  // #2032: a coordinator bound to a rotation epoch writes rules only from its
+  // bound replacement thread, and none while it reconciles.
+  if (coordinatorGateRefused(req, res, _callerProjectId(req), 'session-rule-write')) return;
   if (!body || body.versionNo === undefined) {
     return errorResponse(res, 400, 'versionNo is required', 'BAD_REQUEST');
   }
+  const caller = sessionRuleCaller(req, res, {
+    ruleId: Number(params.id),
+    proposalAction: false,
+    action: 'restore an earlier version of a session rule'
+  });
+  if (!caller) return;
   try {
-    const existing = store.sessionRules.get(Number(params.id));
+    const existing = caller.rule;
     if (refuseUnconfirmedBaselineEdit(existing, body.confirmBaselineEdit === true)) {
       const target = store.sessionRules.listVersions(Number(params.id))
         .find((v) => v.versionNo === Number(body.versionNo));
@@ -5582,7 +6046,7 @@ route('POST', '/api/session-rules/:id/restore', (_req, res, params, body) => {
       }
     }
     // SR-7K2P: optional Critic-gate attestation. Invalid → store throws BAD_REQUEST.
-    const rule = store.sessionRules.restore(Number(params.id), Number(body.versionNo), { changedBy: body.changedBy, criticGate: body.criticGate });
+    const rule = store.sessionRules.restore(Number(params.id), Number(body.versionNo), { changedBy: caller.changedBy, criticGate: body.criticGate });
     jsonResponse(res, 200, rule);
   } catch (err) {
     if (err.code === 'NOT_FOUND') return errorResponse(res, 404, err.message, 'NOT_FOUND');
@@ -5605,6 +6069,14 @@ route('GET', '/api/system', (_req, res) => {
 route('GET', '/api/system/health', async (_req, res) => {
   const health = await systemHealth.getHealth();
   jsonResponse(res, 200, health);
+});
+
+// GET /api/system/pty-activity — terminal attaches and detaches through the
+// `/terminal` proxy since this process started (#1949). Release-candidate
+// certification reads it for its PTY-use target; `instance` changes with every
+// process, so a reader can tell a restart from a counter going backwards.
+route('GET', '/api/system/pty-activity', (_req, res) => {
+  jsonResponse(res, 200, ptyActivity.snapshot());
 });
 
 // GET /api/engines — `?refresh=1` re-reads the operator's login PATH before
@@ -6496,22 +6968,64 @@ route('POST', '/api/projects/:name/migrate-to-plugin', async (req, res, params) 
 // PATCH /api/projects/:name
 route('PATCH', '/api/projects/:name', async (req, res, params, body) => {
   // A project's own session may change its settings; only the operator may
-  // change another project's, or rename one (#1752). A rename moves the
+  // change another project's, rename one (#1752), or choose its launch recovery
+  // mode (#1937, below). A rename moves the
   // project's directory and changes the identity every live binding was
   // issued against, so it is more than that project's configuration.
   const renaming = body && typeof body === 'object' && body.name !== undefined && body.name !== params.name;
-  const admitted = renaming
-    ? operatorProjectCaller(req, res, 'rename a project')
-    : ownProjectCaller(req, res, params.name, projects.getProjectRow);
+  // The recovery mode decides whether a session may clear its own launch gate,
+  // so a session choosing it would be loosening its own gate (ADR 0017 R3a).
+  // Refused on PRESENCE, not on a change of value, and before anything is
+  // looked up or written, so no part of a request that names it is applied.
+  // The operator's decision is recorded in the server store, which outranks
+  // the copy of the value in the project's checkout.
+  const launchBlock = body && typeof body === 'object' ? body.launchSequence : undefined;
+  const choosingRecoveryMode = Boolean(launchBlock) && typeof launchBlock === 'object'
+    && Object.prototype.hasOwnProperty.call(launchBlock, 'recoveryMode');
+  let admitted;
+  if (renaming) admitted = operatorProjectCaller(req, res, 'rename a project');
+  else if (choosingRecoveryMode) admitted = operatorProjectCaller(req, res, 'choose a project\'s launch recovery mode');
+  else admitted = ownProjectCaller(req, res, params.name, projects.getProjectRow);
   if (!admitted) return;
   if (!body || typeof body !== 'object') {
     return errorResponse(res, 400, 'Request body must be a JSON object', 'BAD_REQUEST');
   }
 
-  const result = await projects.updateProject(params.name, body);
+  // The verified caller kind goes with the decision into the store. It is
+  // read here, after the operator guard above admitted the request, so the
+  // only kind that can arrive is one that guard accepts.
+  let result;
+  try {
+    result = await projects.updateProject(params.name, body, choosingRecoveryMode
+      ? { recoveryDecisionBy: sharedDocsAccess.resolveAccess(req).kind }
+      : {});
+  } catch (err) {
+    // A failure thrown after the recovery decision reached the store. The
+    // dispatcher would answer a bare 500, and the operator would take the mode
+    // for unchanged while it applies from the next launch. Any other throw is
+    // the dispatcher's, as before.
+    if (!err.recoveryDecisionSaved) throw err;
+    log.error('A project update failed after its recovery-mode decision was saved', {
+      project: params.name, error: err.message
+    });
+    return errorResponse(res, 500, `The update failed. ${err.recoveryDecisionSavedMessage}`,
+      projects.RECOVERY_DECISION_SAVED_UPDATE_FAILED, { recoveryMode: err.recoveryDecisionSaved });
+  }
 
   if (result.errors.length > 0 && !result.project) {
     const firstError = result.errors[0];
+    // A returned failure after the recovery decision reached the store (a
+    // directory rename that would not move): the same statement, on the same
+    // field, with the status the failure always had.
+    if (result.recoveryDecisionSaved) {
+      return errorResponse(res, 400, `${firstError}. ${result.recoveryDecisionSavedMessage}`,
+        projects.RECOVERY_DECISION_SAVED_UPDATE_FAILED, { recoveryMode: result.recoveryDecisionSaved });
+    }
+    // The store write of the recovery mode failed: a server fault, not a
+    // verdict on the request, and nothing was applied.
+    if (result.code === projects.RECOVERY_DECISION_NOT_SAVED) {
+      return errorResponse(res, 500, result.errors.join(' '), projects.RECOVERY_DECISION_NOT_SAVED);
+    }
     if (firstError.includes('not found')) {
       return errorResponse(res, 404, firstError, 'NOT_FOUND');
     }
@@ -6542,6 +7056,11 @@ route('PATCH', '/api/projects/:name', async (req, res, params, body) => {
   if (warnings.length > 0) {
     response.warnings = warnings;
   }
+  // Present only when the request chose the recovery mode (#1937). It is the
+  // store's answer, with `fileWritten: false` when project.json could not be
+  // written behind it, so a caller never has to parse the warning to learn
+  // which half landed.
+  if (result.recoveryMode) response.recoveryMode = result.recoveryMode;
 
   jsonResponse(res, 200, response);
 });
@@ -6609,15 +7128,10 @@ route('POST', '/api/sessions/:project', async (_req, res, params, body) => {
   // required. The TangleClaw session is the only identity source (ADR 0016 OQ2).
   const owner = (_req.tcSession && _req.tcSession.username) || null;
 
-  // #991: warm the base-branch CI verdict OFF the event loop before the
-  // synchronous launch reads it for the prime. Never rejects; a failed probe
-  // is an honest unknown in the prime, not a failed launch.
-  // #1678: the checkout line reads cached facts too; measure them now, bounded,
-  // so the prime says what the clone is on rather than "pending". Concurrent
-  // with the CI probe, so a hung network costs one wait, not two.
-  const checkoutWarm = checkoutFreshness.refreshForLaunch(project, store.config.load());
-  await ciStatus.refresh(project.path);
-  await checkoutWarm;
+  // #991, #1678: warm the CI verdict and the checkout facts OFF the event loop
+  // before the synchronous launch reads them for the prime. Shared with the
+  // operator bridge's consented launch, which must start a session the same way.
+  await launchWarmup.warmForLaunch(project);
 
   // The operator's own request carries the host they actually reached this
   // server on — better evidence than probing this machine, which names the box
@@ -6785,9 +7299,6 @@ route('GET', '/api/sessions/:project/status', (_req, res, params) => {
   if (!status) {
     return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
   }
-  // CC-7 Slice C — surface a pending typed-wrap request so the session view's
-  // status poll can open the wrap drawer (trigger parity with the Wrap button).
-  status.wrapRequested = wrapSentinel.isWrapRequested(params.project);
   jsonResponse(res, 200, status);
 });
 
@@ -7038,6 +7549,11 @@ function registerMedusaRoutes(prefix, resolve) {
   route('POST', `${prefix}/toggle`, async (_req, res, params, body) => {
     const r = resolve(params);
     if (refused(res, r, 'toggle Medusa for')) return;
+    // #2032: a stale coordinator context must not switch its switchboard off
+    // or on. While reconciling, the bound replacement may only turn it ON, and
+    // only by saying so (`enabled: true`): resuming needs a listener, but
+    // turning one off is an authority change that waits for the resume.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-listener', { enable: body && body.enabled === true })) return;
     const { target } = r;
     const isOn = medusa.getStatus(target.sessionId).state !== 'off';
     const desired = (body && typeof body.enabled === 'boolean') ? body.enabled : !isOn;
@@ -7076,19 +7592,30 @@ function registerMedusaRoutes(prefix, resolve) {
     jsonResponse(res, 200, bridge ? { ...status, bridge } : status);
   });
 
-  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). A pure
-  // read (no mark-read side effect on GET); the read panel clears unread via
-  // POST /read. No live participant → an empty inbox.
+  // GET <prefix>/messages — the received inbox (MED-2K9P Chunk 02). It never
+  // marks mail handled or clears unread. For any other reader it records a
+  // `read` fact for what it returned (#1839); for the dashboard (`operator-ui`)
+  // it records nothing, because a read fact changes the exchange: it ends
+  // awaiting-read and wake re-arms, and forbids a retract. The inbox panel
+  // calls this route and nothing else, so viewing mail never acts for the
+  // agent (#1987). No live participant → an empty inbox.
   route('GET', `${prefix}/messages`, (req, res, params) => {
     const r = resolve(params, parseQuery(reqUrl(req).search));
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
     const sessionId = r.target ? r.target.sessionId : (r.fallbackSessionId || null);
     const messages = sessionId == null ? [] : medusa.getMessages(sessionId);
     // #1839: record what was actually shown to the reader, and who read it.
-    if (r.target && messages.length > 0) {
+    // The dashboard records nothing (#1987): recordRead ignores `operator-ui`,
+    // and a browser-shaped request that is not the agent's verified launch is
+    // treated as the dashboard too, so an auth gate in fallback or unreadable
+    // (the operator unproven) does not turn viewing into an unverified read.
+    // Presenting that shape can only suppress a read record, never forge one.
+    const reader = r.target && messages.length > 0 ? exchangeCaller(req, targetProjectId(r.target), true) : null;
+    const viewing = reader && reader.kind !== 'project' && isOperatorShaped(req);
+    if (reader && !viewing) {
       try {
         medusaExchanges.recordRead(messages.map((m) => m && m.id).filter(Boolean),
-          medusa.getStatus(sessionId).workspaceId, exchangeCaller(req, targetProjectId(r.target), true));
+          medusa.getStatus(sessionId).workspaceId, reader);
       } catch (err) { // prawduct:allow prawduct/broad-except -- a failed read record must not withhold the inbox from its reader
         log.warn('Could not record Medusa reads', { sessionId: String(sessionId), error: err.message });
       }
@@ -7108,6 +7635,8 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (r.error) return errorResponse(res, r.error.status, r.error.message, r.error.code);
     const sessionId = r.target ? r.target.sessionId : null;
+    if (coordinatorGateRefused(req, res, targetProjectId(r.target), 'medusa-ack',
+      { messageIds: body && Array.isArray(body.ids) ? body.ids : null })) return;
     if (sessionId != null) {
       const ids = body && Array.isArray(body.ids) ? body.ids : null;
       if (ids) medusa.markHandled(sessionId, ids);
@@ -7215,6 +7744,10 @@ function registerMedusaRoutes(prefix, resolve) {
     if (refused(res, r, 'send from')) return;
     if (outboundRefused(res, r.target)) return;
     const senderProjectId = targetProjectId(r.target);
+    // #2032: a coordinator bound to a rotation epoch sends only from its bound
+    // replacement thread, and while reconciling only replies within its
+    // checkpoint's interval.
+    if (coordinatorGateRefused(req, res, senderProjectId, 'medusa-send', { inReplyTo: body && body.inReplyTo })) return;
     const out = await medusaSend.sendTracked({
       sessionId: r.target.sessionId, senderProjectId, caller: exchangeCaller(req, senderProjectId), body
     });
@@ -7246,6 +7779,7 @@ function registerMedusaRoutes(prefix, resolve) {
   route('POST', `${prefix}/exchanges/:exchangeId/close`, (req, res, params) => {
     const r = resolve(params);
     if (refused(res, r, 'close an exchange for')) return;
+    if (coordinatorGateRefused(req, res, targetProjectId(r.target), 'exchange-close', { exchangeId: params.exchangeId })) return;
     const row = store.medusaExchanges.get(params.exchangeId);
     if (!row) return errorResponse(res, 404, 'No exchange has that id', 'EXCHANGE_NOT_FOUND');
     const caller = exchangeCaller(req, targetProjectId(r.target));
@@ -7268,6 +7802,8 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'open a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    // #2032: opening a loop is new dispatch, gated like a send.
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.openLoop({
         sessionId: r.target.sessionId,
@@ -7295,6 +7831,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'end a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.forceDoneLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -7313,6 +7850,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'continue a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.continueLoop({ sessionId: r.target.sessionId, loopId: params.loopId, message: body && body.message });
       jsonResponse(res, 200, result);
@@ -7331,6 +7869,7 @@ function registerMedusaRoutes(prefix, resolve) {
     const r = resolve(params);
     if (refused(res, r, 'close a loop from')) return;
     if (outboundRefused(res, r.target)) return;
+    if (coordinatorGateRefused(_req, res, targetProjectId(r.target), 'medusa-loop')) return;
     try {
       const result = await medusa.closeoutLoop({ sessionId: r.target.sessionId, loopId: params.loopId });
       jsonResponse(res, 200, result);
@@ -7346,15 +7885,41 @@ registerMedusaRoutes('/api/sessions/:project/medusa', resolveProjectMedusaTarget
 // the exchange its sender opened here, or as an untracked arrival. Keyed by the
 // Hub's message id; nothing is matched by order or body.
 medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
-  if (!message || typeof message.id !== 'string') return;
-  const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
-  medusaExchanges.recordArrival({
-    hubId: message.id,
-    recipientWorkspaceId: workspaceId,
-    recipientProjectId: session ? session.projectId : null,
-    recipientSessionId: session ? sessionKey : null,
-    senderWorkspaceId: typeof message.from === 'string' ? message.from : null
-  });
+  try {
+    if (message && typeof message.id === 'string') {
+      const session = /^\d+$/.test(sessionKey) ? store.sessions.get(Number(sessionKey)) : null;
+      medusaExchanges.recordArrival({
+        hubId: message.id,
+        recipientWorkspaceId: workspaceId,
+        recipientProjectId: session ? session.projectId : null,
+        recipientSessionId: session ? sessionKey : null,
+        senderWorkspaceId: typeof message.from === 'string' ? message.from : null
+      });
+      // The operator bridge's gateway is the one listener that is not a session:
+      // what arrives for it is a held reply or nothing (ADR 0023).
+      if (sessionKey === bridgeGateway.GATEWAY_KEY) {
+        try {
+          bridgeGateway.drainInbox();
+        } catch (err) {
+          log.warn('Operator bridge could not process an arrival', { error: err.message });
+        }
+      }
+    }
+  } finally {
+    // #2086: mail has arrived, so the wake monitor looks at this session now
+    // and not up to an interval later. After the arrival is recorded, so the
+    // look's verdict lands on an exchange that exists; and whether or not the
+    // record could be written, because the listener holds the mail either way.
+    // The look runs on a later turn of the event loop and passes every wake
+    // gate. Asking cannot fail the arrival: the request is contained here.
+    // For the bridge gateway's key there is no session, so the look finds
+    // nothing to look at and does nothing.
+    try {
+      medusaWake.requestScan(sessionKey, 'mail-arrived');
+    } catch (err) {
+      log.warn('Could not ask the wake monitor for a scan', { sessionId: sessionKey, error: err.message });
+    }
+  }
 });
 
 // ── Control state (#1861): durable HOLD / RELEASE / STOP ──
@@ -7368,10 +7933,14 @@ medusa.setArrivalObserver(({ sessionKey, workspaceId, message }) => {
  * @param {string} method - HTTP method
  * @param {string} pattern - Route pattern
  * @param {(req: object, params: object, body: object) => {status: number, body: object, notify: (object|null)}} fn - Handler
+ * @param {string|null} [gatedAction] - The coordinator epoch gate action this route is (#2032), or null
  * @returns {void}
  */
-function controlRoute(method, pattern, fn) {
+function controlRoute(method, pattern, fn, gatedAction = null) {
   route(method, pattern, (req, res, params, body) => {
+    // #2032: a coordinator bound to a rotation epoch issues control only from
+    // its bound replacement thread; while reconciling, only the ack.
+    if (gatedAction && coordinatorGateRefused(req, res, _callerProjectId(req), gatedAction)) return;
     let out;
     try {
       out = fn(req, params, body);
@@ -7388,14 +7957,14 @@ function controlRoute(method, pattern, fn) {
 }
 
 controlRoute('GET', '/api/control/assignments', (req) => controlApi.listOpen(req));
-controlRoute('POST', '/api/control/assignments', (req, _params, body) => controlApi.createAssignment(req, body));
+controlRoute('POST', '/api/control/assignments', (req, _params, body) => controlApi.createAssignment(req, body), 'control-mutate');
 controlRoute('GET', '/api/control/assignments/:id', (req, params) => controlApi.getStatus(req, params));
-controlRoute('POST', '/api/control/assignments/:id/hold', (req, params, body) => controlApi.holdAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/release', (req, params, body) => controlApi.releaseAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/stop', (req, params, body) => controlApi.stopAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/close', (req, params, body) => controlApi.closeAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/ack', (req, params, body) => controlApi.ackAssignment(req, params, body));
-controlRoute('POST', '/api/control/assignments/:id/exchange-closed', (req, params, body) => controlApi.closeExchange(req, params, body));
+controlRoute('POST', '/api/control/assignments/:id/hold', (req, params, body) => controlApi.holdAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/release', (req, params, body) => controlApi.releaseAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/stop', (req, params, body) => controlApi.stopAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/close', (req, params, body) => controlApi.closeAssignment(req, params, body), 'control-mutate');
+controlRoute('POST', '/api/control/assignments/:id/ack', (req, params, body) => controlApi.ackAssignment(req, params, body), 'control-ack');
+controlRoute('POST', '/api/control/assignments/:id/exchange-closed', (req, params, body) => controlApi.closeExchange(req, params, body), 'control-mutate');
 controlRoute('GET', '/api/control/mine', (req) => controlApi.mine(req));
 controlRoute('GET', '/api/control/check', (req) => controlApi.check(parseQuery(reqUrl(req).search)));
 // The Master's mount (#996). Deliberately the SAME family rather than a subset:
@@ -7408,7 +7977,12 @@ registerMedusaRoutes('/api/master/medusa', resolveMasterMedusaTarget);
  *
  * One implementation for every write that records a decision as an operator's
  * (the launch recovery clear, the startup prompt), so the proof cannot drift
- * between them. The branches key on the GATE STATE first, never on "is there a
+ * between them. The launch reconciliation read uses it too, although it
+ * changes nothing: what it serves is for the operator alone, and it is sent as
+ * a POST so that this proof applies to it whole. That route serves only an
+ * `operator-verified` result and refuses the open-install one.
+ *
+ * The branches key on the GATE STATE first, never on "is there a
  * session". An `armed` install with a failed authentication has no
  * `req.tcSession`, and the order below is what keeps that request from falling
  * through to the open-install branch and being honoured as an anonymous
@@ -7616,6 +8190,94 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
   });
 });
 
+// POST /api/sessions/:project/launch/reconciliation — the operator reads the
+// reconciliation a session wrote into its READY attestation (#1937).
+// Body: {sessionId, sequenceId}
+//
+// The text is the session's own account of why it may proceed, and in advisory
+// mode it is what cleared the launch's recovery. It is an agent's assertion,
+// so it is served to the operator and to nobody else: one session reading
+// another's would be a channel between agents that no operator sees. That is
+// why it has a route of its own and is absent from `GET /api/launch-sequences`,
+// which every caller class may read.
+//
+// It is refused outright on an install with no enabled login (ADR 0017 R3b).
+// There the proof below is of a request's SHAPE — same-origin, browser-shaped,
+// carrying a page token — and a session on this machine can produce that
+// shape, so it cannot establish that the reader is the operator. Only a
+// reader the proof names `operator-verified` is served.
+//
+// A POST although it changes nothing. The operator proof is the recovery
+// clear's, branch for branch, and on an armed install that proof asserts the
+// CSRF token, which the dashboard sends only with a state-changing method. A
+// GET would have needed a second proof, and a second proof is one that can
+// drift from the first.
+route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params, body) => {
+  const refusal = 'Refused a launch reconciliation read';
+  const noLoginReadback = 'This install has no login, so a session\'s reconciliation cannot be read here: '
+    + 'nothing would establish that the reader is the operator. Turn the login on, sign in, and read it '
+    + 'from the Launch readiness panel.';
+  const proof = _requireOperatorWrite(req, res, {
+    logEvent: refusal,
+    logContext: { project: params.project },
+    fallbackAction: 'read a launch reconciliation',
+    sameOriginWhat: 'A launch reconciliation read',
+    unauthenticated: 'Sign in to read a launch reconciliation: this install requires a login, and a session\'s '
+      + 'reconciliation is served to the operator only.',
+    machineClient: 'A session\'s reconciliation is served to the operator only, and a local process is not one. '
+      + noLoginReadback,
+    openToken: noLoginReadback,
+    gateUnsupported: (gateState) =>
+      `A launch reconciliation cannot be read while the login gate is "${gateState}". Resolve the gate first.`
+  });
+  if (!proof) return;
+  // Keyed on what the proof established, not on the gate state that led to it:
+  // any clearance other than a verified operator is refused, so a clearance
+  // added to the proof later is refused here until someone decides otherwise.
+  if (proof.clearance !== 'operator-verified') {
+    log.warn(refusal, { code: 'LOGIN_GATE_REQUIRED', project: params.project, readerProof: proof.clearance });
+    return errorResponse(res, 403, noLoginReadback, 'LOGIN_GATE_REQUIRED');
+  }
+
+  const sessionId = Number(body && body.sessionId);
+  const sequenceId = Number(body && body.sequenceId);
+  if (![sessionId, sequenceId].every(Number.isInteger)) {
+    log.warn(refusal, { code: 'BAD_REQUEST', project: params.project });
+    return errorResponse(res, 400,
+      'sessionId and sequenceId are required, and name the launch whose reconciliation you are reading.',
+      'BAD_REQUEST');
+  }
+
+  const project = store.projects.getByName(params.project);
+  if (!project) {
+    log.warn(refusal, { code: 'NOT_FOUND', project: params.project, reason: 'no such project' });
+    return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
+  }
+  const sequence = store.launchSequences.getBySession(sessionId);
+  // Project-scoped, and logged: the caller here is a signed-in operator, and
+  // one naming another project's launch gets no answer about it and leaves a
+  // trace of having asked.
+  if (!sequence || sequence.id !== sequenceId || sequence.projectId !== project.id) {
+    log.warn(refusal, {
+      code: 'NOT_FOUND', project: params.project, askedSession: sessionId, askedSequence: sequenceId
+    });
+    return errorResponse(res, 404,
+      'That launch sequence does not belong to this project, or no longer exists.', 'NOT_FOUND');
+  }
+  const readback = launchSequence.reconciliationReadback(sequence);
+  if (!readback) {
+    log.warn(refusal, { code: 'NOT_ATTESTED', project: params.project, sequence: sequence.id });
+    return errorResponse(res, 409,
+      'This launch has not attested READY, so no reconciliation has been accepted for it.', 'NOT_ATTESTED');
+  }
+  // Logged without the text: the log is read by more than the operator.
+  log.info('Launch reconciliation read', {
+    project: project.name, sequence: sequence.id, readerProof: proof.clearance, reader: proof.actor,
+    carriedText: readback.reconciliation !== null
+  });
+  jsonResponse(res, 200, readback);
+});
+
 /**
  * The operator-proof options for a startup prompt write, worded for the action.
  * @param {string} action - What is attempted, completing "... to <action>".
@@ -7683,6 +8345,10 @@ route('PUT', '/api/startup-prompt', (req, res, _params, body) => {
 // engine with no supported startupControl channel gets a typed 409, with no
 // fallback.
 route('POST', '/api/sessions/:project/startup-prompt/fire', async (req, res, params, body) => {
+  // #2032: firing a startup prompt starts a turn in the coordinator's thread,
+  // so it is judged by the epoch gate like a typed command.
+  const gatedProject = store.projects.getByName(params.project);
+  if (gatedProject && coordinatorGateRefused(req, res, gatedProject.id, 'session-command')) return;
   const access = sharedDocsAccess.resolveAccess(req);
   let clearance = 'project-binding';
   if (access.kind === 'operator') {
@@ -7714,16 +8380,14 @@ route('POST', '/api/sessions/:project/startup-prompt/fire', async (req, res, par
   jsonResponse(res, result.status, result.body);
 });
 
-// POST /api/sessions/:project/wrap-sentinel/ack — Clear a pending typed-wrap
-// request once the session view has opened the wrap drawer, so the poll won't
-// reopen it (CC-7 Slice C). Idempotent: acking with nothing pending is a no-op.
-route('POST', '/api/sessions/:project/wrap-sentinel/ack', (_req, res, params) => {
-  const cleared = wrapSentinel.ackWrapRequest(params.project);
-  jsonResponse(res, 200, { ok: true, project: params.project, cleared });
-});
-
 // POST /api/sessions/:project/command — Inject command
 route('POST', '/api/sessions/:project/command', (_req, res, params, body) => {
+  // #2032: typing into a coordinator's pane can hand it new work, so a
+  // coordinator bound to a rotation epoch is typed into only from its bound
+  // replacement (or by the operator), and not at all while it reconciles. The
+  // rotation's own /clear does not come through here.
+  const commandProject = store.projects.getByName(params.project);
+  if (commandProject && coordinatorGateRefused(_req, res, commandProject.id, 'session-command')) return;
   if (!body || !body.command) {
     return errorResponse(res, 400, 'command is required', 'BAD_REQUEST');
   }
@@ -7766,6 +8430,10 @@ route('POST', '/api/sessions/:project/command', (_req, res, params, body) => {
 // the retry's response finally came back. Every refusal below is still
 // synchronous and claims nothing.
 route('POST', '/api/sessions/:project/wrap', async (_req, res, params, body) => {
+  // #2032: starting a wrap publishes a handoff and finalizes the session — a
+  // coordinator-authority action the rotation epoch binds.
+  const wrapProject = store.projects.getByName(params.project);
+  if (wrapProject && coordinatorGateRefused(_req, res, wrapProject.id, 'wrap')) return;
   // Operator kill switch (incident 2026-07-16: wrap content steps re-fired
   // repeatedly into the session). Checked before anything else — while set,
   // no wrap can start regardless of caller. Re-enable via
@@ -8135,6 +8803,8 @@ route('GET', '/api/sessions/:project/wrap/stream/:runId', (req, res, params) => 
 // were noticed. A 3800-character handback of multibyte text is ~11 KB, which the
 // 10 KB default refused before the handler's own cap could answer.
 route('POST', '/api/sessions/:project/wrap/handback', (_req, res, params, body) => {
+  const handbackProject = store.projects.getByName(params.project);
+  if (handbackProject && coordinatorGateRefused(_req, res, handbackProject.id, 'wrap')) return;
   const started = wrapHandback.start(params.project, body);
   if (!started.ok) return errorResponse(res, started.status, started.error, started.code);
   const project = encodeURIComponent(params.project);
@@ -8231,6 +8901,8 @@ route('GET', '/api/sessions/:project/wrap/pr-status', async (req, res, params) =
 
 // POST /api/sessions/:project/wrap/complete — Manual wrap completion
 route('POST', '/api/sessions/:project/wrap/complete', (_req, res, params, body) => {
+  const completeProject = store.projects.getByName(params.project);
+  if (completeProject && coordinatorGateRefused(_req, res, completeProject.id, 'wrap')) return;
   const result = sessions.completeWrap(params.project, body ? body.summary : undefined, body ? body.sessionId : undefined);
   if (result.error) {
     if (result.error.includes('not found') || result.error.includes('No active')) {
@@ -8255,6 +8927,27 @@ route('POST', '/api/sessions/:project/wrap/complete', (_req, res, params, body) 
     session: result.session
   });
 }, { maxBodySize: MESSAGE_BODY_LIMIT_BYTES });
+
+// POST /api/sessions/:project/finalize — Governed headless finalization (#2027).
+// A reconciled, clean, drained session is retired by itself or by the principal
+// its assignment names in `authority.lifecycle`, with no drawer, no wrap
+// pipeline and no git. Every precondition and the order they are checked in live
+// in `lib/session-finalize.js`; `tc finalize` is the client. Unlike
+// `/wrap/complete`, the caller must be a verified launch and must name the
+// session, and a repeat after success answers the same outcome again.
+route('POST', '/api/sessions/:project/finalize', async (req, res, params, body) => {
+  // The coordinator epoch fence (#2032): ending a lane is a wrap of that lane,
+  // and a coordinator exercising lifecycle authority over another lane is
+  // exercising control authority, so a rotating coordinator is fenced as both.
+  const finalizeProject = store.projects.getByName(params.project);
+  if (finalizeProject && coordinatorGateRefused(req, res, finalizeProject.id, 'wrap')) return;
+  const finalizeCaller = _callerProjectId(req);
+  if (finalizeCaller !== null && (!finalizeProject || finalizeCaller !== finalizeProject.id)
+      && coordinatorGateRefused(req, res, finalizeCaller, 'control-mutate')) return;
+  const result = await sessionFinalize.finalize({ req, projectName: params.project, body, observer: activityObserver });
+  if (!result.ok) return errorResponse(res, result.status, result.message, result.code, result.details);
+  return jsonResponse(res, result.status, result.body);
+});
 
 // GET /api/sessions/:project/peek — Peek at terminal output
 route('GET', '/api/sessions/:project/peek', (req, res, params) => {
@@ -10033,6 +10726,10 @@ function handleUpgrade(req, socket, head) {
     ? net.connect(target.socketPath, onProxyConnect)
     : net.connect(target.port, target.host, onProxyConnect);
 
+  // Counts the terminal attach when ttyd accepts the upgrade, and its detach
+  // on close, for release-candidate certification's PTY-use target (#1949).
+  ptyActivity.trackTerminalConnection(socket, proxySocket);
+
   proxySocket.on('error', () => {
     socket.destroy();
   });
@@ -10200,8 +10897,8 @@ async function handleRequest(req, res) {
     // header, and they keep working exactly as written.
     //
     // Keyed on a body being PRESENT, not on the method. The dashboard sends
-    // genuine bodyless writes (`medusa/toggle`, `medusa/read`,
-    // `wrap-sentinel/ack` go through `api()` with no body and no
+    // genuine bodyless writes (`medusa/toggle` goes
+    // through `api()` with no body and no
     // Content-Type), and refusing those would break the operator's own UI to
     // close nothing — a request with no body carries no forged payload. The
     // residual is a bodyless same-site POST to a route that acts without one;
@@ -11675,6 +12372,10 @@ if (require.main === module) {
   });
 
   const onListening = () => {
+    // Installed here and not before: until the listener is bound it has no
+    // address, the fallback check would be asked about a door that does not
+    // exist yet, and with no probe a launch takes the operator-cleared default.
+    recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(server));
     log.info(`TangleClaw v${_getVersion()} listening on ${protocol}://${bindLabel}:${port}${caddyMode ? ' (behind Caddy)' : ''}`, {
       node: process.version,
       pid: process.pid,
@@ -11724,10 +12425,9 @@ if (require.main === module) {
     // that die out from under an open Web UI so they self-heal without a
     // manual re-launch.
     tunnelMonitor.start();
-    // Start the typed-wrap sentinel monitor (CC-7 Slice C) — watches live
-    // sessions for the `TANGLECLAW_WRAP` marker and raises a per-project flag
-    // that the session view's status poll turns into an opened wrap drawer.
-    wrapSentinel.start();
+    // Start the engine-error monitor (#261): reads each live tmux pane's tail
+    // for the engine's own API errors. It reads nothing as a wrap request (#2027).
+    engineErrorMonitor.start();
     // Start the Medusa wake-nudge monitor (MED-2K9P v2 T2) — idle-gated inbox
     // watcher that types a fixed nudge into an opted-in (`medusaWake`) session
     // when fresh inbound mail is waiting and the pane is at a bare prompt.
@@ -11761,10 +12461,27 @@ if (require.main === module) {
     // listeners are in-memory, so without this a server restart silently
     // deregistered every running session from the switchboard.
     sessions.resyncMedusaListeners();
+    // Resume the server's side of any coordinator rotation a restart
+    // interrupted (#2032); each step is a compare-and-set, so a pass that had
+    // already landed is not repeated.
+    coordinatorRotation.recover();
     // The Master's half of that re-sync (#996): a Master left running across
     // a TangleClaw restart would otherwise drop off the switchboard until its
     // next ensure. Probes tmux and starts nothing when tmux does not answer.
     master.resyncMasterMedusa();
+    // The Master's bridge credential (ADR 0023): a handoff the restart
+    // interrupted is revoked, and so is a credential whose Master is gone.
+    master.reconcileBridgeCredential();
+    // The gateway listens exactly while the bridge is enabled, and its pass
+    // carries on any route a restart interrupted. Both do nothing while it is off.
+    try {
+      bridgeGateway.syncListener();
+    } catch (err) {
+      log.warn('Operator bridge listener could not be started', { error: err.message });
+    }
+    setInterval(() => {
+      bridgeGateway.tick().catch((err) => log.warn('Operator bridge pass failed', { error: err.message }));
+    }, BRIDGE_TICK_MS).unref();
     // Resolve the operator's login PATH once, here, so no request ever pays for
     // it. launchd hands this service `/usr/bin:/bin:/usr/sbin:/sbin`, which
     // contains none of the places an engine CLI actually installs (#346) — and
@@ -11799,7 +12516,7 @@ if (require.main === module) {
     sidecar.stopAllPolling();
     ttydWatcher.stop();
     tunnelMonitor.stop();
-    wrapSentinel.stop();
+    engineErrorMonitor.stop();
     medusaWake.stop();
     activityObserver.stop();
     medusaWatchdog.stop();
@@ -11829,4 +12546,14 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
+/**
+ * Every registered route's method and pattern, for tests that must cover a
+ * family of routes as registered rather than as a list someone remembered to
+ * update (#2032: the gated-route test enumerates the Medusa routes this way).
+ * @returns {Array<{method: string, pattern: string}>}
+ */
+function _routePatterns() {
+  return routes.map((r) => ({ method: r.method, pattern: r.pattern }));
+}
+
+module.exports = { _routePatterns, createServer, _recoveryGateProbeFor, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };

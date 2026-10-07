@@ -47,7 +47,7 @@ Open http://localhost:3102 in your browser. On a fresh install, a **setup wizard
 through initial configuration:
 
 1. **Welcome** — overview of what TangleClaw does
-2. **Projects Directory** — set where your project folders live (defaults to `~/Documents/Projects`).
+2. **Projects Directory** — set where your project folders live (defaults to `~/Projects`).
    If that folder does not exist yet — it does not on a fresh Mac — the wizard offers to create it.
    On macOS it also warns you when the path is under `~/Documents`, `~/Desktop` or `~/Downloads`,
    which the system keeps background services out of (see below).
@@ -161,7 +161,10 @@ A row that begins **Could not check** means the measurement itself failed (ttyd 
 launchd, `~/Documents` absent, git unreadable) and says why. That is deliberately not hidden: a
 check that could not run has not said the machine is healthy. The same verdicts are available
 as JSON from `GET /api/system/health`, each condition in one of three states — `fired`, `clear`,
-or `unknown` with a reason.
+or `unknown` with a reason. The ttyd row's `reading` also carries the counts as values —
+`wedged` (confirmed wedged children), `orphanGate` and `pool` (`{used, cap}`) — each `null` when it
+could not be measured, so a program can compare them without reading the `detail` text. Off macOS
+the row also carries `applicable: false`.
 
 ### PortHub Lease Import Banner
 
@@ -172,6 +175,10 @@ If TangleClaw detects an existing PortHub installation with active leases that h
 Sessions report what they are doing with `tc workload set`, and TangleClaw combines that with what each session's terminal is observed doing into one verdict per session. You see it with `tc sessions` from any launched pane, or `GET /api/tc/sessions`: `AVAILABLE`, `WORKING`, `WAITING`, `BLOCKED`, `COMPLETE_NOT_CLEAR`, `HELD`, `STOPPED` or `UNKNOWN`. A session that has not reported reads as unknown, never available.
 
 You can narrow a session's verdict (hold it at unknown, or mark it not safe to clear) through `POST /api/tc/workload/narrowing`. See [Fleet workload](fleet-workload.md). A dashboard view is deferred under the current operator UI freeze.
+
+### Coordinator Context Rotation
+
+A Codex coordinator (Architect or ProjectManager) that needs to clear its context runs `tc rotation prepare --checkpoint <file>` instead of a bare `/clear`. TangleClaw then holds the coordinator's new dispatch, clears it once its turn ends, and binds the new thread. It tells that thread to reconcile the checkpoint and submit a receipt with `tc rotation resume`. Dispatch resumes only when the receipt checks out. If a rotation cannot finish, the operator ends it with `POST /api/tc/rotation/abandon`. See [Coordinator context rotation](coordinator-rotation.md).
 
 ### Ports Panel
 
@@ -193,7 +200,7 @@ Below the ports panel, there's a collapsible **Global Rules** panel. These are m
 
 - **Edit**: Expand the panel, modify the textarea, and tap **Save**
 - **Revert**: restore it from git (`data/global-rules.md` is tracked). There is no Reset button: the old one called an endpoint that, since the canonical-source model (#240), returns the current content unchanged, so it looked like a revert and did nothing (#243)
-- **API**: `GET /api/rules/global`, `PUT /api/rules/global`. `POST /api/rules/global/reset` still exists as a back-compat no-op since #240 — it returns the current content unchanged
+- **API**: `GET /api/rules/global`, `PUT /api/rules/global` (the operator's, like the panel). `POST /api/rules/global/reset` still exists as a back-compat no-op since #240 — it returns the current content unchanged
 
 Global rules live in one git-tracked file, `data/global-rules.md` in the TangleClaw repo (#240). Saving from the panel writes that file directly; there is no bundled default and no per-install copy under `~/.tangleclaw/`. A leftover `~/.tangleclaw/global-rules.md` from an older install is ignored — if its content differs, TangleClaw backs it up next to itself and logs a warning on startup so you can merge what you still want.
 
@@ -208,6 +215,7 @@ The same panel holds the **startup prompt** (#1825): the instruction a launch se
 - **Who may fire it**: the operator, or a session whose project is ticked **and** that currently shares a project group with the target session. To anyone else, a target they may not fire at looks exactly like one that does not exist (404), and the refused attempt is recorded.
 - **Today**: Codex is the one engine with a native startup adapter (see **Fire on Codex** above). A fire at any other engine is refused as `STARTUP_CONTROL_UNSUPPORTED` and recorded. Nothing is ever typed into a pane as a fallback.
 - **The launch panel**: Settings → Project Rules → **Launch readiness** shows, for each of the last five launches, which startup path it took (`native` or `legacy`), the state of its native channel, and every fire recorded against it — automatic, yours, and `denied` attempts by sessions that may not fire here — each with its outcome and typed reason. A **Fire startup prompt** button appears on the one kind of row it can act on: an active session with an open channel. It reads the current prompt revision when you press it, so a prompt saved since the panel rendered is refused rather than fired unread, and the row re-reads afterwards. The operator and the Master see this block (the Master may read it but never fire); a bound session reading the same route gets the launch rows without it. That boundary holds by the install's own access model: with a login armed, the operator is a signed-in session; on an install with no login, the dashboard's own page label is what marks a request as the operator's, so anything that can present that label on such an install reads what the operator reads. History is bounded: per project, the newest 200 fire rows and 100 closed channel rows of ended sessions are kept, and every row of an active session is kept regardless.
+- **Reading a session's reconciliation**: on the same panel, each launch that has attested READY has a **Read the session's reconciliation** button. A session writes a reconciliation into its attestation when its launch requires one, for example when the handoff state needed recovering and the project is in advisory recovery mode. Pressing the button shows that text, with the launch and revision it was accepted against, when it was accepted, the digest of the accepted attestation, the preflight verdict and how the recovery was cleared. An attestation that carried no reconciliation says so. **The text is the session's own account.** TangleClaw checks only that it is long enough, so read it as what the session said, not as proof that it is true. It is served to a signed-in operator only: sessions cannot read it, their own included. **Reading it needs a login.** On an install with no login the panel shows a line in place of the button and the server refuses the read for everyone, because nothing there identifies a person and a session on the same machine can send a request that looks like the dashboard's. On every install the text stays out of the launch list, `tc start status`, `tc start review` and the activity log.
 - **API**:
   - `GET /api/startup-prompt`. The operator gets the whole firer list. A bound session gets the prompt, its `textDigest` and `policyDigest`, and `callerListedAsFirer` for itself only.
   - `PUT /api/startup-prompt` with the full state, `{text, firerProjectIds, expectedRevision}` (operator only).
@@ -268,7 +276,7 @@ Tap **+ New** to open the create project drawer:
 2. **Engine** — select an AI engine from the dropdown
 3. **Tags** — optional tags for organization
 
-The project is created in your configured `projectsDir` (default: `~/Documents/Projects`). TangleClaw scaffolds the project directory, registers ports with PortHub (if available), and generates the engine-specific config file. See the [Engine Guide](engine-guide.md) for details on custom engines.
+The project is created in your configured `projectsDir` (default: `~/Projects`). TangleClaw scaffolds the project directory, registers ports with PortHub (if available), and generates the engine-specific config file. See the [Engine Guide](engine-guide.md) for details on custom engines.
 
 ### Deleting a Project
 
@@ -689,7 +697,7 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 
   Optional train fields:
 
-  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. An `unconfigured` card must have no `train`; every other kind needs one.
+  - `kind`: what the card stands for. `train` (the default) reads **Train 16: title**, `bucket` reads **Topic Bucket: title**, `pilot` reads **Pilot B2: title**, and `unconfigured` reads **Unconfigured: title**. An identity equal to the title is not printed twice. A `bucket` or `unconfigured` card must have no `train`, so a Topic Bucket never shows or borrows a train number; `train` and `pilot` cards need one.
   - `version`: a short label such as `v6`, shown as a badge.
   - `status`: one of `planned`, `ready`, `in-progress`, `blocked`, `shipped` or `sunset`, shown as a badge.
 
@@ -699,6 +707,12 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   - Issues filed within `newDays` are marked **new** and appear as blue pills on the card.
   - Age is worked out when the page is viewed, so an issue stops being new on its own as time passes.
   - Age never removes an issue from the queue.
+- A **progress card** is a fenced block tagged `tc-progress` holding only the card's name: `{"card": "project-health"}` or `{"card": "recent-progress"}`. The block has no figures in it. They come from the scorecard that is published to this host (`<TangleClaw base>/scorecard/v1.json`) and are read each time the page is viewed, so the plan never has to be edited to stay current.
+  - **Project Health** shows the open backlog, how many of those issues have gone untouched for 90+ days, and the backlog's net change. Below that is a table comparing the current window with the baseline window. **Delivery** (issues closed, PRs merged, cars and trains completed) and **Discovery / Intake** (issues opened) are shown as separate groups.
+  - **Recent Progress** is a single line for today (the Pacific calendar day) and the current window. Click it to open a day-by-day table. If the scorecard's newest day is not today's date, the line says **Latest day**, so an old figure is never labelled as today's.
+  - Every figure and trend is shown exactly as the scorecard states it. The page does not count or compare anything itself.
+  - Times are in Pacific time (PDT/PST), never UTC. Each card says when it was last refreshed and gives both windows' names and dates.
+  - If no scorecard has been published, or it cannot be read or is malformed, the card says so and shows no numbers. If it is past its refresh deadline, the numbers are shown under a **Stale** warning. Nothing publishes the scorecard yet, so until a later release adds that, both cards say that no scorecard has been published.
 - Table cells never break a word, so issue numbers like `#1234` stay on one line; a wide table scrolls sideways instead.
 
 ## Mobile Tips
@@ -817,6 +831,50 @@ above should make the tree clean without deleting the generated file. If other
 files remain, inspect and commit or stash them rather than bypassing the
 updater's clean-tree guard.
 
+### Before Deleting a Branch, Resetting, or Removing a Worktree
+
+A local commit survives only while a named ref points at it. Before a session deletes a branch, runs `git reset --hard`, removes a worktree or "normalizes" a checkout, it should ask `tc branch check <branch>` from inside that checkout (#1878):
+
+```
+tc branch check feat/my-work          # human-readable report
+tc branch check feat/my-work --json   # the same assessment, for scripts
+tc branch check feat/my-work --repo /path/to/checkout
+```
+
+The check fetches and prunes the branch's remote, because a remote-tracking ref counts as evidence only straight after a fetch. It then reports the branch and its commit, its upstream and whether the fetch succeeded, the commits that exist on no other branch, tag or freshly fetched remote ref, and every worktree holding the branch with its staged, unstaged, unmerged and untracked paths. It never deletes, resets or removes anything.
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `safe` | 0 | Every commit is reachable elsewhere, no worktree holds the branch, and the fetch succeeded. |
+| `preserve` | 3 | Retiring the branch would lose commits or disrupt a live worktree. Keep it. |
+| `unknown` | 4 | Something could not be proven, such as a failed fetch, several remotes and no upstream, or a worktree missing from disk. Treat it as `preserve`. |
+
+Each reason carries a stable code (for example `UNIQUE_COMMITS`, `CHECKED_OUT`, `WORKTREE_DIRTY`, `FETCH_FAILED`). For anything but `safe`, the report's next step is the same: do not delete or reset the branch, and continue in a separate clean worktree made from the freshly fetched main. A merged PR does not make a branch safe, because a commit made after the merge (a wrap commit, say) is not in it. The reflog is not a recovery plan.
+
+A branch that a worktree still holds always reads `preserve`. To retire both, check that the tree holds nothing you need (`git -C <tree> status --porcelain --untracked-files=all --ignored`). The `--ignored` matters, because `worktree remove` deletes gitignored files such as a local plan or an `.env` without refusing. Then remove it with plain `git worktree remove <tree>`, never `--force`: git refuses a tree that has changes or untracked files. When a worktree holds the branch, the check's own next-step line spells this out. Only then check the branch. Before a `git reset --hard`, make sure the tree is clean (the same status check, since a reset discards uncommitted changes and pinning does not save them), then pin the current tip under a named branch (`git branch keep/<branch>-<date>`) so no commit is dropped. Check and retire one branch at a time: two branches that each hold the only other copy of a commit both look safe until one of them is gone.
+
+This is a check and a rule. It runs from a TangleClaw-launched pane, because `tc` needs `TANGLECLAW_API`. Nothing yet stops a raw `git branch -D`, `reset --hard` or `worktree remove --force` typed in a shell, and TangleClaw does not retire merged branches or worktrees for you (#1267).
+
+### Retiring a Finished Session Headlessly
+
+A session with nothing left to decide can retire itself with no wrap drawer (#2027):
+
+```
+tc workload set complete --clearance safe-to-clear --summary "<what was finished>"
+tc finalize --reason "<why>"
+```
+
+When a session finalizes itself, its pane closes during the request. The coordinator can confirm the outcome by repeating the request with `--project` and `--session`. If the pane survived, it can confirm the outcome itself with `tc finalize --session <id> --reason "<why>"`. A coordinator named in the target assignment's `authority.lifecycle` can do the same for the session that assignment is bound to, with `tc finalize --project <name> --session <id> --reason "<why>"`. The session is recorded `wrapped` and audited, and its Medusa workspace, startup channel and pane are torn down. Nothing in the checkout is committed, staged, reset or discarded, and a final handoff is published so the next launch starts cleanly.
+
+It refuses, with nothing changed and exit 3, whenever there is still something to decide. (Exit 3 with `FINALIZE_INCOMPLETE` is different: the session is finalized, and repeating the command finishes the publishing or teardown that was left.)
+- the receipt is not a current `complete` + `safe-to-clear`, or a delegated target's engine is not at rest;
+- something addressed to the session is still open, or it is waiting on a reply;
+- files changed since launch, or it made commits no remote has;
+- the lane is held or stopped;
+- a wrap is running.
+
+Use the full wrap for those. Files that were already uncommitted when the session launched are left exactly as they were. The whole contract is in [session-finalize.md](session-finalize.md).
+
 ### Update Blocked by Local Changes
 
 **Update now** never moves a checkout that has uncommitted changes someone may
@@ -931,6 +989,18 @@ service worker's state) is gone the moment the condition clears, which it does
 on its own. The runbook also says why bumping the service worker's
 `CACHE_NAME` is not the fix.
 
+### Dashboard Still Looks Old After the Server Moved
+
+A dashboard tab left open for a long time can be running page code older than the server it talks to. TangleClaw keeps that from sticking in three ways (#411), and none of them needs you to open DevTools or unregister the service worker:
+
+- **The page scripts are fetched fresh.** `landing.js` and the other core scripts are served network-first, so any reload gets the server's current copy.
+- **The service worker checks for a new version** when the page loads, whenever the tab comes back to the foreground, and when the "TC server is out of date" banner first appears. When it finds one, the new worker takes over and the page reloads itself once onto the current assets.
+- **Restarting from the banner reloads the page** only after the new server process answers, so the reload cannot land on a dead server and fall back to a cached copy.
+
+If the page still looks old after that, reload it once. That is expected: a tab whose service worker has not changed keeps the code it loaded until something reloads it, and the dashboard does not show a separate "your page is older than the server" notice.
+
+**A restart that does not seem to take is a different problem.** If "Restart TangleClaw" appears to do nothing and the uptime keeps counting, the server process itself is not recycling, and nothing above addresses that. In the incident behind #411 that symptom was fixed from a terminal (`launchctl kickstart -k gui/$UID/com.tangleclaw.server`), and its cause was never found. If you see it, capture the server log (`~/.tangleclaw/logs/tangleclaw.log`) and the `startedAt` from `/api/server-info` before and after the click, and file an issue.
+
 ### Dashboard Constantly Refreshes After Enabling HTTPS
 
 Port 3102 serves either HTTP or HTTPS, not both. If HTTPS is enabled but the
@@ -1015,8 +1085,8 @@ condition fired or could not be measured. Each row carries its own fix; the back
   runs it from `~/.tangleclaw/bin/ttyd`, and `deploy/install.sh` builds and installs it whenever
   it is missing, broken or out of date, so a normal install needs no extra step. If the ingress
   cutover stops with "the managed ttyd runtime … cannot be used", run
-  `node scripts/ttyd-runtime.js provision` and then the cutover again (not `deploy/install.sh`, which
-  rewrites the terminal's launchd job for direct mode); if the installer itself stops there, its
+  `node scripts/ttyd-runtime.js provision` and then the cutover again (or `deploy/install.sh`, which
+  in caddy mode does both); if the installer itself stops there, its
   message says what failed (see "The ttyd runtime launchd runs"
   in `docs/configuration-reference.md`). To put it in service or take it out again, follow
   [Roll out the owned ttyd runtime](runbooks/roll-out-the-owned-ttyd.md) or

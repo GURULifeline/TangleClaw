@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+'use strict';
+
+/*
+ * Reads the Project Master's bridge credential from the one-shot FIFO
+ * TangleClaw created for this launch, and prints it for the pane's shell to
+ * capture into a variable. See lib/bridge-handoff.js for why a FIFO: the
+ * credential must reach the Master's environment without ever being an
+ * argument to any command.
+ *
+ * Prints nothing and exits 0 on any failure, so a handoff that did not happen
+ * leaves a Master that runs without the bridge capability, never a pane that
+ * hangs or a launch that fails.
+ */
+
+const { receiveCredential } = require('../lib/bridge-handoff');
+
+const line = receiveCredential(process.argv[2]);
+if (line) process.stdout.write(line);

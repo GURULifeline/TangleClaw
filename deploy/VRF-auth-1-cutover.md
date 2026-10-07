@@ -344,7 +344,7 @@ appear automatically (it fires only when `~/.tangleclaw/config.json` has no prio
 
 Walk every step and record PASS/FAIL:
 
-- [ ] **Projects dir** — accepts/normalizes a path (default `~/Documents/Projects`).
+- [ ] **Projects dir** — accepts/normalizes a path (default `~/Projects`; installs set up before #880 may have `~/Documents/Projects`).
 - [ ] **Default engine** — selectable (claude / others).
 - [ ] **Default methodology** — selectable.
 - [ ] **Chime toggle** — toggles.

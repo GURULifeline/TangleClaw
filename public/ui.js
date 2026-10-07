@@ -1409,7 +1409,7 @@ function renderPorts() {
 
     html += `<div class="port-group">`;
     html += `<div class="toggle-row">
-      <button type="button" class="toggle-btn port-group-toggle" aria-expanded="${isOpen}" onclick="togglePortGroup(${jsArg(project)})">
+      <button type="button" class="toggle-btn port-group-toggle" aria-expanded="${isOpen}" data-fold-key="${esc(project)}" onclick="togglePortGroup(${jsArg(project)}, this)">
         <span class="${arrowClass}">&#9660;</span>
         <span class="port-group-name">${esc(project)}</span>
         <span style="color:var(--text-muted);font-size:10px">(${leases.length})</span>
@@ -1433,9 +1433,57 @@ function renderPorts() {
   grid.innerHTML = html;
 }
 
-function togglePortGroup(project) {
-  state.portGroupsOpen[project] = !state.portGroupsOpen[project];
-  renderPorts();
+/**
+ * Fold or unfold one port group from its toggle.
+ * @param {string} project - The group's project name.
+ * @param {HTMLElement} [button] - The toggle that was pressed; folded in place when given.
+ * @returns {void}
+ */
+function togglePortGroup(project, button) {
+  const open = !state.portGroupsOpen[project];
+  state.portGroupsOpen[project] = open;
+  if (!foldToggleInPlace(button, open)) renderPorts();
+}
+
+/**
+ * Fold or unfold one panel row in place (#1946): flip the toggle's
+ * `aria-expanded`, its arrow and the row's content, and leave everything
+ * else alone. Re-rendering the whole panel replaced the pressed button, so
+ * keyboard focus fell to the page and a screen reader lost its place.
+ * @param {HTMLElement} [button] - The toggle inside a `.toggle-row` whose next sibling is the content.
+ * @param {boolean} open - The state to show.
+ * @returns {boolean} Whether the row was found and folded; false means the caller should re-render.
+ */
+function foldToggleInPlace(button, open) {
+  const row = button && typeof button.closest === 'function' ? button.closest('.toggle-row') : null;
+  const content = row ? row.nextElementSibling : null;
+  if (!content) return false;
+  button.setAttribute('aria-expanded', String(open));
+  const arrow = button.querySelector('.arrow');
+  if (arrow) arrow.classList.toggle('open', open);
+  content.classList.toggle('open', open);
+  return true;
+}
+
+/**
+ * Re-render a panel without dropping keyboard focus from a fold toggle
+ * (#1946). The panels re-render on their polling loops, which replaces every
+ * button; the toggle that had focus is found again by its `data-fold-key`.
+ * @param {HTMLElement|null} container - The panel element the render writes into.
+ * @param {Function} render - The panel's render function.
+ * @returns {void}
+ */
+function renderKeepingFoldFocus(container, render) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  const key = container && active && container.contains(active) && active.dataset
+    ? active.dataset.foldKey : undefined;
+  render();
+  if (key === undefined || !container) return;
+  for (const b of container.querySelectorAll('[data-fold-key]')) {
+    // preventScroll: this runs on every poll, and an operator who focused a
+    // toggle and then scrolled away must not be pulled back to it each time.
+    if (b.dataset.foldKey === key) { b.focus({ preventScroll: true }); return; }
+  }
 }
 
 // ── Rules Toggle ──
@@ -2490,7 +2538,7 @@ function renderProjectRuleDeliveries(deliveries) {
       <div class="session-rule-content">
         <strong>${esc(d.sessionId)}</strong>: <span class="${outcomeClass}">${esc(d.outcome)}</span>
         ${d.skipReason ? `<br><small class="session-rule-meta">Reason: ${esc(d.skipReason)}</small>` : ''}
-        <br><small class="session-rule-meta">Channel: ${esc(d.channel)} | Digest: <code>${esc(d.digest ? d.digest.slice(0, 8) : 'none')}</code> | Rules: ${d.ruleIds ? d.ruleIds.length : 0}</small>
+        <br><small class="session-rule-meta">Channel: ${esc(d.channel)} | Digest: <code>${esc(d.digest ? d.digest.slice(0, 8) : 'none')}</code> | Rules: ${esc(tcRuleLabelList(d.ruleIds))}</small>
       </div>
     </div>`;
   }).join('');
@@ -2517,12 +2565,20 @@ async function refreshProjectLaunchSequences(projectId) {
         'Close and reopen Settings to retry.'));
     return false;
   }
-  renderProjectLaunchSequences(data.sequences);
+  // Whether this install has a login decides one control: a session's
+  // reconciliation is not served where there is none, so the panel says that
+  // instead of offering a button the server will refuse. `openInstallToken` is
+  // the server's own word that the gate is open. A read that failed leaves the
+  // answer unknown, and unknown renders the button: the server still decides.
+  const me = await api('/api/auth/me');
+  if (projectRulesTargetId !== projectId) return null;
+  renderProjectLaunchSequences(data.sequences, { noLogin: Boolean(me && me.openInstallToken) });
   // Wired here rather than inside the renderer, so the renderer stays a pure
   // markup function: this cycle is what owns fetch → render → wire, and a
   // renderer that also attached listeners could not be rendered anywhere that
   // is not a live document.
   wireLaunchRecoveryClears(list);
+  wireLaunchReconciliationReads(list);
   wireStartupFires(list);
   return true;
 }
@@ -2710,6 +2766,135 @@ function launchRecoveryHtml(s) {
 }
 
 /**
+ * How much of a reconciliation is shown before the reader has to open it.
+ * Long enough for a short one to be read whole, short enough that one launch's
+ * text does not push the other rows off the panel.
+ */
+const LAUNCH_RECONCILIATION_PREVIEW_CHARS = 400;
+
+/**
+ * The control that reads one launch's reconciliation, and the place its answer
+ * is rendered (#1937).
+ *
+ * On every attested row and on no other: a launch that has not attested has no
+ * accepted text to read, and the list this panel renders from does not say
+ * which attestations carried one — the text and any sign of it stay out of
+ * that list, which every caller may read. So the button asks, and the answer
+ * says when there is nothing.
+ *
+ * On an install with no login there is no button, and the row says why: the
+ * server refuses the read there, because nothing would establish that the
+ * reader is the operator, and a control that cannot work is worse than none.
+ * @param {object} s - A sequence row from `GET /api/launch-sequences`
+ * @param {boolean} [noLogin] - Whether the server reported this install's login gate as open
+ * @returns {string} Markup, or an empty string for a launch that has not attested
+ */
+function launchReconciliationControlHtml(s, noLogin = false) {
+  if (!s.readyAt) return '';
+  if (noLogin) {
+    return '<br><small class="session-rule-meta">The session\'s reconciliation cannot be read on an install '
+      + 'with no login: nothing would establish that the reader is the operator. Turn the login on to read it.</small>';
+  }
+  return `<br><button type="button" class="btn btn-sm" data-launch-reconciliation="${esc(s.sequenceId)}" `
+    + `data-session-id="${esc(s.sessionId)}">Read the session's reconciliation</button>`
+    + `<div data-launch-reconciliation-out="${esc(s.sequenceId)}"></div>`;
+}
+
+/**
+ * One launch's reconciliation, as the operator reads it (#1937).
+ *
+ * The text is an agent's own account and is rendered as one: the label comes
+ * first and says TangleClaw did not check it, every character is escaped, and
+ * it sits in a `<pre>` so nothing in it is laid out as part of the panel. The
+ * facts around it — which launch and revision, when it was accepted, the
+ * digest of the accepted attestation, the verdict it answered and how the
+ * recovery was cleared — are the server's and are worded apart from it.
+ *
+ * Long text shows a preview and keeps the whole of it in a `<details>`, which
+ * opens without script.
+ * @param {object} r - The answer of `POST /api/sessions/:project/launch/reconciliation`
+ * @returns {string} Markup, already escaped
+ */
+function launchReconciliationHtml(r) {
+  const rec = r.recovery || {};
+  const verdict = rec.verdict ? `<code>${esc(rec.verdict)}</code>` : 'no verdict recorded';
+  const attested = rec.attestedVerdict && rec.attestedVerdict !== rec.verdict
+    ? ` (the session attested <code>${esc(rec.attestedVerdict)}</code>)`
+    : '';
+  // An absent state is not "none": only the server's own word says a launch
+  // needed no recovery.
+  let recovery = 'no recovery state was reported';
+  if (rec.state === 'none') {
+    recovery = 'this launch needed no recovery';
+  } else if (rec.state === 'cleared') {
+    recovery = `${launchClearanceLabel({ recoveryClearance: rec.clearance, recoveryClearedBy: rec.clearedBy })}`
+      + `${rec.clearedAt ? ` at ${esc(rec.clearedAt)}` : ''}`;
+  } else if (rec.state) {
+    recovery = `recovery is ${esc(rec.state)}`;
+  }
+  const facts = `<small class="session-rule-meta">Launch sequence ${esc(r.sequenceId)}, revision ${esc(r.revision)} | `
+    + `accepted ${esc(r.acceptedAt)} | attestation digest <code>${esc(r.readyDigest ? String(r.readyDigest).slice(0, 12) : 'none')}</code>`
+    + `<br>Preflight verdict: ${verdict}${attested} | Recovery: ${recovery}</small>`;
+  if (typeof r.reconciliation !== 'string' || r.reconciliation === '') {
+    return `<div class="launch-reconciliation">${facts}`
+      + '<br><small class="session-rule-meta">This attestation carried no reconciliation.</small></div>';
+  }
+  const label = '<small class="session-rule-meta rules-status-err">Written by the session. TangleClaw did not check it: '
+    + 'this is the session\'s own account, not evidence that the account is true.</small>';
+  const text = r.reconciliation;
+  const pre = (body) => `<pre style="white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0">${esc(body)}</pre>`;
+  const shown = text.length > LAUNCH_RECONCILIATION_PREVIEW_CHARS
+    ? `${pre(`${text.slice(0, LAUNCH_RECONCILIATION_PREVIEW_CHARS)}…`)}`
+      + `<details><summary>Show all ${esc(text.length)} characters</summary>${pre(text)}</details>`
+    : pre(text);
+  return `<div class="launch-reconciliation">${label}<br>${facts}${shown}</div>`;
+}
+
+/**
+ * Wire every Read-reconciliation button the panel just rendered (#1937).
+ *
+ * Re-wired per refresh for the reason `wireLaunchRecoveryClears` states. The
+ * text is fetched on the click and never with the list. The request carries no
+ * page token: the route serves only a signed-in operator, whose CSRF token
+ * `api()` sends itself, and an install with no login is refused whatever it
+ * sends. A refusal is shown as the server worded it and the button
+ * stays usable; an answer replaces the button's output and leaves the rest of
+ * the panel alone, so reading one launch's text does not discard another's.
+ * @param {HTMLElement} list - The panel's container element
+ * @returns {void}
+ */
+function wireLaunchReconciliationReads(list) {
+  for (const btn of list.querySelectorAll('[data-launch-reconciliation]')) {
+    btn.addEventListener('click', async () => {
+      const projectId = projectRulesTargetId;
+      const projectName = projectRulesTargetName;
+      if (!projectName) return;
+      btn.disabled = true;
+      const answer = await api(
+        `/api/sessions/${encodeURIComponent(projectName)}/launch/reconciliation`,
+        {
+          method: 'POST',
+          // Required: the perimeter refuses an undeclared browser body (#860).
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: Number(btn.dataset.sessionId),
+            sequenceId: Number(btn.dataset.launchReconciliation)
+          })
+        }
+      );
+      btn.disabled = false;
+      if (projectRulesTargetId !== projectId) return;
+      if (!answer || answer.sequenceId !== Number(btn.dataset.launchReconciliation)) {
+        _setProjectRulesStatus(api.lastError || 'The reconciliation could not be read', false);
+        return;
+      }
+      const out = list.querySelector(`[data-launch-reconciliation-out="${btn.dataset.launchReconciliation}"]`);
+      if (out) out.innerHTML = launchReconciliationHtml(answer);
+    });
+  }
+}
+
+/**
  * Render the launch-readiness rows.
  *
  * Every row says all three things, including the ones that are nothing: a
@@ -2717,8 +2902,13 @@ function launchRecoveryHtml(s) {
  * the absent case is left blank, and telling them apart is the whole reason
  * these three records are kept separately (plan §2.5).
  * @param {object[]} sequences - Rows from `GET /api/launch-sequences`, newest first
+ * @param {object} [opts]
+ * @param {boolean} [opts.noLogin] - Whether the server reported this install's login gate as open
  */
-function renderProjectLaunchSequences(sequences) {
+function renderProjectLaunchSequences(sequences, opts) {
+  // Only the server's explicit word counts as "no login": anything else,
+  // including no options at all, renders the control and lets the server decide.
+  const noLogin = Boolean(opts && opts.noLogin === true);
   const list = document.getElementById('projLaunchSequencesList');
   if (!list) return;
   if (sequences.length === 0) {
@@ -2753,6 +2943,7 @@ function renderProjectLaunchSequences(sequences) {
         <br><small class="session-rule-meta">Served: ${esc(served)}/${esc(s.of)} step(s) | Acknowledged: ${esc(acked)}/${esc(s.of)} | ${nudges}</small>
         <br><small class="session-rule-meta">Launched ${esc(s.createdAt)} | revision ${esc(s.revision)}</small>
         ${launchRecoveryHtml(s)}
+        ${launchReconciliationControlHtml(s, noLogin)}
         ${launchStartupControlHtml(s)}
       </div>
     </div>`;
@@ -2846,22 +3037,25 @@ function renderProjectRulesList(kind, rules) {
     // would erase the recorded decision and re-arm re-proposal at the next
     // wrap (the exact zombie the recorded `rejected` state exists to prevent).
     const isProposed = rule.status === 'proposed';
+    // #2029: named from the DB id, never from the text, so two proposals can
+    // always be told apart — and the controls below say which rule they act on.
+    const label = tcRuleLabel(rule.id);
     const badges = [
       rule.createdBy === 'ai' ? '<span class="session-rule-badge" title="AI-authored">AI</span> ' : '',
       isProposed ? '<span class="session-rule-badge session-rule-badge--proposed" title="Proposed by the wrap from a recurring learning — not governing sessions yet. Approve or reject it here, or in the wrap drawer right after the wrap that proposed it.">Proposed</span> ' : ''
     ].join('');
     const actions = isProposed
       ? `<span class="session-rule-decide">
-           <button class="btn btn-small btn-primary" data-action="approve-rule" data-rule-id="${rule.id}">Approve</button>
-           <button class="btn btn-small" data-action="reject-rule" data-rule-id="${rule.id}">Reject</button>
+           <button class="btn btn-small btn-primary" data-action="approve-rule" data-rule-id="${rule.id}" aria-label="Approve ${label}" title="Approve ${label}">Approve</button>
+           <button class="btn btn-small" data-action="reject-rule" data-rule-id="${rule.id}" aria-label="Reject ${label}" title="Reject ${label}">Reject</button>
          </span>`
-      : `<button class="btn btn-small btn-danger session-rule-delete" data-action="delete-rule" data-rule-id="${rule.id}" aria-label="Delete rule">&times;</button>`;
+      : `<button class="btn btn-small btn-danger session-rule-delete" data-action="delete-rule" data-rule-id="${rule.id}" aria-label="Delete ${label}" title="Delete ${label}">&times;</button>`;
     return `
     <div class="session-rule-item${rule.enabled ? '' : ' session-rule-disabled'}${isProposed ? ' session-rule-item--proposed' : ''}" data-rule-id="${rule.id}">
       <label class="session-rule-toggle">
-        <input type="checkbox" data-action="toggle-rule" data-rule-id="${rule.id}" ${rule.enabled && !isProposed ? 'checked' : ''} ${isProposed ? 'disabled' : ''}>
+        <input type="checkbox" data-action="toggle-rule" data-rule-id="${rule.id}" aria-label="Enable ${label}" ${rule.enabled && !isProposed ? 'checked' : ''} ${isProposed ? 'disabled' : ''}>
       </label>
-      <span class="session-rule-content">${badges}${esc(rule.content)}</span>
+      <span class="session-rule-content"><span class="session-rule-label">${esc(label)}</span> ${tcRuleMismatchBadge(rule)}${badges}${esc(tcStripSameIdPrefix(rule.id, rule.content).trim())}</span>
       ${actions}
     </div>`;
   }).join('');
@@ -2896,8 +3090,8 @@ async function addProjectRule(kind) {
  */
 async function toggleProjectRule(id, enabled, kind) {
   const data = await apiMutate(`/api/session-rules/${id}`, 'PUT', { enabled });
-  if (!data) { _setProjectRulesStatus('Update failed', false); return; }
-  await refreshAfterProjectRuleMutation('Updated', kind);
+  if (!data) { _setProjectRulesStatus(`Update ${tcRuleLabel(id)} failed`, false); return; }
+  await refreshAfterProjectRuleMutation(`Updated ${tcRuleLabel(id)}`, kind);
 }
 
 /**
@@ -2907,8 +3101,8 @@ async function toggleProjectRule(id, enabled, kind) {
  */
 async function deleteProjectRule(id, kind) {
   const data = await apiMutate(`/api/session-rules/${id}`, 'DELETE', {});
-  if (!data) { _setProjectRulesStatus('Delete failed', false); return; }
-  _setProjectRulesStatus('Deleted', true);
+  if (!data) { _setProjectRulesStatus(`Delete ${tcRuleLabel(id)} failed`, false); return; }
+  _setProjectRulesStatus(`Deleted ${tcRuleLabel(id)}`, true);
   await refreshAfterProjectRuleMutation('Deleted', kind);
 }
 
@@ -2940,21 +3134,21 @@ async function resolveProjectRuleProposal(id, status, kind) {
     if (api.lastErrorCode === 'RULE_CONTENT_CHANGED') {
       // Redraw from the server so the row shows what the rule says now; the
       // next Approve is then a decision about that text.
-      _setProjectRulesStatus('This rule’s text changed after it was shown, so nothing was approved — '
+      _setProjectRulesStatus(`${tcRuleLabel(id)}’s text changed after it was shown, so nothing was approved — `
         + 'the list now shows its current text. Review it, then Approve again', false);
       await refreshProjectRulesList(projectRulesTargetId, kind);
     } else if (api.lastErrorCode === 'FORBIDDEN' && pwGroup) {
       pwGroup.classList.remove('hidden');
-      _setProjectRulesStatus('Approving needs the delete password — enter it above and tap Approve again', false);
+      _setProjectRulesStatus(`Approving ${tcRuleLabel(id)} needs the delete password — enter it above and tap Approve again`, false);
       if (pwInput) pwInput.focus();
     } else {
-      _setProjectRulesStatus(`${status === 'active' ? 'Approve' : 'Reject'} failed`, false);
+      _setProjectRulesStatus(`${status === 'active' ? 'Approve' : 'Reject'} ${tcRuleLabel(id)} failed`, false);
     }
     return;
   }
   _setProjectRulesStatus(status === 'active'
-    ? 'Approved — this rule now governs future sessions'
-    : 'Rejected — recorded, so it won’t be proposed again', true);
+    ? `Approved ${tcRuleLabel(id)} — it now governs future sessions`
+    : `Rejected ${tcRuleLabel(id)} — recorded, so it won’t be proposed again`, true);
   await refreshAfterProjectRuleMutation(status === 'active' ? 'Approved' : 'Rejected', kind);
 }
 
@@ -3610,7 +3804,7 @@ function openGlobalSettings() {
     </div>
     <div class="form-group">
       <label class="form-label" for="gsProjectsDir">Projects directory</label>
-      <input type="text" class="form-input" id="gsProjectsDir" value="${esc(c.projectsDir || '~/Documents/Projects')}"
+      <input type="text" class="form-input" id="gsProjectsDir" value="${esc(c.projectsDir || '~/Projects')}"
              autocomplete="off" autocorrect="off" spellcheck="false">
     </div>
 
@@ -3712,6 +3906,11 @@ function openGlobalSettings() {
       <div class="form-hint">Checking your recovery codes…</div>
     </div>
 
+    <div class="gs-section-label">Operator bridge (Discord)</div>
+    <div class="form-group" id="gsOperatorBridgeSection">
+      <div class="form-hint">Checking the operator bridge…</div>
+    </div>
+
     <div class="gs-section-label">Diagnostics</div>
     <div class="form-group">
       <button type="button" class="btn" id="gsRestartBtn"
@@ -3773,6 +3972,11 @@ function openGlobalSettings() {
   _loadCredentialSection();
   _loadAccountSection();
   _loadRecoveryCodesSection();
+  // #2031: the operator bridge's controls. The panel is its own script
+  // (operator-bridge-panel.js); a page that has not loaded it shows no section.
+  if (typeof window.tcMountOperatorBridge === 'function') {
+    window.tcMountOperatorBridge(document.getElementById('gsOperatorBridgeSection'), { api, apiMutate });
+  }
 
   const revealTokenBtn = document.getElementById('gsRevealTokenBtn');
   if (revealTokenBtn) {
@@ -3807,6 +4011,11 @@ function openGlobalSettings() {
  */
 function closeGlobalSettings() {
   document.getElementById('globalSettingsModal').classList.remove('open');
+  // The modal is hidden, not removed. A helper token still on screen must not
+  // stay in the page behind it (#2031).
+  if (typeof window.tcForgetOperatorBridge === 'function') {
+    window.tcForgetOperatorBridge(document.getElementById('gsOperatorBridgeSection'));
+  }
 }
 
 /**
@@ -4284,7 +4493,7 @@ function renderGroups() {
 
     html += `<div class="group-item">`;
     html += `<div class="toggle-row">
-      <button type="button" class="toggle-btn group-item-toggle" aria-expanded="${isOpen}" onclick="toggleGroupItem(${jsArg(group.id)})">
+      <button type="button" class="toggle-btn group-item-toggle" aria-expanded="${isOpen}" data-fold-key="${esc(group.id)}" onclick="toggleGroupItem(${jsArg(group.id)}, this)">
         <span class="${arrowClass}">&#9660;</span>
         <span class="group-item-name">${esc(group.name)}</span>
         <span class="group-item-meta">${group.memberCount || 0} project${(group.memberCount || 0) !== 1 ? 's' : ''}, ${group.docCount || 0} doc${(group.docCount || 0) !== 1 ? 's' : ''}</span>
@@ -4312,10 +4521,17 @@ function renderGroups() {
 /**
  * Toggle a group item open/closed and load its details.
  * @param {string} groupId
+ * @param {HTMLElement} [button] - The toggle that was pressed; folded in place when given.
+ * @returns {void}
  */
-function toggleGroupItem(groupId) {
-  state.groupItemsOpen[groupId] = !state.groupItemsOpen[groupId];
-  renderGroups();
+function toggleGroupItem(groupId, button) {
+  const open = !state.groupItemsOpen[groupId];
+  state.groupItemsOpen[groupId] = open;
+  if (!foldToggleInPlace(button, open)) {
+    renderGroups();
+    return;
+  }
+  if (open) loadGroupDetail(groupId);
 }
 
 /**
@@ -4715,7 +4931,7 @@ function renderOpenclawConnections() {
 
     html += `<div class="oc-item">`;
     html += `<div class="toggle-row">
-      <button type="button" class="toggle-btn oc-item-toggle" aria-expanded="${isOpen}" onclick="toggleOpenclawItem(${jsArg(conn.id)})">
+      <button type="button" class="toggle-btn oc-item-toggle" aria-expanded="${isOpen}" data-fold-key="${esc(conn.id)}" onclick="toggleOpenclawItem(${jsArg(conn.id)}, this)">
         <span class="${arrowClass}">&#9660;</span>
         <span class="oc-item-name">${esc(conn.name)}</span>
         ${engineBadge}
@@ -4780,10 +4996,13 @@ function renderOpenclawConnections() {
 /**
  * Toggle an OpenClaw connection item open/closed.
  * @param {string} connId
+ * @param {HTMLElement} [button] - The toggle that was pressed; folded in place when given.
+ * @returns {void}
  */
-function toggleOpenclawItem(connId) {
-  state.openclawItemsOpen[connId] = !state.openclawItemsOpen[connId];
-  renderOpenclawConnections();
+function toggleOpenclawItem(connId, button) {
+  const open = !state.openclawItemsOpen[connId];
+  state.openclawItemsOpen[connId] = open;
+  if (!foldToggleInPlace(button, open)) renderOpenclawConnections();
 }
 
 /**

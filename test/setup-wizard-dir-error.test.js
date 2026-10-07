@@ -124,9 +124,10 @@ describe('Setup wizard — projects-directory errors (#859)', () => {
   describe('the caution that arrives before the choice, not after it', () => {
     const MAC_ROOTS = ['~/Documents', '/Users/dev/Documents', '~/Desktop', '/Users/dev/Desktop'];
 
-    it('warns about the pre-filled default before the operator presses Next', async () => {
-      // The wizard PRE-FILLS ~/Documents/Projects, so on a stock Mac the product
-      // recommends the one directory it may not be able to read. The scan is the
+    it('warns about a protected pre-filled value before the operator presses Next', async () => {
+      // The wizard pre-fills whatever the config names, and an install set up
+      // before #880 names ~/Documents/Projects. On a Mac that recommends the one
+      // directory the product may not be able to read. The scan is the
       // only thing that can prove it either way, but the cheapest fix — type
       // somewhere else — is available only while the operator is still looking
       // at the field.
@@ -203,9 +204,8 @@ describe('Setup wizard — projects-directory errors (#859)', () => {
 
   describe('the missing folder the operator can fix from here', () => {
     it('offers to create a directory that simply is not there', async () => {
-      // The pre-filled ~/Documents/Projects does not exist on a stock Mac —
-      // macOS makes Documents, nothing makes Projects — so this is the first
-      // thing a brand-new install hits. Saying "does not exist" and stopping is
+      // The pre-filled default does not exist on a stock Mac (nothing makes
+      // it), so this is the first thing a brand-new install hits. Saying "does not exist" and stopping is
       // accurate and useless.
       const ctx = loadSetup('Directory does not exist: ~/Documents/Projects');
       ctx.api.lastErrorCode = 'DIR_MISSING';

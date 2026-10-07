@@ -152,7 +152,40 @@ const CX_TYPING_PANE = [
   '  Ready'
 ];
 
+/**
+ * The Codex pane fixtures above, qualified by the codex-cli version they were
+ * recorded from (#2086).
+ *
+ * A fixture proves something about the version it came from and nothing about
+ * any other: Codex redraws its status row and composer between releases, and
+ * a gate that passes here says nothing about a build nobody captured. So the
+ * version is data a test can check, not a comment, and each pane says how it
+ * was obtained: `live-capture` is bytes read off a real pane, `derived` was
+ * written from Codex's own help text and never observed.
+ *
+ * To cover another version, capture its panes live and add a set. Do not copy
+ * a set under a new version number.
+ */
+const CODEX_FIXTURE_SETS = Object.freeze([
+  Object.freeze({
+    engine: 'codex',
+    cliVersion: '0.155.1',
+    capturedOn: '2026-09-19',
+    panes: Object.freeze({
+      idle: Object.freeze({ lines: CX_IDLE_PANE, provenance: 'live-capture' }),
+      busy: Object.freeze({ lines: CX_BUSY_PANE, provenance: 'live-capture' }),
+      thinking: Object.freeze({ lines: CX_THINKING_PANE, provenance: 'derived' }),
+      idleWithNeighbour: Object.freeze({ lines: CX_IDLE_WITH_NEIGHBOUR_PANE, provenance: 'live-capture' }),
+      clippedStatusRow: Object.freeze({ lines: CX_CLIPPED_PANE, provenance: 'live-capture' }),
+      quotedProse: Object.freeze({ lines: CX_TRANSCRIPT_PROSE_PANE, provenance: 'live-capture' }),
+      dialog: Object.freeze({ lines: CX_DIALOG_PANE, provenance: 'live-capture' }),
+      typing: Object.freeze({ lines: CX_TYPING_PANE, provenance: 'live-capture' })
+    })
+  })
+]);
+
 module.exports = {
+  CODEX_FIXTURE_SETS,
   IDLE_PANE,
   BUSY_PANE,
   DIALOG_PANE,

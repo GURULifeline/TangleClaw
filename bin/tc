@@ -27,7 +27,7 @@
  */
 
 const path = require('node:path');
-const { VERB_ROSTER, renderUsage, receiptVerbLabel, renderBodyTooLarge, renderControlBanner } = require(path.join(__dirname, '..', 'lib', 'tc-verbs.js'));
+const { VERB_ROSTER, renderUsage, receiptVerbLabel, renderBodyTooLarge, renderControlBanner, bridgeCredentialHeader } = require(path.join(__dirname, '..', 'lib', 'tc-verbs.js'));
 
 async function main() {
   const verb = process.argv[2];
@@ -69,6 +69,24 @@ async function main() {
   // so `tc start` never has to guess which session is asking.
   if (process.env.TANGLECLAW_LAUNCH_ID) headers['x-tangleclaw-launch-id'] = process.env.TANGLECLAW_LAUNCH_ID;
   if (process.env.TANGLECLAW_ROLE) headers['x-tangleclaw-role'] = process.env.TANGLECLAW_ROLE;
+  // #2032: which engine thread is asking. Codex sets CODEX_THREAD_ID in every
+  // tool shell; a coordinator bound to a rotation epoch is answered only for
+  // its bound replacement thread. Forwarded, never typed: no secret rides in
+  // argv or in an environment the model manages.
+  if (process.env.CODEX_THREAD_ID) headers['x-tangleclaw-engine-thread'] = process.env.CODEX_THREAD_ID;
+  // ADR 0023: the Project Master's bridge credential, forwarded for the one
+  // verb it authorises and only to the bridge's own routes.
+  // Read from the pane's environment, never typed and never an argument.
+  // Attached per request, to bridge paths only: this verb also makes requests
+  // that are not the bridge's (the control banner below), and those must not
+  // carry it either.
+  const bridgeCredential = verb === 'bridge' ? process.env.TANGLECLAW_BRIDGE_CREDENTIAL : null;
+  // The credential goes to this machine and nowhere else. The server refuses
+  // it from anywhere else too; this keeps it from being sent in the first place.
+  if (bridgeCredential && !/^(localhost|127(\.\d{1,3}){3}|\[::1\])$/.test(new URL(origin).hostname)) {
+    process.stderr.write('tc: bridge works only against the TangleClaw server on this machine (a loopback TANGLECLAW_API). The credential was not sent.\n');
+    process.exit(2);
+  }
 
   /**
    * Perform one JSON API request; failures throw with the server's own words.
@@ -88,6 +106,9 @@ async function main() {
       const { 'x-tangleclaw-verb': _dropped, ...rest } = headers;
       reqHeaders = { ...rest, 'x-tangleclaw-aux': '1' };
     }
+    // Throws, before anything is sent, for a bridge path that would not be
+    // sent as written: the credential is never attached to such a request.
+    reqHeaders = { ...reqHeaders, ...bridgeCredentialHeader(apiPath, bridgeCredential) };
     let res;
     try {
       res = await fetch(url, {

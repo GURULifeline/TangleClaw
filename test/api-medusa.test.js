@@ -1100,11 +1100,16 @@ describe('Medusa teardown is wired into EVERY session-end path (MED-2K9P Chunk 0
     return src.slice(start, next === -1 ? undefined : next);
   }
 
-  for (const fn of ['killSession', '_completePipelineWrap', 'completeWrap']) {
+  for (const fn of ['killSession', '_completePipelineWrap', 'completeWrap', 'finishFinalization']) {
     it(`${fn} tears down Medusa`, () => {
       assert.match(fnBody(sessionsSrc, fn), /_teardownMedusa\(/, `${fn} must call _teardownMedusa`);
     });
   }
+
+  it('governed finalization reaches its teardown on every path that records the end', () => {
+    assert.match(fnBody(sessionsSrc, 'finalizeSession'), /finishFinalization\(/,
+      'finalizeSession must hand the finalized session to finishFinalization');
+  });
 
   // The three `markCrashed` sites end a session just as finally as a wrap or a
   // kill does, and they are anchored individually rather than by the function
@@ -1521,6 +1526,31 @@ describe('API — Medusa Chunk 03 routes (send / roster)', () => {
     assert.equal(bridge.received[0].from, workspaceId,
       'a sender that can name itself `system` can silence a reader or expire its own mail');
     assert.notEqual(bridge.received[0].from, 'system');
+  });
+
+  it('a project in managed context rotation sends and acknowledges nothing until a replacement is bound (#2032)', async () => {
+    const now = new Date().toISOString();
+    store.coordinatorRotations.insert({
+      rotationId: 'rot_send_fence', attemptKey: 'send-fence-0001', projectId: project.id, sessionId: active.id,
+      launchId: 'l', engineId: 'codex', channelId: 1, sequenceId: 1, generation: 1, priorThreadId: 't',
+      checkpointSchema: 1, checkpointDigest: 'd'.repeat(64), checkpoint: {}, inboxIds: [],
+      roleId: 'role_x', authorityVersion: 1, checkout: {}, now
+    });
+    try {
+      const fenced = await req('/api/sessions/sender/medusa/send', 'POST', { to: 'live-ws', message: 'go build #9' });
+      assert.equal(fenced.status, 409);
+      assert.equal(fenced.data.code, 'COORDINATOR_FENCED');
+      assert.equal(bridge.received.length, 0, 'nothing reached the Bridge');
+      const reply = await req('/api/sessions/sender/medusa/send', 'POST', { to: 'live-ws', message: 'yes', inReplyTo: 'msg-1' });
+      assert.equal(reply.data.code, 'COORDINATOR_FENCED', 'before a replacement is bound, even a reply is held');
+      const ack = await req('/api/sessions/sender/medusa/read', 'POST', { ids: ['msg-1'] });
+      assert.equal(ack.data.code, 'COORDINATOR_FENCED', 'and so is acknowledging mail');
+      store.coordinatorRotations.updateIf('rot_send_fence', 'fenced', { state: 'abandoned' }, { now });
+      const lifted = await req('/api/sessions/sender/medusa/send', 'POST', { to: 'live-ws', message: 'go build #9' });
+      assert.equal(lifted.status, 200);
+    } finally {
+      store.getDb().prepare("DELETE FROM coordinator_rotations WHERE rotation_id = 'rot_send_fence'").run();
+    }
   });
 
   it('send to an offline target → 200 queued (surfaced as queued, not sent)', async () => {
@@ -2703,6 +2733,237 @@ describe('medusa delivery ledger (#792)', () => {
     assert.equal(one.status, 200);
     assert.equal(one.data.deliveries.length, 1);
     assert.equal(one.data.deliveries[0].skipReason, 'pane-turn-in-flight');
+  });
+
+  // #2086: the same list, classified. `undelivered` stays complete; the three
+  // partitions are the same items again, and a summary counts them.
+  describe('GET /api/medusa/deliveries classifies what it returns (#2086)', () => {
+    let waiting;
+    let optedOut;
+    let ended;
+    const wake = require('../lib/medusa-wake');
+    let monitorWasRunning;
+
+    /**
+     * Put the wake monitor back as this suite found it, whatever a test did to it.
+     * @returns {void}
+     */
+    const restoreMonitor = () => {
+      if (monitorWasRunning) wake.start({ intervalMs: 2 ** 30 }); else wake.stop();
+    };
+
+    /**
+     * Run a test body with the monitor positively running, on an interval too
+     * long ever to fire, and put it back afterwards.
+     * @template T
+     * @param {() => Promise<T>} fn - The test body
+     * @returns {Promise<T>}
+     */
+    const withMonitorRunning = async (fn) => {
+      wake.start({ intervalMs: 2 ** 30 });
+      try {
+        return await fn();
+      } finally {
+        wake.stop();
+        restoreMonitor();
+      }
+    };
+
+    after(() => restoreMonitor());
+
+    before(() => {
+      monitorWasRunning = wake.isRunning();
+      const mk = (tag) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-disposition-${tag}-`));
+        const proj = store.projects.create({ name: `disposition-${tag}`, path: dir, engine: 'claude' });
+        return store.sessions.start({ projectId: proj.id, engineId: 'claude', tmuxSession: `fake-disposition-${tag}` });
+      };
+      waiting = mk('waiting');
+      optedOut = mk('opted-out');
+      ended = mk('ended');
+      store.medusaDeliveries.record({ sessionId: waiting.id, messageKey: 'w1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'pane-turn-in-flight' });
+      store.medusaDeliveries.record({ sessionId: optedOut.id, messageKey: 'o1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'wake-not-opted-in' });
+      store.medusaDeliveries.record({ sessionId: ended.id, messageKey: 'e1', unread: 2, channel: 'none', outcome: 'skipped', skipReason: 'wrap-running' });
+      store.sessions.kill(ended.id, 'test: ended with mail deferred');
+    });
+
+    /**
+     * The item for one session in a list.
+     * @param {object[]} list - A list from the response
+     * @param {object} session - The session
+     * @returns {object|undefined}
+     */
+    const of = (list, session) => list.find((r) => String(r.sessionId) === String(session.id));
+
+    it('a live session held by a busy pane is actionable while the monitor is running: it retries by itself', async () => {
+      const { data } = await withMonitorRunning(() => get('/api/medusa/deliveries'));
+      const item = of(data.undelivered, waiting);
+      assert.deepEqual([item.class, item.live, item.reason, item.nextAction], ['actionable', true, 'pane-turn-in-flight', 'wait']);
+      assert.ok(of(data.actionable, waiting));
+      assert.equal(typeof item.ageMs, 'number');
+      assert.equal(item.since, item.createdAt);
+      assert.match(item.nextActionMeaning, /retries by itself/);
+    });
+
+    it('a live session that never opted in is configuration: someone has to act', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = of(data.undelivered, optedOut);
+      assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', true, 'enable-wake']);
+      assert.ok(of(data.configuration, optedOut));
+      assert.equal(of(data.actionable, optedOut), undefined);
+    });
+
+    it('a session that ended with mail deferred is historical, whatever held it at the end', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = of(data.undelivered, ended);
+      assert.deepEqual([item.class, item.live, item.reason, item.nextAction, item.lastAssessedAt], ['historical', false, 'wrap-running', 'resend', null]);
+      assert.ok(of(data.historical, ended));
+    });
+
+    it('a row whose session id the store has never held is historical too', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const item = data.undelivered.find((r) => String(r.sessionId) === '7201');
+      assert.deepEqual([item.class, item.live], ['historical', false]);
+    });
+
+    it('a stopped Master with mail deferred is configuration, to be started, and never historical', async () => {
+      const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
+      store.medusaDeliveries.record({ sessionId: masterKey, messageKey: 'mm1', unread: 1, channel: 'none', outcome: 'skipped', skipReason: 'pane-turn-in-flight' });
+      const saved = { ...wake._internal };
+      try {
+        // The monitor's last tick found no Master running.
+        wake._internal.listLiveAll = () => [];
+        wake._internal.masterWakeRecord = () => null;
+        wake._internal.tick();
+        assert.equal(wake.masterIsLive(), false);
+        const { data } = await get('/api/medusa/deliveries');
+        const item = data.undelivered.find((r) => String(r.sessionId) === masterKey);
+        assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', false, 'start-recipient']);
+        assert.ok(data.configuration.includes(data.configuration.find((r) => String(r.sessionId) === masterKey)));
+        assert.equal(data.historical.find((r) => String(r.sessionId) === masterKey), undefined);
+      } finally {
+        Object.assign(wake._internal, saved);
+        wake.stop();
+        restoreMonitor();
+      }
+    });
+
+    it('a Master the monitor has not ticked over is liveness-unknown: configuration, to be investigated, never historical', async () => {
+      const masterKey = require('../lib/master').MASTER_MEDUSA_KEY;
+      // A stopped monitor has asked nothing about the Master.
+      wake.stop();
+      let data;
+      try {
+        assert.equal(wake.masterIsLive(), null);
+        ({ data } = await get('/api/medusa/deliveries'));
+      } finally {
+        restoreMonitor();
+      }
+      const item = data.undelivered.find((r) => String(r.sessionId) === masterKey);
+      assert.ok(item, 'the Master\'s row is listed');
+      assert.deepEqual([item.class, item.live, item.nextAction], ['configuration', null, 'investigate']);
+      assert.ok(data.configuration.includes(data.configuration.find((r) => String(r.sessionId) === masterKey)));
+      assert.equal(data.historical.find((r) => String(r.sessionId) === masterKey), undefined);
+      assert.equal(data.actionable.find((r) => String(r.sessionId) === masterKey), undefined);
+    });
+
+    it('with the monitor not running, no row is actionable or promises a retry, and nothing else about the list changes', async () => {
+      const disposition = require('../lib/medusa-delivery-disposition');
+      // Retryable reasons, an undeclared one, and the rows the suite already holds.
+      const mk = (tag) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), `tc-disposition-${tag}-`));
+        const proj = store.projects.create({ name: `disposition-${tag}`, path: dir, engine: 'claude' });
+        return store.sessions.start({ projectId: proj.id, engineId: 'claude', tmuxSession: `fake-disposition-${tag}` });
+      };
+      const cases = { 'wrap-running': mk('stopped-wrap'), 'listener-connecting': mk('stopped-listener'), 'engine-thread-unknown': mk('stopped-engine'), 'brand-new-gate': mk('stopped-unknown') };
+      for (const [skipReason, session] of Object.entries(cases)) {
+        store.medusaDeliveries.record({ sessionId: session.id, messageKey: `s-${session.id}`, unread: 1, channel: 'none', outcome: 'skipped', skipReason });
+      }
+      const ledger = JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail());
+
+      const running = (await withMonitorRunning(() => get('/api/medusa/deliveries'))).data;
+      wake.stop();
+      let stopped;
+      try {
+        assert.equal(wake.isRunning(), false);
+        stopped = (await get('/api/medusa/deliveries')).data;
+      } finally {
+        restoreMonitor();
+      }
+
+      // Running: the retryable ones are actionable, the undeclared one is not.
+      for (const code of ['wrap-running', 'listener-connecting', 'engine-thread-unknown']) {
+        assert.equal(of(running.undelivered, cases[code]).class, 'actionable', code);
+      }
+      assert.deepEqual([of(running.undelivered, cases['brand-new-gate']).class, of(running.undelivered, cases['brand-new-gate']).nextAction], ['configuration', 'investigate']);
+      assert.ok(running.summary.unknownReasons.includes('brand-new-gate'));
+
+      // Stopped: nothing is actionable, and nothing says the monitor retries.
+      assert.deepEqual(stopped.actionable, []);
+      assert.equal(stopped.summary.actionable, 0);
+      for (const item of stopped.undelivered) {
+        assert.notEqual(item.class, 'actionable', String(item.sessionId));
+        assert.doesNotMatch(item.nextActionMeaning, /retries by itself/, String(item.sessionId));
+      }
+      for (const session of [...Object.values(cases), waiting]) {
+        const item = of(stopped.undelivered, session);
+        assert.deepEqual([item.class, item.nextAction, item.nextActionMeaning], ['configuration', 'investigate', disposition.NEXT_ACTIONS.investigate]);
+      }
+
+      // What was not actionable is classed exactly as it was.
+      assert.deepEqual([of(stopped.undelivered, optedOut).class, of(stopped.undelivered, optedOut).nextAction], ['configuration', 'enable-wake']);
+      assert.deepEqual([of(stopped.undelivered, ended).class, of(stopped.undelivered, ended).nextAction], ['historical', 'resend']);
+      assert.deepEqual(stopped.historical.map((r) => String(r.sessionId)), running.historical.map((r) => String(r.sessionId)));
+
+      // Membership, order and every legacy field are as they were.
+      assert.deepEqual(stopped.undelivered.map((r) => String(r.sessionId)), running.undelivered.map((r) => String(r.sessionId)));
+      const stored = store.medusaDeliveries.sessionsWithUndeliveredMail();
+      for (const [i, raw] of stored.entries()) {
+        for (const key of Object.keys(raw)) assert.deepEqual(stopped.undelivered[i][key], raw[key], `${key} of row ${i}`);
+      }
+
+      // The partitions still add up, and nothing was written.
+      assert.equal(stopped.actionable.length + stopped.configuration.length + stopped.historical.length, stopped.undelivered.length);
+      assert.equal(stopped.summary.total, stopped.undelivered.length);
+      assert.equal(JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail()), ledger);
+    });
+
+    it('undelivered is still the whole list in its old order, and every old field is still there', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const stored = store.medusaDeliveries.sessionsWithUndeliveredMail();
+      assert.deepEqual(data.undelivered.map((r) => String(r.sessionId)), stored.map((r) => String(r.sessionId)));
+      for (const [i, raw] of stored.entries()) {
+        for (const key of Object.keys(raw)) assert.deepEqual(data.undelivered[i][key], raw[key], `${key} of row ${i}`);
+      }
+    });
+
+    it('the three partitions are the same items and add up to undelivered', async () => {
+      const { data } = await get('/api/medusa/deliveries');
+      const parts = [...data.actionable, ...data.configuration, ...data.historical];
+      assert.equal(parts.length, data.undelivered.length);
+      assert.deepEqual(parts.map((r) => String(r.sessionId)).sort(), data.undelivered.map((r) => String(r.sessionId)).sort());
+      assert.deepEqual(
+        [data.summary.total, data.summary.actionable, data.summary.configuration, data.summary.historical],
+        [data.undelivered.length, data.actionable.length, data.configuration.length, data.historical.length]
+      );
+      for (const r of data.actionable) assert.equal(r.class, 'actionable');
+      for (const r of data.historical) assert.equal(r.live, false);
+    });
+
+    it('reading the list writes nothing', async () => {
+      const before = JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail());
+      const history = JSON.stringify(store.medusaDeliveries.listForSession(waiting.id));
+      await get('/api/medusa/deliveries');
+      await get('/api/medusa/deliveries');
+      assert.equal(JSON.stringify(store.medusaDeliveries.sessionsWithUndeliveredMail()), before);
+      assert.equal(JSON.stringify(store.medusaDeliveries.listForSession(waiting.id)), history);
+    });
+
+    it('the per-session history route is unchanged', async () => {
+      const one = await get(`/api/medusa/deliveries?sessionId=${waiting.id}`);
+      assert.deepEqual(Object.keys(one.data), ['deliveries']);
+      assert.equal(one.data.deliveries[0].class, undefined);
+    });
   });
 });
 

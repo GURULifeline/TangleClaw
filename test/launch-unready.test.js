@@ -183,6 +183,38 @@ describe('unready-launch monitor (Train 21, car 21.5)', () => {
     assert.equal(store.launchSequences.getByLaunchId(sequence.launchId).nudgeCount, 1);
   });
 
+  // #1937, end to end: the row the monitor reads carries the frozen recovery
+  // fields, so a launch parked at the withheld task step gets the gate's line.
+  it('nudges a launch the operator is holding with the gate, never with a READY it would refuse', () => {
+    const { session, sequence } = bindSequence('unready-recovery', {
+      preflight: { ...HEALTHY_PREFLIGHT, verdict: 'crash-recovery', reason: 'the last session was killed', requiresRecovery: true }
+    });
+    for (let i = 0; i < 3; i++) store.launchSequences.ackStep(sequence.id, sequence.revision, i);
+    assert.equal(verdictFor(sequence, 11 * MINUTE), 'nudged');
+    const [nudge] = injectedFor(session.id);
+    assert.ok(!nudge.command.includes('\n'));
+    assert.match(nudge.command, /is waiting: its preflight asked for recovery/);
+    assert.ok(nudge.command.endsWith(launchSequence.operatorHeldHintFor(sequence).text),
+      'the monitor asks the gate for its sentence and types that, not one of its own');
+    assert.doesNotMatch(nudge.command, /Launch readiness/,
+      'this process cannot ask the login gate, so the line must not promise a clear from the panel');
+    assert.doesNotMatch(nudge.command, /tc start ready|tc start next/);
+  });
+
+  it('nudges a cleared recovery the ordinary way, because the gate no longer withholds', () => {
+    const { session, sequence } = bindSequence('unready-recovery-cleared', {
+      preflight: { ...HEALTHY_PREFLIGHT, verdict: 'crash-recovery', reason: 'the last session was killed', requiresRecovery: true }
+    });
+    for (let i = 0; i < 3; i++) store.launchSequences.ackStep(sequence.id, sequence.revision, i);
+    store.launchSequences.clearRecovery(sequence.id, {
+      sessionId: sequence.sessionId, recoveryRevision: sequence.recoveryRevision, clearance: 'operator-verified', clearedBy: 'op'
+    });
+    assert.equal(verdictFor(sequence, 11 * MINUTE), 'nudged');
+    const [nudge] = injectedFor(session.id);
+    assert.doesNotMatch(nudge.command, /is waiting: its preflight asked for recovery/);
+    assert.match(nudge.command, /tc start next/);
+  });
+
   it('stamps the window but never types into a launch that selected native startup control (#1825 F2)', () => {
     const { session, sequence } = bindSequence('unready-native', { startupDelivery: 'native' });
     assert.equal(verdictFor(sequence, 11 * MINUTE), 'native-startup');
@@ -325,6 +357,41 @@ describe('unready-launch monitor (Train 21, car 21.5)', () => {
       const line = launchUnready.nudgeLine({ cursor: 0 }, 4);
       assert.match(line, /not acknowledged: 0 of 4 step/);
       assert.match(line, /tc start next/);
+    });
+
+    // #1937: behind the operator-mode recovery gate the task step is withheld
+    // and READY is refused, so a nudge asking for either can never be
+    // satisfied. The line names the gate and the one person who can open it.
+    it('names the recovery gate, not a READY it would refuse, when the operator holds the task step', () => {
+      const line = launchUnready.nudgeLine({ cursor: 3 }, 4, { taskWithheld: true });
+      assert.ok(!line.includes('\n'));
+      assert.doesNotMatch(line, /tc start ready/, 'READY is refused until the operator clears recovery');
+      assert.doesNotMatch(line, /tc start next/, 'the step it would pull is withheld');
+      assert.match(line, /withheld/);
+      assert.match(line, /Tell the operator; nothing you can run opens it\.$/);
+      assert.doesNotMatch(line, /Launch readiness/, 'with no sentence from the gate it does not promise a way through');
+      assert.doesNotMatch(line, /advisory|recoveryMode/, 'the line describes the gate; it does not advertise another mode');
+    });
+
+    it('carries the gate\'s own sentence when it is given one, whole and on one line', () => {
+      const heldHint = 'This project is pinned to operator-cleared recovery by the operator. Ask the operator to sign in '
+        + 'and clear it from this project\'s Launch readiness panel.';
+      const line = launchUnready.nudgeLine({ cursor: 3 }, 4, { taskWithheld: true, heldHint });
+      assert.ok(!line.includes('\n'));
+      assert.ok(line.endsWith(heldHint));
+      assert.doesNotMatch(line, /nothing you can run opens it/, 'the fallback sentence is not added to a real one');
+      assert.doesNotMatch(launchUnready.nudgeLine({ cursor: 3 }, 4, { taskWithheld: false, heldHint }), /pinned/,
+        'and a launch that is not withheld never carries it');
+    });
+
+    it('keeps the ordinary shapes whenever the gate is not withholding the task step', () => {
+      // Whether it is withheld is the gate's decision (`taskStepWithheld`); the
+      // end-to-end test below proves the monitor asks it.
+      const served = launchUnready.nudgeLine({ cursor: 3 }, 4, { taskWithheld: false });
+      assert.match(served, /tc start next/);
+      assert.match(launchUnready.nudgeLine({ cursor: 3 }, 4), /tc start next/, 'not withheld unless told so');
+      const early = launchUnready.nudgeLine({ cursor: 1 }, 4, { taskWithheld: false });
+      assert.match(early, /not acknowledged: 1 of 4 step/);
     });
   });
 

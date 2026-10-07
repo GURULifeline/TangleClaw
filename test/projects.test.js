@@ -1936,8 +1936,9 @@ describe('projects', () => {
     });
   });
 
-  // #859 — the projects scan ran synchronously on the event loop, and the shipped
-  // default projectsDir (~/Documents/Projects) is TCC-protected on macOS. A
+  // #859 — the projects scan ran synchronously on the event loop, and a
+  // projectsDir under ~/Documents (the shipped default until #880) is
+  // TCC-protected on macOS. A
   // launchd node without Full Disk Access does not get EPERM there: the open()
   // NEVER RETURNS. So one GET /api/projects took down every route — /api/health
   // answered 200 seconds earlier and then nothing, no error, no log, no recovery,
@@ -2322,9 +2323,8 @@ describe('projects', () => {
   // clean macOS guest: an ordinary directory scanned 200 and left the server
   // healthy; ~/Documents/Projects never answered and the process needed a
   // launchctl kickstart.
-  // `~/Documents/Projects` is the shipped default and the value the wizard
-  // pre-fills — and a stock macOS install does not have it. macOS creates
-  // Documents; nothing creates Projects, and nothing in TangleClaw did either.
+  // The shipped default is the value the wizard pre-fills, and a stock macOS
+  // install does not have it; nothing in TangleClaw created it either.
   // So the first action of a brand-new install answered "Directory does not
   // exist" and offered nothing to do about it.
   describe('createProjectsDir — the offer that ends the dead end', () => {
@@ -2360,6 +2360,16 @@ describe('projects', () => {
       assert.ok(fs.statSync(path.join(home, 'Documents', 'Projects')).isDirectory());
       assert.equal(fs.existsSync(path.join(process.cwd(), '~')), false,
         'a literal ~ directory must never appear');
+    });
+
+    it('creates the shipped default, ~/Projects, from its ~ form (#880)', async () => {
+      // The default the wizard pre-fills on a stock Mac, which does not have
+      // it: the Create-it offer is the whole first-run path for it.
+      const { DEFAULT_CONFIG } = require('../lib/store');
+      const result = await projects.createProjectsDir(DEFAULT_CONFIG.projectsDir);
+      assert.equal(result.ok, true);
+      assert.equal(result.created, true);
+      assert.ok(fs.statSync(path.join(home, 'Projects')).isDirectory());
     });
 
     it('is happy when it is already there', async () => {
@@ -2543,16 +2553,37 @@ describe('projects', () => {
       // One shared child made every caller collateral for every other: a hung
       // ten-second poll of the projects directory times out, the supervisor kills
       // the child to reclaim its thread, and an operator's scan of a completely
-      // HEALTHY folder dies alongside it. Patching only the background entry
-      // point proves the separation — if this route still used it, the stub would
-      // be reached and the scan would fail.
+      // HEALTHY folder dies alongside it. The background entry point rejects and
+      // counts its callers; the interactive one answers at once and counts its
+      // own. If this route still used the poll, the first count would move and the
+      // scan would fail.
+      //
+      // Both are stubs, so nothing here spawns a child or walks a directory. A
+      // real scan races the 5 s scan deadline on a loaded host, and a red then
+      // says "the host was busy", not "the routes crossed".
       const realBackground = dirScanner.request;
-      dirScanner.request = () => Promise.reject(new Error('the poll must not be consulted here'));
+      const realInteractive = dirScanner.interactiveRequest;
+      const backgroundCalls = [];
+      const interactiveCalls = [];
+      dirScanner.request = (...args) => {
+        backgroundCalls.push(args);
+        return Promise.reject(new Error('the poll must not be consulted here'));
+      };
+      dirScanner.interactiveRequest = (...args) => {
+        interactiveCalls.push(args);
+        return Promise.resolve({ projects: [{ name: 'alpha', path: path.join(projectsDir, 'alpha') }] });
+      };
       try {
         const result = await projects.scanDirectoryForProjects(projectsDir);
         assert.equal(result.ok, true, 'the wizard scan must be independent of the polled route');
+        assert.deepEqual(result.projects.map((p) => p.name), ['alpha'],
+          'the answer must be the one the interactive scanner gave');
+        assert.equal(backgroundCalls.length, 0, 'the polled entry point must never be reached');
+        assert.equal(interactiveCalls.length, 1, 'exactly one interactive scan');
+        assert.equal(interactiveCalls[0][0], 'scanEntries');
       } finally {
         dirScanner.request = realBackground;
+        dirScanner.interactiveRequest = realInteractive;
       }
     });
 

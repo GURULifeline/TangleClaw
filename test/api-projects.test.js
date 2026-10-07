@@ -586,6 +586,214 @@ describe('api-projects', () => {
         const { status } = await request('PATCH', '/api/projects/gate-a', { name: 'gate-a', tags: ['same'] }, a.headers);
         assert.equal(status, 200);
       });
+
+      // #1937, Architect ruling: the recovery mode decides whether a session may
+      // clear its own launch gate, so a session choosing it would be loosening
+      // its own gate. Presence of the field is what is refused, not a change of
+      // value, and the WHOLE request is refused before anything is written.
+      describe('the recovery mode is the operator\'s (#1937)', () => {
+        /**
+         * The project's stored launch settings, read from its config file.
+         * @param {string} name - Project name
+         * @returns {object} The `launchSequence` block, or `{}`
+         */
+        const launchSettings = (name) => {
+          const row = store.projects.getByName(name);
+          return store.projectConfig.load(row.path).launchSequence || {};
+        };
+
+        it('refuses a project setting its own recovery mode, and writes nothing else in the request', async () => {
+          const before = store.projects.getByName('gate-a').tags;
+          const { status, data } = await request('PATCH', '/api/projects/gate-a',
+            { tags: ['smuggled'], launchSequence: { recoveryMode: 'advisory' } }, a.headers);
+          assert.equal(status, 403);
+          assert.equal(data.code, 'OPERATOR_ONLY');
+          assert.notEqual(launchSettings('gate-a').recoveryMode, 'advisory');
+          assert.deepEqual(store.projects.getByName('gate-a').tags, before, 'the rest of a refused request is not applied');
+        });
+
+        it('refuses it even when the value is the one already stored', async () => {
+          for (const recoveryMode of ['operator', null]) {
+            const { status, data } = await request('PATCH', '/api/projects/gate-a',
+              { launchSequence: { recoveryMode } }, a.headers);
+            assert.equal(status, 403, JSON.stringify(recoveryMode));
+            assert.equal(data.code, 'OPERATOR_ONLY');
+          }
+        });
+
+        it('refuses an unbound caller with OPERATOR_ONLY, as a rename is', async () => {
+          const { status, data } = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'advisory' } });
+          assert.equal(status, 403);
+          assert.equal(data.code, 'OPERATOR_ONLY');
+        });
+
+        it('still lets a project change its other launch settings', async () => {
+          const { status } = await request('PATCH', '/api/projects/gate-a',
+            { launchSequence: { unreadyWindowMinutes: 20 } }, a.headers);
+          assert.equal(status, 200);
+          assert.equal(launchSettings('gate-a').unreadyWindowMinutes, 20);
+        });
+
+        it('lets the operator choose it, and keeps the project\'s other launch settings', async () => {
+          // Sets the other setting itself, so the merge it asserts does not
+          // rest on what an earlier test happened to leave behind.
+          const seeded = await request('PATCH', '/api/projects/gate-a',
+            { launchSequence: { unreadyWindowMinutes: 25 } }, asOperator());
+          assert.equal(seeded.status, 200);
+          const { status } = await request('PATCH', '/api/projects/gate-a',
+            { launchSequence: { recoveryMode: 'advisory' } }, asOperator());
+          assert.equal(status, 200);
+          assert.equal(launchSettings('gate-a').recoveryMode, 'advisory');
+          assert.equal(launchSettings('gate-a').unreadyWindowMinutes, 25, 'PATCH merges the launch block');
+          const back = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          assert.equal(back.status, 200);
+          assert.equal(launchSettings('gate-a').recoveryMode, 'operator');
+        });
+
+        it('records the operator\'s decision in the store, with who made it, and answers with it', async () => {
+          const id = store.projects.getByName('gate-a').id;
+          const pin = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          assert.equal(pin.status, 200);
+          assert.equal(pin.data.recoveryMode.mode, 'operator');
+          assert.equal(pin.data.recoveryMode.pinnedMode, 'operator');
+          assert.equal(pin.data.recoveryMode.decidedBy, 'operator');
+          assert.equal(pin.data.recoveryMode.fileWritten, true);
+          assert.equal(store.projectRecoveryState.get(id).pinnedMode, 'operator');
+          const lift = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'advisory' } }, asOperator());
+          assert.equal(lift.data.recoveryMode.pinnedMode, null);
+          const row = store.projectRecoveryState.get(id);
+          assert.equal(row.pinnedMode, null);
+          assert.ok(row.pinnedAt, 'choosing advisory is recorded as a decision');
+          assert.equal(row.pinnedBy, 'operator');
+        });
+
+        it('a refused session request records no decision', async () => {
+          const id = store.projects.getByName('gate-b').id;
+          const { status } = await request('PATCH', '/api/projects/gate-b', { launchSequence: { recoveryMode: 'operator' } }, a.headers);
+          assert.equal(status, 403);
+          assert.equal(store.projectRecoveryState.get(id), null);
+        });
+
+        it('a request that names no recovery mode carries no recoveryMode in its answer', async () => {
+          const { status, data } = await request('PATCH', '/api/projects/gate-a', { tags: ['plain'] }, asOperator());
+          assert.equal(status, 200);
+          assert.equal(data.recoveryMode, undefined);
+        });
+
+        it('answers 500 and applies nothing when the decision cannot be saved', async () => {
+          const before = store.projects.getByName('gate-a').tags;
+          const real = store.projectRecoveryState.recordDecision;
+          store.projectRecoveryState.recordDecision = () => { throw new Error('injected store failure'); };
+          let answer;
+          try {
+            answer = await request('PATCH', '/api/projects/gate-a',
+              { tags: ['half'], launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          } finally {
+            store.projectRecoveryState.recordDecision = real;
+          }
+          assert.equal(answer.status, 500);
+          assert.equal(answer.data.code, 'RECOVERY_DECISION_NOT_SAVED');
+          assert.match(answer.data.error, /Nothing in this request was applied/);
+          assert.deepEqual(store.projects.getByName('gate-a').tags, before);
+          assert.equal(launchSettings('gate-a').recoveryMode, 'advisory', 'the file was not touched');
+        });
+
+        it('says the decision was saved when a later write in the same request throws', async () => {
+          const id = store.projects.getByName('gate-a').id;
+          await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'advisory' } }, asOperator());
+          const real = store.projectConfig.save;
+          // The first file write of this request is `wrapSections`, after the
+          // store has taken the decision.
+          store.projectConfig.save = () => { throw new Error('injected later failure'); };
+          let answer;
+          try {
+            answer = await request('PATCH', '/api/projects/gate-a',
+              { wrapSections: null, launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          } finally {
+            store.projectConfig.save = real;
+          }
+          assert.equal(answer.status, 500);
+          assert.equal(answer.data.code, 'RECOVERY_DECISION_SAVED_UPDATE_FAILED');
+          assert.match(answer.data.error, /The recovery mode itself was saved as operator before this failed/);
+          assert.equal(answer.data.recoveryMode.mode, 'operator');
+          assert.equal(answer.data.recoveryMode.pinnedMode, 'operator');
+          assert.equal(store.projectRecoveryState.get(id).pinnedMode, 'operator', 'and it was');
+        });
+
+        /**
+         * A project with no session, so a rename of it reaches the move
+         * itself. `gate-a` has a live binding, and its rename is refused in
+         * validation before anything is written.
+         * @param {string} name - Project and directory name
+         * @returns {object} The project record
+         */
+        const idleProject = (name) => {
+          const dir = path.join(projectsDir, name);
+          fs.mkdirSync(dir, { recursive: true });
+          return store.projects.create({ name, path: dir, engine: 'claude' });
+        };
+
+        it('says the decision was saved when a rename in the same request will not move', async () => {
+          const project = idleProject('gate-rename-decided');
+          const realRename = fs.renameSync;
+          fs.renameSync = () => { throw new Error('injected rename failure'); };
+          let answer;
+          try {
+            answer = await request('PATCH', '/api/projects/gate-rename-decided',
+              { name: 'gate-rename-decided-moved', launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          } finally {
+            fs.renameSync = realRename;
+          }
+          assert.equal(answer.status, 400);
+          assert.equal(answer.data.code, 'RECOVERY_DECISION_SAVED_UPDATE_FAILED');
+          assert.match(answer.data.error, /Failed to rename directory: injected rename failure\. The recovery mode itself was saved as operator/);
+          assert.equal(answer.data.recoveryMode.mode, 'operator');
+          assert.equal(answer.data.recoveryMode.pinnedMode, 'operator');
+          assert.ok(store.projects.getByName('gate-rename-decided'), 'the project keeps its name');
+          assert.equal(store.projectRecoveryState.get(project.id).pinnedMode, 'operator', 'and the pin was set');
+        });
+
+        it('a failed rename with no recovery mode in the request answers as it always did', async () => {
+          idleProject('gate-rename-plain');
+          const realRename = fs.renameSync;
+          fs.renameSync = () => { throw new Error('injected rename failure'); };
+          let answer;
+          try {
+            answer = await request('PATCH', '/api/projects/gate-rename-plain', { name: 'gate-rename-plain-moved' }, asOperator());
+          } finally {
+            fs.renameSync = realRename;
+          }
+          assert.equal(answer.status, 400);
+          assert.equal(answer.data.code, 'BAD_REQUEST');
+          assert.equal(answer.data.error, 'Failed to rename directory: injected rename failure', 'the move itself was reached');
+          assert.equal(answer.data.recoveryMode, undefined);
+        });
+
+        it('answers 200 with a named warning when the decision is saved and the file is not', async () => {
+          const id = store.projects.getByName('gate-a').id;
+          const real = store.projectConfig.save;
+          store.projectConfig.save = () => { throw new Error('injected file failure'); };
+          let answer;
+          try {
+            answer = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          } finally {
+            store.projectConfig.save = real;
+          }
+          assert.equal(answer.status, 200);
+          assert.equal(answer.data.recoveryMode.fileWritten, false);
+          assert.ok(answer.data.warnings.some((w) => w.startsWith('RECOVERY_FILE_NOT_WRITTEN')));
+          assert.equal(store.projectRecoveryState.get(id).pinnedMode, 'operator', 'the pin is saved');
+          assert.equal(launchSettings('gate-a').recoveryMode, 'advisory', 'the file still shows the old value');
+          const seen = await request('GET', `/api/launch-sequences?projectId=${id}`, null, asOperator());
+          assert.equal(seen.data.projectRecoveryMode, 'operator', 'the store decides');
+          assert.equal(seen.data.projectRecoverySource, 'pinned');
+          assert.match(seen.data.projectRecoveryDiscrepancy, /the pin decides/);
+          const mended = await request('PATCH', '/api/projects/gate-a', { launchSequence: { recoveryMode: 'operator' } }, asOperator());
+          assert.equal(mended.data.recoveryMode.fileWritten, true);
+          const after = await request('GET', `/api/launch-sequences?projectId=${id}`, null, asOperator());
+          assert.equal(after.data.projectRecoveryDiscrepancy, null, 'a later save that writes the file ends the report');
+        });
+      });
     });
 
     describe('actions and stranded wraps', () => {

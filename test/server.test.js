@@ -318,8 +318,8 @@ describe('server', () => {
         });
 
         it('does NOT refuse a bodyless browser write — the dashboard sends these', async () => {
-          // medusa/toggle, medusa/read and wrap-sentinel/ack all go through
-          // api() with no body and no Content-Type. Refusing them would break
+          // medusa/toggle goes through api() with no body and no
+          // Content-Type. Refusing them would break
           // the operator's own UI to close nothing: no body, no forged payload.
           const res = await send('POST', '/api/config', { 'sec-fetch-site': 'same-origin' });
           assert.notEqual(res.statusCode, 415, 'a bodyless write carries no payload to forge');
