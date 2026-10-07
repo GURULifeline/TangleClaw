@@ -58,6 +58,11 @@ function render(body, fence = '```') {
  * @returns {RegExp}
  */
 function car(issue, state, words, title) {
+  /**
+   * A string with every regular-expression metacharacter escaped.
+   * @param {string} t - Literal text.
+   * @returns {string}
+   */
   const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`<details class="car-slot"><summary class="train-car ${state}">#${issue}</summary>`
     + `<span class="car-info"><span class="car-info-head">#${issue}${title ? ` ${esc(title)}` : ''}</span>`
@@ -1333,7 +1338,18 @@ describe('a car\'s detail (#2165)', () => {
     });
 
     it('carries no id on any car, so a page of many cards cannot repeat one', () => {
+      /**
+       * One fenced block.
+       * @param {string} info - Info string.
+       * @param {object} body - Block object.
+       * @returns {string}
+       */
       const block = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
+      /**
+       * A release of one train and one bucket.
+       * @param {string} version - Release version.
+       * @returns {object}
+       */
       const rel = (version) => ({ version, trains: [train({ kind: 'train' }), { kind: 'bucket', title: 'B', cars: [{ issue: 411, closed: false }] }] });
       const quoted = block('tc-train', train({ train: 3 })).split('\n').map((l) => `> ${l}`).join('\n');
       const page = planDocs.renderPlanBody(['# Cars', block('tc-train', train()), block('tc-release', rel('5.32.0')), quoted, block('tc-release', rel('5.33.0'))].join('\n\n'));
@@ -1371,6 +1387,12 @@ describe('a car\'s detail (#2165)', () => {
     });
 
     it('holds no car inside any summary, on a page of trains and releases', () => {
+      /**
+       * One fenced block.
+       * @param {string} info - Info string.
+       * @param {object} body - Block object.
+       * @returns {string}
+       */
       const block = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
       const page = planDocs.renderPlanBody([block('tc-train', train()), block('tc-release', { version: '5.32.0', trains: [train({ kind: 'train' })] })].join('\n\n'));
       const summaries = page.match(/<summary class="train-summary"[\s\S]*?<\/summary>/g);
