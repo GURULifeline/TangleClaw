@@ -726,6 +726,15 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   The header counts the cars of every workstream, Topic Buckets included: **2/4 cars · 2 workstreams · 1 dropped** means two cars closed out of four still planned, with one more dropped and left out of both figures. A release whose cars were all dropped reads **0/0 cars** with its dropped count.
 
   One mistake anywhere refuses the whole block, which is then shown as code with the reason, naming the workstream (`trains[1].cars[0].href must be an absolute https URL`). A panel is never drawn with a row missing.
+- A page with at least one train card or release panel shows a **legend** of the car states, once, directly above the first of them. You don't write it: TangleClaw adds it, so a plan never has to explain the colours itself. Each entry is a sample car with its state in words and what that state means:
+  - **open**: not started.
+  - **in progress**: under way: a draft pull request, or claimed.
+  - **in review**: written, pull request open for review.
+  - **blocked**: needs attention: merge conflicts, a failed check, or labelled blocked.
+  - **closed**: the issue is closed. This is not proof that the code is written, ready or shipped.
+  - **dropped**: closed as not planned.
+
+  A page whose only cards are the new cards queue or progress cards has no legend, and neither does a page whose train or release blocks were all refused.
 - The **new cards queue** is a fenced block tagged `tc-queue`: `{"newDays": 14, "issues": [{"issue": 1932, "title": "…", "href": "https://…", "type": "bug", "labels": ["…"], "createdAt": "2026-09-27T09:30:00Z"}]}`, with an optional `title`.
   - It lists every open issue that is not in a train, newest first.
   - Issues filed within `newDays` are marked **new** and appear as blue pills on the card.

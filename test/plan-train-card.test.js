@@ -925,3 +925,249 @@ describe('release panels (#2165)', () => {
     });
   });
 });
+
+describe('the car-state legend (#2165)', () => {
+  const now = Date.parse('2026-09-28T00:00:00Z');
+  const queue = { newDays: 14, issues: [{ issue: 9, createdAt: '2026-09-27T09:30:00Z' }] };
+  const releaseBlock = { version: '5.32.0', trains: [train({ kind: 'train' })] };
+
+  /**
+   * One fenced block.
+   * @param {string} info - Info string.
+   * @param {object} body - Block object.
+   * @returns {string}
+   */
+  const fence = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
+
+  /**
+   * The `<main>` of a served plan page, the path a reader actually gets.
+   * @param {string} markdown - Plan source.
+   * @returns {string}
+   */
+  function mainOf(markdown) {
+    const page = planDocs.renderPlanPage({
+      project: { id: 74, name: 'Roadmap' }, file: 'b.md', relative: '.tangleclaw/plans/b.md',
+      modifiedAt: '2026-09-27T00:00:00.000Z', markdown, timeZone: 'UTC', now
+    });
+    return page.slice(page.indexOf('<main'));
+  }
+
+  /**
+   * How many legends a fragment holds.
+   * @param {string} html - Rendered HTML.
+   * @returns {number}
+   */
+  const legends = (html) => (html.match(/<ul class="train-legend"/g) || []).length;
+
+  describe('once per page', () => {
+    it('draws exactly one legend on a page with several cards, in front of the first', () => {
+      const html = mainOf(['# Board', fence('tc-train', train()), fence('tc-release', releaseBlock), fence('tc-train', train({ train: 2 }))].join('\n\n'));
+      assert.equal(legends(html), 1);
+      assert.equal(html.match(/<details class="train-card">/g).length, 3);
+      assert.match(html, /<\/h1>\n<ul class="train-legend" aria-label="Car states">.*?<\/ul><details class="train-card">/);
+    });
+
+    it('draws it in front of a release panel when that is the first card', () => {
+      const html = mainOf([fence('tc-release', releaseBlock), fence('tc-train', train({ train: 2 }))].join('\n\n'));
+      assert.equal(legends(html), 1);
+      assert.match(html, /<\/ul><section class="release-panel"/);
+    });
+
+    it('draws none on a page with no card', () => {
+      assert.equal(legends(mainOf('# Plan\n\nWords, and a `tc-train` mention.\n\n```json\n{"train":1}\n```')), 0);
+    });
+
+    it('draws none when the only train or release block is refused', () => {
+      const html = mainOf([fence('tc-train', train({ bogus: 1 })), fence('tc-release', { ...releaseBlock, version: 'v1' })].join('\n\n'));
+      assert.match(html, /Train block not rendered: /);
+      assert.match(html, /Release block not rendered: /);
+      assert.equal(legends(html), 0);
+    });
+
+    it('draws none on a page with only a queue card', () => {
+      const html = mainOf(fence('tc-queue', queue));
+      assert.match(html, /class="train-card queue-card"/);
+      assert.equal(legends(html), 0);
+    });
+
+    it('waits for the first card that renders, past a refused block and a queue card', () => {
+      const html = mainOf([fence('tc-train', train({ bogus: 1 })), fence('tc-queue', queue), fence('tc-train', train())].join('\n\n'));
+      assert.equal(legends(html), 1);
+      assert.ok(html.indexOf('<ul class="train-legend"') > html.indexOf('queue-card'));
+      assert.match(html, /<\/ul><details class="train-card"><summary/);
+    });
+
+    it('draws one when the only card is inside a blockquote', () => {
+      const quoted = fence('tc-train', train()).split('\n').map((l) => `> ${l}`).join('\n');
+      const html = mainOf(quoted);
+      assert.equal(legends(html), 1);
+      assert.match(html, /<blockquote><ul class="train-legend"/);
+    });
+
+    it('draws one when a card in a blockquote is followed by one outside it, and the other way round', () => {
+      const quoted = fence('tc-train', train()).split('\n').map((l) => `> ${l}`).join('\n');
+      const plain = fence('tc-train', train({ train: 2 }));
+      assert.equal(legends(mainOf(`${quoted}\n\n${plain}`)), 1);
+      assert.equal(legends(mainOf(`${plain}\n\n${quoted}`)), 1);
+    });
+
+    it('gives every page its own legend', () => {
+      const md = fence('tc-train', train());
+      assert.equal(legends(mainOf(md)), 1);
+      assert.equal(legends(mainOf(md)), 1);
+    });
+
+    it('leaves a fragment rendered without a page as the cards alone', () => {
+      assert.equal(legends(planDocs.renderPlanBody(fence('tc-train', train()))), 0);
+      assert.equal(legends(planDocs.renderPlanBody(fence('tc-release', releaseBlock))), 0);
+    });
+  });
+
+  describe('what it says', () => {
+    const legend = trainCard.renderLegend();
+
+    it('lists every car state once, as a sample pill with its words and its meaning', () => {
+      assert.match(legend, /^<ul class="train-legend" aria-label="Car states">(<li>.*?<\/li>)+<\/ul>$/);
+      assert.equal(legend.match(/<li>/g).length, trainCard.CAR_STATES.length);
+      for (const state of trainCard.CAR_STATES) {
+        const item = legend.match(new RegExp(`<li><span class="train-car ${state}">([^<]+)</span> ([^<]+)</li>`));
+        assert.ok(item, `${state} is in the legend`);
+        assert.equal(item[1], state.replace('-', ' '));
+        assert.equal(item[2], trainCard.CAR_STATE_MEANING[state].replace(/&/g, '&amp;'));
+      }
+    });
+
+    it('says a green car is a closed issue and not proof of shipped code, and that red needs attention', () => {
+      assert.match(legend, /<span class="train-car closed">closed<\/span> issue closed — not proof the code is written, ready or shipped</);
+      assert.match(legend, /<span class="train-car blocked">blocked<\/span> needs attention/);
+      assert.match(legend, /<span class="train-car in-review">in review<\/span> written, pull request open for review</);
+      assert.match(legend, /<span class="train-car dropped">dropped<\/span> closed as not planned</);
+    });
+
+    it('runs from not started to dropped, whatever order the states are declared in', () => {
+      assert.deepEqual(Object.keys(trainCard.CAR_STATE_MEANING), ['open', 'in-progress', 'in-review', 'blocked', 'closed', 'dropped']);
+    });
+  });
+
+  describe('a state cannot be added half-way', () => {
+    const css = trainCard.TRAIN_CARD_CSS;
+
+    it('has legend words for exactly the declared states', () => {
+      assert.deepEqual(Object.keys(trainCard.CAR_STATE_MEANING).sort(), [...trainCard.CAR_STATES].sort());
+      for (const state of trainCard.CAR_STATES) {
+        assert.ok(trainCard.CAR_STATE_MEANING[state].trim().length > 0, `${state} has legend words`);
+      }
+    });
+
+    it('draws every declared state with words on its pill, words in its table cell and a style rule of its own', () => {
+      for (const state of trainCard.CAR_STATES) {
+        const closed = trainCard.CLOSED_CAR_STATES.includes(state);
+        const html = render(train({ cars: [{ issue: 7, closed, state }] }));
+        const pill = html.match(new RegExp(`<span class="train-car ${state}" title="#7 ([a-z ]+)" aria-label="#7 ([a-z ]+)">#7</span>`));
+        assert.ok(pill, `${state} renders as a pill`);
+        assert.equal(pill[1], pill[2]);
+        assert.match(html, new RegExp(`<td class="train-state">[^<]*${pill[1]}</td>`), `${state} is named in the table`);
+        assert.ok(css.includes(`\n.train-car.${state}{`), `${state} has a style rule`);
+      }
+    });
+  });
+
+  describe('contrast, in both colour schemes', () => {
+    const page = planDocs.renderPlanPage({
+      project: { id: 74, name: 'Roadmap' }, file: 'b.md', relative: '.tangleclaw/plans/b.md',
+      modifiedAt: '2026-09-27T00:00:00.000Z', markdown: '# B', timeZone: 'UTC'
+    });
+    const css = page.slice(page.indexOf('<style>') + 7, page.indexOf('</style>'));
+
+    /**
+     * The custom properties one rule body declares.
+     * @param {string} body - Declarations.
+     * @returns {Object<string, string>}
+     */
+    const tokensOf = (body) => Object.fromEntries([...body.matchAll(/(--[a-z-]+):(#[0-9a-f]{6})/g)].map((m) => [m[1], m[2]]));
+    const light = tokensOf(css.match(/\n:root\{([^}]*)\}/)[1]);
+    const dark = { ...light, ...tokensOf(css.match(/@media \(prefers-color-scheme:dark\)\{:root\{([^}]*)\}\}/)[1]) };
+
+    /**
+     * One declaration of one rule.
+     * @param {string} selector - The rule's whole selector.
+     * @param {string} prop - Property name.
+     * @returns {string|undefined}
+     */
+    function declared(selector, prop) {
+      const rule = css.match(new RegExp(`\\n${selector.replace(/[.\\-]/g, '\\$&')}\\{([^}]*)\\}`));
+      assert.ok(rule, `${selector} has a rule`);
+      const decl = rule[1].split(';').map((d) => d.split(':')).find((d) => d[0] === prop);
+      return decl && decl.slice(1).join(':');
+    }
+
+    /**
+     * A colour value as a hex colour, reading a theme token from `tokens`.
+     * @param {string} value - `#rrggbb`, `#rgb` or `var(--token)`.
+     * @param {Object<string, string>} tokens - The scheme's custom properties.
+     * @returns {string} `#rrggbb`.
+     */
+    function resolve(value, tokens) {
+      const token = value.match(/^var\((--[a-z-]+)\)$/);
+      const hex = token ? tokens[token[1]] : value;
+      assert.match(String(hex), /^#([0-9a-f]{3}|[0-9a-f]{6})$/, `${value} resolves to a colour`);
+      return hex.length === 4 ? `#${[...hex.slice(1)].map((c) => c + c).join('')}` : hex;
+    }
+
+    /**
+     * WCAG relative luminance.
+     * @param {string} hex - `#rrggbb`.
+     * @returns {number}
+     */
+    function luminance(hex) {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+        .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+
+    /**
+     * WCAG contrast ratio of two colours.
+     * @param {string} a - `#rrggbb`.
+     * @param {string} b - `#rrggbb`.
+     * @returns {number}
+     */
+    function contrast(a, b) {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+
+    it('computes the textbook ratios, so a pass below means what it says', () => {
+      assert.equal(Math.round(contrast('#000000', '#ffffff')), 21);
+      assert.equal(contrast('#777777', '#777777'), 1);
+      assert.ok(contrast('#767676', '#ffffff') >= 4.5 && contrast('#777777', '#ffffff') < 4.5);
+    });
+
+    it('reads both schemes from the page stylesheet', () => {
+      assert.notEqual(light['--fg'], dark['--fg']);
+      assert.notEqual(light['--code-bg'], dark['--code-bg']);
+    });
+
+    it('restyles no car inside a colour-scheme block, so each rule read here is the whole story', () => {
+      for (const block of css.match(/@media \(prefers-color-scheme:dark\)\{.*\}/g)) {
+        assert.doesNotMatch(block, /\.train-car/);
+      }
+    });
+
+    for (const [scheme, tokens] of [['light', light], ['dark', dark]]) {
+      it(`gives every state's pill text at least 4.5:1 against its fill in the ${scheme} scheme`, () => {
+        for (const state of trainCard.CAR_STATES) {
+          const fill = resolve(declared(`.train-car.${state}`, 'background'), tokens);
+          const text = resolve(declared(`.train-car.${state}`, 'color'), tokens);
+          const ratio = contrast(text, fill);
+          assert.ok(ratio >= 4.5, `${state}: ${text} on ${fill} is ${ratio.toFixed(2)}:1`);
+        }
+      });
+
+      it(`gives the legend's words at least 4.5:1 against the page in the ${scheme} scheme`, () => {
+        const text = resolve(declared('main.plan ul.train-legend', 'color'), tokens);
+        const ratio = contrast(text, tokens['--bg']);
+        assert.ok(ratio >= 4.5, `${text} on ${tokens['--bg']} is ${ratio.toFixed(2)}:1`);
+      });
+    }
+  });
+});
