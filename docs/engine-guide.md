@@ -1033,7 +1033,8 @@ A model can be selected only when it is in `offered` **and** in the roster the i
 
 `lib/engine-models.js` answers every model question, so saving, launching and listing choices cannot disagree:
 
-- `offeredWithAvailability(profile)` returns every offered model with `available` and, when it is not, a `reason`. An unavailable model is still returned, so a UI can show it as unavailable instead of dropping it.
+- `selectionState(profile)` says where the engine stands: `none` (no `models` block), `invalid` (a block that cannot be used, with the reasons) or `ok`. It has three answers so that a broken profile is never mistaken for an engine that offers nothing.
+- `offeredWithAvailability(profile)` returns that state with every offered model, each with `available` and, when it is not, a `reason`. An unavailable model is still returned, so a UI can show it as unavailable instead of dropping it.
 - `checkSelection(profile, modelId)` returns `{ok: true}` or a refusal with a stable `code` and a `reason`: `MODEL_MALFORMED`, `MODELS_BLOCK_INVALID`, `ENGINE_HAS_NO_MODELS`, `MODEL_NOT_OFFERED` (which is also what another engine's model gets), `ROSTER_UNAVAILABLE`, `MODEL_UNAVAILABLE`.
 - `modelArgv(profile, modelId)` returns the flag and the quoted id for the launch command.
 
@@ -1041,7 +1042,7 @@ Nothing here substitutes a model. A selection that cannot be confirmed is refuse
 
 The roster says the CLI lists a model for this account. It does not prove the account can run it; only a completed turn on that model does.
 
-A profile whose `models` block is present but invalid is a fault, not an engine without model selection: the validation errors are logged and any selection for that engine is refused with `MODELS_BLOCK_INVALID`.
+A profile whose `models` block is present but invalid is a fault, not an engine without model selection: the validation errors are logged once, reported by `selectionState` and `offeredWithAvailability` as `invalid`, and any selection for that engine is refused with `MODELS_BLOCK_INVALID`.
 
 **Readers.** `codex-models-cache` reads `models_cache.json` under `$CODEX_HOME` (default `~/.codex`), which the Codex CLI rewrites with a fetch time whenever it starts. The roster is unreadable (`ROSTER_UNAVAILABLE`, with what to do about it) when the file is missing or malformed, carries no fetch time, is older than `maxAgeHours`, or is dated more than five minutes into the future. Starting Codex once refreshes it. A fresh list is not proof the account can run a model.
 

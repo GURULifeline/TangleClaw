@@ -182,21 +182,21 @@ describe('#2188 engine-models', () => {
 
   describe('offeredWithAvailability', () => {
     it('offers only the allowlist, never a model that is merely in the roster', () => {
-      const offered = models.offeredWithAvailability(profileOffering(['gpt-5.6-sol', 'gpt-6-luna']), cache(LISTED));
+      const offered = models.offeredWithAvailability(profileOffering(['gpt-5.6-sol', 'gpt-6-luna']), cache(LISTED)).models;
       assert.deepEqual(offered.map((m) => m.id), ['gpt-5.6-sol', 'gpt-6-luna']);
       assert.ok(offered.every((m) => m.available && m.reason === null));
       assert.deepEqual(offered.map((m) => m.label), ['GPT-5.6-Sol', 'GPT-6-Luna']);
     });
 
     it('keeps an offered model the CLI does not list, as unavailable with the reason', () => {
-      const offered = models.offeredWithAvailability(profileOffering(['gpt-6-luna', 'gpt-7-nova']), cache(LISTED));
+      const offered = models.offeredWithAvailability(profileOffering(['gpt-6-luna', 'gpt-7-nova']), cache(LISTED)).models;
       assert.deepEqual(offered[1], { id: 'gpt-7-nova', label: 'gpt-7-nova', available: false,
         reason: 'The installed Codex CLI does not list this model for this account.' });
       assert.equal(offered[0].available, true);
     });
 
     it('marks every offered model unavailable when the roster cannot be read', () => {
-      const offered = models.offeredWithAvailability(profileOffering(['gpt-5.6-sol', 'gpt-6-luna']), cache(null));
+      const offered = models.offeredWithAvailability(profileOffering(['gpt-5.6-sol', 'gpt-6-luna']), cache(null)).models;
       assert.equal(offered.length, 2);
       for (const m of offered) {
         assert.equal(m.available, false);
@@ -204,10 +204,30 @@ describe('#2188 engine-models', () => {
       }
     });
 
-    it('returns nothing for an engine with no models block, or with a broken one', () => {
-      assert.deepEqual(models.offeredWithAvailability({ id: 'x', name: 'X' }, cache(LISTED)), []);
-      assert.deepEqual(models.offeredWithAvailability(null, cache(LISTED)), []);
-      assert.deepEqual(models.offeredWithAvailability({ id: 'x', models: { flag: '--model', offered: ['a'], roster: { source: 'nope' } } }, cache(LISTED)), []);
+    it('tells an engine that offers nothing from one whose settings are broken', () => {
+      // Both have no models to list. Only one of them is a fault, and a caller
+      // that could not tell would hide the selector on a profile typo.
+      assert.deepEqual(models.offeredWithAvailability({ id: 'x', name: 'X' }, cache(LISTED)), { state: 'none', errors: [], models: [] });
+      assert.deepEqual(models.offeredWithAvailability(null, cache(LISTED)), { state: 'none', errors: [], models: [] });
+      const broken = models.offeredWithAvailability({ id: 'x', models: { flag: '--model', offered: ['a'], roster: { source: 'nope' } } }, cache(LISTED));
+      assert.equal(broken.state, 'invalid');
+      assert.deepEqual(broken.models, []);
+      assert.match(broken.errors.join(' '), /must name a roster reader/);
+      assert.equal(models.offeredWithAvailability(profileOffering(['gpt-6-luna']), cache(LISTED)).state, 'ok');
+    });
+  });
+
+  describe('selectionState', () => {
+    it('has three answers, and never folds a broken block into "none"', () => {
+      assert.deepEqual(models.selectionState({ id: 'aider', name: 'Aider' }), { state: 'none' });
+      assert.deepEqual(models.selectionState(null), { state: 'none' });
+      assert.deepEqual(models.selectionState({ id: 'x', models: null }), { state: 'none' });
+      assert.deepEqual(models.selectionState(profileOffering(['gpt-6-luna'])), { state: 'ok' });
+      for (const block of [[], 'codex', { flag: '--model' }, { flag: '--model', offered: ['a'], roster: { source: 'constructor' } }]) {
+        const standing = models.selectionState({ id: 'x', name: 'X', models: block });
+        assert.equal(standing.state, 'invalid', JSON.stringify(block));
+        assert.ok(standing.errors.length > 0);
+      }
     });
   });
 
@@ -247,8 +267,8 @@ describe('#2188 engine-models', () => {
       // The absent case keeps its own code: that is a statement, not a fault.
       assert.equal(models.checkSelection({ id: 'aider', name: 'Aider' }, 'gpt-6-luna', cache(LISTED)).code, 'ENGINE_HAS_NO_MODELS');
       // And nothing downstream can launch with it.
-      assert.equal(models.supportsModelSelection(broken), false);
-      assert.deepEqual(models.offeredWithAvailability(broken, cache(LISTED)), []);
+      assert.equal(models.selectionState(broken).state, 'invalid');
+      assert.equal(models.offeredWithAvailability(broken, cache(LISTED)).state, 'invalid');
       assert.equal(models.roster(broken, cache(LISTED)).unavailable, true);
       assert.throws(() => models.modelArgv(broken, 'gpt-6-luna'), /no model flag/);
     });
@@ -290,7 +310,7 @@ describe('#2188 engine-models', () => {
 
     it('Codex offers the two trial models and nothing else', () => {
       const codex = bundled('codex');
-      assert.equal(models.supportsModelSelection(codex), true);
+      assert.deepEqual(models.selectionState(codex), { state: 'ok' });
       assert.deepEqual(codex.models.offered, ['gpt-5.6-sol', 'gpt-6-luna']);
       assert.equal(codex.models.flag, '--model');
     });
@@ -299,12 +319,12 @@ describe('#2188 engine-models', () => {
       // No source has been measured that names the model of a completed turn
       // and ties it to one launch. Until one is, offering a model here would be
       // offering something TangleClaw cannot confirm it launched.
-      assert.equal(models.supportsModelSelection(bundled('antigravity')), false);
+      assert.deepEqual(models.selectionState(bundled('antigravity')), { state: 'none' });
       assert.equal(models.checkSelection(bundled('antigravity'), 'gemini-3.1-pro-high', cache(LISTED)).code, 'ENGINE_HAS_NO_MODELS');
     });
 
     it('every other engine offers none either', () => {
-      for (const id of ids.filter((i) => i !== 'codex')) assert.equal(models.supportsModelSelection(bundled(id)), false, id);
+      for (const id of ids.filter((i) => i !== 'codex')) assert.deepEqual(models.selectionState(bundled(id)), { state: 'none' }, id);
     });
 
     it('a profile with a bad models block fails validation', () => {
