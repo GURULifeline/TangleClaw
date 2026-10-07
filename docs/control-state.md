@@ -222,7 +222,7 @@ HTTPS install, below) and is never committed.
   and only for a request that cannot leave the machine. It trusts the root rather than pinning the
   leaf because a certificate regeneration from the same root would otherwise break every hook until
   the next launch rewrote the marker. A marker written before this change has no `caFile`. Its hook
-  fails closed and names the certificate, and relaunching the session rewrites the marker.
+  still fails closed, and relaunching the session rewrites the marker and the hook.
 - **Ungoverned checkout** (no marker): the hook only runs any chained hook.
 - **Linked worktrees.**
   - A governed *main* checkout also marks its common git dir, so worktrees the Builder creates under
