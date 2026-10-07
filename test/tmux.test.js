@@ -451,7 +451,10 @@ describe('tmux', () => {
         const path = require('node:path');
         const { execSync } = require('node:child_process');
 
-        const envDumpPath = path.join(os.tmpdir(), `tc-launchenv-${Date.now()}.txt`);
+        // A directory of its own: a name built from the clock is shared by two
+        // runs that reach this line in the same millisecond.
+        const envDumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-launchenv-'));
+        const envDumpPath = path.join(envDumpDir, 'env.txt');
         try {
           // `sh -c` writes the two env vars we care about, then keeps
           // the session alive so we have time to inspect before tmux
@@ -473,7 +476,7 @@ describe('tmux', () => {
           assert.match(dumped, /OPENAI_API_BASE=http:\/\/example\.test:4000/,
             `Launch command must inherit OPENAI_API_BASE from options.env. Got:\n${dumped}`);
         } finally {
-          try { fs.unlinkSync(envDumpPath); } catch (_) {}
+          fs.rmSync(envDumpDir, { recursive: true, force: true });
         }
       } finally {
         try { tmux.killSession(testSession); } catch (_) {}
@@ -492,7 +495,10 @@ describe('tmux', () => {
         // single quotes and escapes embedded quotes, so the value
         // reaches the child process byte-intact.
         const tricky = `a b'c$d;e"f`;
-        const envDumpPath = path.join(os.tmpdir(), `tc-launchenv-tricky-${Date.now()}.txt`);
+        // A directory of its own: a name built from the clock is shared by two
+        // runs that reach this line in the same millisecond.
+        const envDumpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-launchenv-tricky-'));
+        const envDumpPath = path.join(envDumpDir, 'env.txt');
         try {
           const command = `sh -c 'printf "TRICKY=%s\\n" "$TRICKY" > ${envDumpPath}; exec sleep 5'`;
           tmux.createSession(testSession, {
@@ -506,7 +512,7 @@ describe('tmux', () => {
           assert.equal(dumped.trim(), `TRICKY=${tricky}`,
             `Tricky env value must reach the child byte-intact. Got: ${dumped.trim()}`);
         } finally {
-          try { fs.unlinkSync(envDumpPath); } catch (_) {}
+          fs.rmSync(envDumpDir, { recursive: true, force: true });
         }
       } finally {
         try { tmux.killSession(testSession); } catch (_) {}
