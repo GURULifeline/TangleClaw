@@ -140,13 +140,120 @@ describe('lib/ecosystem-primer (#1122)', () => {
     }
   });
 
+  it('a verb the operator switches on is primed while the switch is on, and the section stays within its budget (#2031)', () => {
+    const { verbsFor } = require('../lib/tc-verbs');
+    const switched = verbsFor('unprimed').filter((v) => v.primedBy);
+    assert.deepEqual(switched.map((v) => [v.id, v.primedBy]), [['candidate', 'bridge-candidates']]);
+    assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'), 'off by default: nothing says how to find out, so nothing is switched on');
+    try {
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      assert.ok(verbsFor('pane', { switches: ['bridge-candidates'] }).some((v) => v.id === 'candidate'));
+      assert.deepEqual(verbsFor('unprimed', { switches: ['bridge-candidates'] }).map((v) => v.id), []);
+      // The line itself follows only the switches it is handed. With none it
+      // is the same whatever this install's switch says, which is what every
+      // carrier written into a project gets.
+      assert.ok(!primer.tcBootstrapLines('md').join('\n').includes('`candidate`'));
+      assert.ok(!/\bcandidate\b/.test(primer.tcBootstrapLines('comment').join('\n')));
+      assert.ok(primer.tcBootstrapLines('md', ['bridge-candidates']).join('\n').includes('`candidate`'));
+      assert.ok(/\bcandidate\b/.test(primer.tcBootstrapLines('comment', ['bridge-candidates']).join('\n')));
+      const on = primer.buildEcosystemPrimerSection(CTX).join('\n');
+      assert.ok(on.length <= 2820, `with the switch on the section is ${on.length} chars; its cap is 2820`);
+      assert.ok(on.includes('`candidate`'));
+      // A switch nobody declared primes nothing.
+      primer.setSwitchReader(() => ['something-else']);
+      assert.ok(!primer.buildEcosystemPrimerSection(CTX).join('\n').includes('`candidate`'));
+    } finally {
+      primer.setSwitchReader(() => []);
+    }
+  });
+
+  it('the switch has a budget of its own, named and bounded; the base budget is untouched (#2031)', () => {
+    assert.deepEqual(primer.SECTION_BUDGET, { base: 2800, bySwitch: { 'bridge-candidates': 2820 } });
+    assert.deepEqual([primer.sectionBudget([]), primer.sectionBudget(['bridge-candidates']), primer.sectionBudget(['something-else']),
+      primer.sectionBudget(['something-else', 'bridge-candidates'])], [2800, 2820, 2800, 2820]);
+    const section = (ctx) => primer.buildEcosystemPrimerSection(ctx).join('\n');
+    const raw = (ctx, switches) => primer.renderEcosystemPrimerSection(ctx, switches).join('\n');
+    try {
+      // (1) Switched off: within the base budget, and exactly what it is with no switch reader at all.
+      const off = section(CTX);
+      assert.ok(off.length <= 2800, `${off.length}`);
+      assert.equal(off, raw(CTX, []));
+      assert.ok(!off.includes('`candidate`'));
+
+      // (2) Switched on: within the switch's budget, names the verb, and differs in nothing else.
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      const on = section(CTX);
+      assert.ok(on.length <= 2820 && on.length > 2800, `${on.length}: over the base budget, within its own`);
+      assert.equal(on.replace(', `candidate`', ''), off, 'the one difference is the verb in the list');
+
+      // (3) Switched off again: back to the base budget, the verb gone.
+      primer.setSwitchReader(() => []);
+      assert.equal(section(CTX), off);
+
+      // (4) Past its own budget the switch gives way: the section is rendered as if it were off.
+      primer.setSwitchReader(() => ['bridge-candidates']);
+      // A longer API origin makes the section longer; find where it crosses the cap.
+      const padded = (n) => ({ ...CTX, apiOrigin: `${CTX.apiOrigin}/${'x'.repeat(n)}` });
+      assert.ok(raw(padded(40), ['bridge-candidates']).length > raw(padded(0), ['bridge-candidates']).length, 'padding lengthens the section');
+      let pad = 0;
+      while (pad < 200 && raw(padded(pad + 1), ['bridge-candidates']).length <= 2820) pad += 1;
+      const atCap = raw(padded(pad), ['bridge-candidates']).length;
+      const overCap = raw(padded(pad + 1), ['bridge-candidates']).length;
+      assert.ok(atCap <= 2820 && overCap >= 2821, `${atCap} then ${overCap}`);
+      const logger = require('../lib/logger');
+      const level = logger.getLevel();
+      const lines = [];
+      logger.setLevel('warn');
+      logger.setConsoleStream({ write: (s) => { lines.push(String(s)); return true; } });
+      try {
+        const fellBack = primer.lastSwitchFallback();
+        assert.ok(section(padded(pad)).includes('`candidate`'), 'at the cap it is still primed');
+        assert.deepEqual([lines.length, primer.lastSwitchFallback()], [0, fellBack], 'and nothing is said: nothing was left out');
+        assert.equal(section(padded(pad + 1)), raw(padded(pad + 1), []), 'one character past it, the verb is left out and nothing else changes');
+        assert.ok(!section(padded(pad + 1)).includes('`candidate`'));
+        // Leaving it out is said aloud, in numbers: the switch still reads as on.
+        const said = lines.filter((l) => l.includes('rendered without the switch'));
+        assert.equal(said.length, 2, 'once for each launch that fell back');
+        assert.ok(said[0].includes('bridge-candidates') && said[0].includes(String(overCap)) && said[0].includes('2820') && said[0].includes('77'), said[0]);
+        assert.ok(!said[0].includes('Operating basics'), 'none of the section\'s text is logged');
+        const last = primer.lastSwitchFallback();
+        assert.deepEqual([last.projectId, last.switches, last.length, last.cap], [77, ['bridge-candidates'], overCap, 2820]);
+        // With no switch on there is nothing to leave out, however long the section is.
+        primer.setSwitchReader(() => []);
+        lines.length = 0;
+        section(padded(pad + 400));
+        assert.deepEqual([lines.length, primer.lastSwitchFallback()], [0, last]);
+      } finally {
+        logger.setConsoleStream(null);
+        logger.setLevel(level);
+      }
+    } finally {
+      primer.setSwitchReader(() => []);
+    }
+  });
+
   it('the bootstrap line derives its verb list from VERB_ROSTER — a new verb reaches every carrier by existing', () => {
     const { VERB_ROSTER } = require('../lib/tc-verbs');
     const md = primer.tcBootstrapLines('md').join('\n');
     const comment = primer.tcBootstrapLines('comment').join('\n');
-    for (const v of VERB_ROSTER) {
+    // Every verb a project pane can use is named. A verb only the Project
+    // Master can use (#2031) is deliberately not: it would be refused in every
+    // pane this line is read in.
+    const { verbsFor } = require('../lib/tc-verbs');
+    const forPanes = verbsFor('pane');
+    assert.equal(forPanes.length + verbsFor('master').length + verbsFor('unprimed').length, VERB_ROSTER.length,
+      'every roster entry belongs to exactly one audience');
+    for (const v of verbsFor('unprimed')) {
+      assert.ok(!md.includes(`\`${v.id}\``), `md form does not yet name the unprimed ${v.id}`);
+    }
+    assert.ok(forPanes.length > 0);
+    for (const v of forPanes) {
       assert.ok(md.includes(`\`${v.id}\``), `md form names ${v.id}`);
       assert.ok(comment.includes(v.id), `comment form names ${v.id}`);
+    }
+    for (const v of VERB_ROSTER.filter((x) => x.audience === 'master')) {
+      assert.ok(!md.includes(`\`${v.id}\``), `md form does not advertise the Master-only ${v.id}`);
+      assert.ok(!new RegExp(`\\b${v.id}\\b`).test(comment), `comment form does not advertise the Master-only ${v.id}`);
     }
   });
 

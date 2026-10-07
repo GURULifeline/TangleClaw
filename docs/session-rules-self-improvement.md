@@ -42,6 +42,26 @@ machine-specific — TangleClaw's SessionStart hooks live in the ignored
   prime, the Project Master, or the wrap's own prompts. Keeping the two separate is what
   makes a REJECTED rule distinguishable from an unreviewed one; collapse them and the wrap
   re-proposes declined rules at every wrap that sees the same learning.
+- **A rule is named `Rule #<id>` everywhere** (#2029). Every surface derives the label from
+  `session_rules.id`, never from the text: the Project Rules and Global rules lists, their
+  Approve / Reject / Delete / toggle controls and status lines, the wrap drawer's proposal
+  rows and summary, the `rule-proposal` step's detail, `tc rules`, the startup rules
+  delivered to a session (inline, over the hook channel and in the launch step), the wrap
+  rules in the wrap prompt, the Hard rules in the Project Master's instructions, the
+  delivery ledger, and the operator-only refusal message. The Master's shipped baseline,
+  used only when no Hard rule is stored, has no id and renders as written. Every rule object from the API
+  carries `label` (`"Rule #<id>"`). The authored text is displayed after the label; when it
+  opens with a `RULE #<id> — ` prefix naming the **same** rule, that prefix is dropped from
+  the display so the label is not doubled. Exactly one such prefix is dropped. A prefix naming a
+  **different** id stays visible and is flagged: a *text says #<n>* badge on the lists and the
+  wrap drawer, and `text says #<n>, not this rule` in `tc rules`
+  (`lib/rule-label.js#authoredIdMismatch`). A number later in the text is a reference, not a claim,
+  and is not flagged. Stored text is never changed, and approval still compares
+  the stored text (#1053). Rules: `lib/rule-label.js` for the server, mirrored by
+  `public/api-helper.js#tcRuleLabel` / `#tcDisplayRuleText` for the pages
+  (`test/rule-label-drift.test.js` holds them together). A "superseded" rule is not a
+  stored state; it is an active rule the operator disabled when its replacement was
+  approved, and it is labelled like any other.
 
 ## Learnings ingestion (the DB writer, #466)
 
@@ -66,16 +86,16 @@ and `GET /api/learnings` (#1121); a valid project with no rules returns `200 []`
 | Method & path | Purpose |
 |---|---|
 | `GET /api/session-rules?projectId=&kind=` | List rules |
-| `POST /api/session-rules` `{content, projectId, createdBy?}` | Create (projectId required) |
-| `PUT /api/session-rules/:id` `{content?, enabled?, changedBy?}` | Update (snapshots a version) |
-| `DELETE /api/session-rules/:id` | Delete (snapshots a tombstone) |
+| `POST /api/session-rules` `{content, projectId, createdBy?}` | Create (projectId required). #2013: the operator creates an active rule; a session bound to the project creates a proposal (`createdBy` is recorded as `ai` whatever the body says); anyone else is refused |
+| `PUT /api/session-rules/:id` `{content?, enabled?}` | Update (snapshots a version). #2013: the operator only, except that a bound session may revise the text of its own project's still-proposed AI rule. `changedBy` is recorded from the caller, not the body |
+| `DELETE /api/session-rules/:id` | Delete (snapshots a tombstone). #2013: the operator only, except that a bound session may withdraw its own project's still-proposed AI rule |
 | `GET /api/session-rules/:id/versions` | Version history (newest first) |
-| `POST /api/session-rules/:id/restore` `{versionNo}` | Roll back to a prior version |
-| `POST /api/session-rules/promote` `{learningId, content?, projectId?}` | Promote a learning → rule (operator-confirmed; defaults to the learning's project) |
+| `POST /api/session-rules/:id/restore` `{versionNo}` | Roll back to a prior version. #2013: the operator only |
+| `POST /api/session-rules/promote` `{learningId, content?, projectId?}` | Promote a learning → rule (defaults to the learning's project). #2013: the operator as the caller, then the password |
 | `POST /api/session-rules/conflicts` `{content, projectId?}` | Non-authoritative conflict-candidate signal |
-| `PUT /api/session-rules/:id/status` `{status, expectedContent, changedBy?, changeReason?}` | #569 — approve (`active`) or decline (`rejected`) a proposal. An AI `changedBy` requesting `active` is refused with 403. #1053 — an approval must carry `expectedContent`, the exact stored text the operator was shown: without it, `400 EXPECTED_CONTENT_REQUIRED`; when the rule no longer holds that text, `409 RULE_CONTENT_CHANGED` carrying `currentContent`, and nothing changes. The password gate is checked first, so a caller without it learns nothing about the text. A rejection needs no `expectedContent` and is never compared |
+| `PUT /api/session-rules/:id/status` `{status, expectedContent, changeReason?}` | #569 — approve (`active`) or decline (`rejected`) a proposal. #1053 — an approval must carry `expectedContent`, the exact stored text the operator was shown: without it, `400 EXPECTED_CONTENT_REQUIRED`; when the rule no longer holds that text, `409 RULE_CONTENT_CHANGED` carrying `currentContent`, and nothing changes. The password gate is checked first, so a caller without it learns nothing about the text. A rejection needs no `expectedContent` and is never compared. #2013: approving needs the operator as the caller as well as the password; a bound session may decline its own project's still-proposed AI rule, and moving an `active` rule out of `active` is the operator's |
 | `GET /api/learnings?projectId=&tier=` | #569 — list a project's learnings |
-| `PUT /api/learnings/:id/tier` `{tier}` | #569 — operator override of a learning's tier |
+| `PUT /api/learnings/:id/tier` `{tier}` | #569 — operator override of a learning's tier. #2018: the operator only, because an active learning is rendered into the project's session primes |
 
 ## The automatic loop (#569)
 
@@ -133,18 +153,40 @@ is therefore carried separately, and the property is enforced at **both** doors 
 
 **What that does and does not guarantee.** In the store the property is absolute: no code
 path reaches `status:'active'` from AI authorship without authority being passed explicitly,
-and `setStatus` refuses `changedBy:'ai'` outright. Over HTTP, the two routes that can grant
-authority — `POST /api/session-rules/promote` and `PUT /api/session-rules/:id/status` with
-`status:'active'` — are gated by the **operator password** (`checkDeletePassword`), the same
-gate as deleting a project, killing a session, or wrapping. Declining a proposal is
-ungated, because it grants nothing.
+and `setStatus` refuses `changedBy:'ai'` outright.
 
-That gate is only real protection **when a delete password is configured**. With none set it
-allows every caller, so on a machine where in-session agents are instructed to call the
-TangleClaw API, an agent could approve a rule — exactly as it could already delete a project.
-This is stated rather than glossed: the honest claim is that rule approval is as protected as
-every other privileged operation in TangleClaw, not that it is unconditionally
-human-gated. Set a delete password if that distinction matters to you.
+Over HTTP, every route that creates or changes a rule first establishes WHO is calling (#2013),
+using the caller model every operator-only project route uses (`sharedDocsAccess.resolveAccess`,
+#1752):
+
+- **The operator** (an authenticated dashboard session) may create a governing rule, and edit,
+  disable, delete, restore, approve or reject any rule, promote a learning, and restore the
+  Project Master's default rules.
+- **A session bound to the project** (its `x-tangleclaw-project-id` and `x-tangleclaw-launch-id`
+  headers, verified against a live launch) may propose a rule for its OWN project, and revise,
+  withdraw or decline an AI proposal in that project, the wrap's included, while it is still
+  `proposed`. What it creates is
+  recorded as `createdBy:'ai'` and lands `proposed`, whatever the body claims. Once the operator
+  approves a proposal, the session that wrote it has no more rights over it than any other.
+- **Anyone else** — no binding, a binding that does not verify, another project's session, the
+  Project Master — changes nothing, and is told why (`PROJECT_BINDING_REQUIRED`,
+  `PROJECT_BINDING_INVALID`, `OTHER_PROJECT`, `PROJECT_READ_ONLY`, `OPERATOR_ONLY`).
+
+Attribution follows the caller: `changedBy` in a rule's version history is `operator` for the
+operator and `ai` for a session, never a value read from the request body. Before #2013 a body
+could claim either, and an omitted field was recorded as the operator's.
+
+Approval (`PUT /api/session-rules/:id/status` with `status:'active'`) and
+`POST /api/session-rules/promote` also keep the **operator password** (`checkDeletePassword`).
+That password is only real protection when one is configured, but neither route rests on it
+alone any more: a session, or any caller that is not the operator, is refused before the password is
+consulted.
+
+**The remaining boundary, stated rather than glossed.** When the auth gate stands down (no
+admin account exists yet), `resolveAccess` accepts a same-origin, browser-shaped request as the
+operator, and a local process can forge those headers. That is the posture of every
+operator-only route on such an install, not something peculiar to rules; once an admin account
+exists, the operator is an authenticated session and it does not apply.
 
 `findConflictCandidates` / the `/conflicts` route return active in-scope rules sharing
 significant token overlap with a proposed edit. This is a **hint of what to compare**, NOT
@@ -183,10 +225,14 @@ Trivial, non-conflicting, **operator-authored** edits skip the gate.
    API and auto-versioned.
 
 ### Apply paths (all auto-snapshot a version)
-- New AI rule: `POST /api/session-rules {content, createdBy:'ai'}`
-- Promote: `POST /api/session-rules/promote {learningId, ...}`
-- Edit: `PUT /api/session-rules/:id {content?, enabled?, changedBy:'ai'}`
-- Roll back: `POST /api/session-rules/:id/restore {versionNo}`
+A session sends its launch headers (`x-tangleclaw-project-id`, `x-tangleclaw-launch-id`) on
+every one of these; without them it is refused.
+
+- New AI rule: `POST /api/session-rules {content, projectId}` — lands `proposed`, authored `ai`
+- Promote: `POST /api/session-rules/promote {learningId, ...}` — the operator, with the password
+- Edit: `PUT /api/session-rules/:id {content}` — a session only on a still-proposed AI rule in its project;
+  enabling, disabling and every edit to a governing rule are the operator's
+- Roll back: `POST /api/session-rules/:id/restore {versionNo}` — the operator
 
 ## Rule kinds + the wrap-rule self-critique trigger (CC-6, #381)
 
@@ -232,8 +278,9 @@ At wrap, the AI may notice a recurring wrap-process improvement (e.g. "this proj
 needs a lint pass before the wrap commit"). It proposes a **`kind='wrap'`** rule. Because
 this is an **autonomous (AI-authored) edit**, it goes through the **same Critic gate** as
 any `createdBy:'ai'` edit (procedure above) and is **surfaced user-gated** — never
-auto-applied. Apply path: `POST /api/session-rules {content, projectId, kind:'wrap',
-createdBy:'ai'}` or `/promote {learningId, kind:'wrap'}`. The accepted rule lands in the
+auto-applied. Apply path: a session proposes it with `POST /api/session-rules {content, projectId,
+kind:'wrap'}` and its launch headers, or the operator promotes a learning with
+`/promote {learningId, kind:'wrap'}`. The accepted rule lands in the
 project's **Wrap rules** box in the Project Rules modal and is auto-versioned like any other.
 
 This keeps the contract's "self-improvement suggestions are user-gated, never auto-applied,

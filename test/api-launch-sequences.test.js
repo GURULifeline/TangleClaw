@@ -146,6 +146,52 @@ describe('GET /api/launch-sequences (car 21.5)', () => {
     assert.ok(!theirs.body.sequences.some((s) => ids.includes(s.sequenceId)));
   });
 
+  // #1937: each row carries the mode its launch FROZE; the response also says
+  // the project's CURRENT mode, which a later change of the setting moves.
+  it('reports the project\'s current recovery mode beside the frozen per-launch one', async () => {
+    const before = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+    assert.equal(before.body.projectRecoveryMode, 'operator', 'the default, when the project sets nothing');
+    store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: { recoveryMode: 'advisory' } });
+    try {
+      const after = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(after.body.projectRecoveryMode, 'advisory');
+      assert.ok(after.body.sequences.every((s) => s.recoveryMode === before.body.sequences.find((b) => b.sequenceId === s.sequenceId).recoveryMode),
+        'a launch keeps the mode it froze');
+    } finally {
+      store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: {} });
+    }
+    const unknown = await get(server, '/api/launch-sequences?projectId=999999');
+    assert.equal(unknown.body.projectRecoveryMode, null, 'no project, no mode to report');
+  });
+
+  // #1937: why the project is in its mode, the operator's decision on record,
+  // and the file disagreeing with it. The store outranks the file.
+  it('reports the source, the operator\'s decision and a file that disagrees with it', async () => {
+    const plain = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+    assert.equal(plain.body.projectRecoverySource, 'default');
+    assert.equal(plain.body.projectRecoveryDiscrepancy, null);
+    assert.equal(plain.body.projectRecoveryDecision, null);
+    assert.equal(plain.body.projectRecoveryInheritedNotice, null);
+    store.projectRecoveryState.recordDecision(project.id, 'operator', 'operator');
+    store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: { recoveryMode: 'advisory' } });
+    try {
+      const pinned = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(pinned.body.projectRecoveryMode, 'operator', 'a file saying advisory does not loosen a pin');
+      assert.equal(pinned.body.projectRecoverySource, 'pinned');
+      assert.match(pinned.body.projectRecoveryDiscrepancy, /the pin decides/);
+      assert.equal(pinned.body.projectRecoveryDecision.pinnedMode, 'operator');
+      assert.equal(pinned.body.projectRecoveryDecision.decidedBy, 'operator');
+      assert.ok(pinned.body.projectRecoveryDecision.decidedAt);
+    } finally {
+      store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: {} });
+      store.getDb().prepare('DELETE FROM project_recovery_state WHERE project_id = ?').run(project.id);
+    }
+    const unknown = await get(server, '/api/launch-sequences?projectId=999999');
+    for (const field of ['projectRecoverySource', 'projectRecoveryDiscrepancy', 'projectRecoveryDecision', 'projectRecoveryInheritedNotice']) {
+      assert.equal(unknown.body[field], null, field);
+    }
+  });
+
   it('keeps the rule-delivery record separate, and says when there is none', async () => {
     const res = await get(server, `/api/launch-sequences?projectId=${project.id}`);
     const byId = new Map(res.body.sequences.map((s) => [s.sequenceId, s]));

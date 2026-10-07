@@ -142,6 +142,30 @@ describe('medusa-exchanges (#1839)', () => {
       assertReplayMatches(bound.exchange_id);
     });
 
+    it('keeps a declared component\'s request id prefix for that component alone', () => {
+      mx.declareSystemOwner('test-component', { requestIdPrefix: 'testc:' });
+      const recipient = { workspaceId: 'builder-ws', projectId: 20 };
+      const count = () => store.getDb().prepare('SELECT COUNT(*) AS n FROM medusa_exchanges').get().n;
+      const reserved = (err) => err.code === 'REQUEST_ID_RESERVED' && err.status === 400;
+      // A project session, verified or not, cannot make an exchange under it.
+      assert.throws(() => mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testc:route-1:send1' }, PM, 10), sender: { projectId: 10, sessionId: 1 }, recipient }), reserved);
+      assert.throws(() => mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testc:' }, PM, 10), sender: { projectId: 10 }, recipient }), reserved);
+      // Nor can TangleClaw itself from another listener, nor a session whose number is written like the name.
+      const system = mx.validateSendMeta({ requestId: 'testc:route-1:send1' }, { kind: 'system' }, null);
+      assert.throws(() => mx.createSendIntent({ meta: system, sender: { projectId: null, sessionId: 'another-component' }, recipient }), reserved);
+      assert.throws(() => mx.createSendIntent({ meta: system, sender: { projectId: 10, sessionId: 'test-component' }, recipient }), reserved);
+      assert.equal(count(), 0, 'none of those was recorded');
+      // The component itself can, and what it makes is its own.
+      const own = mx.createSendIntent({ meta: system, sender: { projectId: null, sessionId: 'test-component' }, recipient });
+      assert.equal(mx.systemOwnerOf(own), 'test-component');
+      assert.equal(mx.reservedOwnerOf('testc:anything'), 'test-component');
+      // An id that merely contains the prefix, or shares its first letters, is anybody's.
+      assert.equal(mx.reservedOwnerOf('x-testc:1'), null);
+      assert.equal(mx.reservedOwnerOf('testcase-7'), null);
+      mx.createSendIntent({ meta: mx.validateSendMeta({ requestId: 'testcase-7' }, PM, 10), sender: { projectId: 10 }, recipient });
+      assert.equal(count(), 2);
+    });
+
     it('refuses to record a reused requestId, so a retry never reaches the Hub twice', () => {
       const meta = mx.validateSendMeta({ requestId: 'req-a' }, PM, 10);
       const args = { meta, sender: { projectId: 10 }, recipient: { workspaceId: 'builder-ws', projectId: 20 } };
@@ -223,7 +247,7 @@ describe('medusa-exchanges (#1839)', () => {
       assertReplayMatches(x.exchange_id);
     });
 
-    it('records the dashboard auto-ack as operator-ui and leaves a reply-required exchange unsatisfied', () => {
+    it('records an operator-ui acknowledgement as such and leaves a reply-required exchange unsatisfied', () => {
       const x = sendPmToBuilder({ priority: 'blocking' });
       mx.recordAcknowledged(['hub-1'], 'builder-ws', { kind: 'operator-ui' });
       const row = store.medusaExchanges.get(x.exchange_id);
@@ -460,6 +484,124 @@ describe('medusa-exchanges (#1839)', () => {
       assert.equal(mx.pendingWakeCount('builder-ws'), 0);
       assert.equal(mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux' }), 0);
       assert.equal(mx.recordWakeForRecipient('pm-ws', 'wake_attempted', { code: 'tmux' }), 0);
+    });
+  });
+
+  describe('a re-arm is taken once per count (#2086)', () => {
+    it('a caller holding a stale count re-arms nothing, though the trigger is valid', () => {
+      const x = sendPmToBuilder({}, 'hub-1');
+      mx.recordArrival({ hubId: 'hub-1', recipientWorkspaceId: 'builder-ws' });
+      const miss = (nonce) => {
+        mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux', detail: { nonce } });
+        mx.recordWakeForRecipient('builder-ws', 'wake_not_accepted', { code: 'nonce-in-composer', detail: { nonce }, attemptNonce: nonce });
+      };
+      miss('n1');
+      assert.equal(mx.rearm(x.exchange_id, { expectRearmCount: 1, nextEligibleAt: '2026-09-25T12:05:00.000Z' }), null, 'a count it has not reached');
+      assert.ok(mx.rearm(x.exchange_id, { expectRearmCount: 0, nextEligibleAt: '2026-09-25T12:05:00.000Z' }));
+      miss('n2');
+      // A second pass that read the row before the first re-arm still holds count 0.
+      assert.equal(mx.rearm(x.exchange_id, { expectRearmCount: 0, nextEligibleAt: '2026-09-25T12:09:00.000Z' }), null);
+      assert.equal(store.medusaExchanges.get(x.exchange_id).rearm_count, 1);
+      assert.ok(mx.rearm(x.exchange_id, { expectRearmCount: 1, nextEligibleAt: '2026-09-25T12:09:00.000Z' }));
+      assert.equal(store.medusaExchanges.get(x.exchange_id).rearm_count, 2);
+    });
+  });
+
+  describe('whether an inbox has been nudged already, by each message\'s own id (#2086)', () => {
+    /** A delivered message to the Builder, optionally nudged. */
+    const delivered = (hubId, { nudged = true } = {}) => {
+      const x = sendPmToBuilder({}, hubId);
+      mx.recordArrival({ hubId, recipientWorkspaceId: 'builder-ws' });
+      if (nudged) mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux', detail: { nonce: `n-${hubId}` } });
+      return x;
+    };
+
+    it('a nudged message is owned, and stays owned once it has been fetched', () => {
+      delivered('hub-1');
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true);
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'reading it is not a reason to nudge again');
+      mx.recordAcknowledged(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'nor is a redelivery of mail already handled');
+    });
+
+    it('a message the recipient fetched or handled is owned though it was never nudged', () => {
+      delivered('hub-1', { nudged: false });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), false, 'neither nudged nor read');
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'a read on record is enough');
+      assert.equal(store.medusaExchanges.facts(store.medusaExchanges.getByHubId('hub-1', 'send').exchange_id)
+        .filter((f) => f.fact === 'wake_attempted').length, 0);
+
+      delivered('hub-2', { nudged: false });
+      mx.recordAcknowledged(['hub-2'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-2']), true, 'so is an acknowledgement with no read before it');
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), true);
+    });
+
+    it('a look from the dashboard is not a read, so it owns nothing', () => {
+      delivered('hub-1', { nudged: false });
+      assert.equal(mx.recordRead(['hub-1'], 'builder-ws', { kind: 'operator-ui' }), 0);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), false);
+    });
+
+    it('a read of one message vouches for that message only', () => {
+      delivered('hub-1', { nudged: false });
+      delivered('hub-2', { nudged: false });
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), false);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-2']), false);
+    });
+
+    it('new mail is never hidden behind old: one message never nudged makes the answer no', () => {
+      delivered('hub-1');
+      mx.recordRead(['hub-1'], 'builder-ws', BUILDER);
+      delivered('hub-2', { nudged: false });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), false);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-2']), false);
+      mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux', detail: { nonce: 'n-2' } });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-2']), true);
+    });
+
+    it('owned mail elsewhere does not vouch for a message: handled or replied rows are not counted in', () => {
+      delivered('hub-1');
+      delivered('hub-2');
+      mx.recordAcknowledged(['hub-1', 'hub-2'], 'builder-ws', BUILDER);
+      delivered('hub-3', { nudged: false });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-3']), false, 'two handled rows do not account for one new message');
+    });
+
+    it('a re-armed message is not owned: the monitor is meant to try again', () => {
+      const x = delivered('hub-1');
+      mx.recordWakeForRecipient('builder-ws', 'wake_not_accepted', { code: 'nonce-in-composer', detail: { nonce: 'n-hub-1' }, attemptNonce: 'n-hub-1' });
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), true, 'a miss alone waits for the watchdog');
+      assert.ok(mx.rearm(x.exchange_id, { expectRearmCount: 0, nextEligibleAt: '2026-09-25T12:05:00.000Z' }));
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1']), false);
+    });
+
+    it('fails conservative on anything it cannot vouch for', () => {
+      delivered('hub-1');
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', 'hub-unknown']), false, 'a message with no exchange');
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-1', null]), false, 'a message with no id');
+      assert.equal(mx.alreadyAttempted('builder-ws', []), false, 'an empty inbox proves nothing');
+      assert.equal(mx.alreadyAttempted('builder-ws', undefined), false);
+      assert.equal(mx.alreadyAttempted('builder-ws', 1), false, 'a count is not an identity');
+      assert.equal(mx.alreadyAttempted('someone-else-ws', ['hub-1']), false, 'mail addressed to another workspace');
+      assert.equal(mx.alreadyAttempted(null, ['hub-1']), false);
+    });
+
+    it('an untracked exchange is never owned: no nudge is ever recorded on it', () => {
+      const x = mx.createSendIntent({
+        meta: mx.validateSendMeta({}, PM, 10),
+        sender: { projectId: 10, sessionId: 1, workspaceId: 'pm-ws' },
+        recipient: { workspaceId: 'builder-ws' },
+        tracking: 'untracked'
+      });
+      mx.bindHubId(x.exchange_id, 'hub-u', { hubStatus: 'received' });
+      // A nudge of the workspace is recorded on tracked exchanges only, so an
+      // untracked one never has an attempt to be owned by.
+      assert.equal(mx.recordWakeForRecipient('builder-ws', 'wake_attempted', { code: 'tmux', detail: { nonce: 'n-u' } }), 0);
+      assert.equal(mx.alreadyAttempted('builder-ws', ['hub-u']), false);
     });
   });
 

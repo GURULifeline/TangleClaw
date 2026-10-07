@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The operator bridge's Discord helper (#2031), written by
+         `tc-bridge-helper install-launchd`. Paths and a label only: the helper
+         reads its two secrets from the Keychain and its ids from
+         ~/.tangleclaw/bridge-helper/config.json, so nothing secret and no
+         Discord id is ever placed here. -->
+    <key>Label</key>
+    <string>com.tangleclaw.bridge-helper</string>
+    <!-- The program is the node binary, as for the server: a launchd job
+         cannot exec a script under a protected folder such as ~/Documents,
+         but node can read one there. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE_PATH__</string>
+        <string>__REPO_DIR__/bin/tc-bridge-helper</string>
+        <string>run</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- A helper that cannot start (no config, a missing secret) exits at
+         once; this spaces launchd's restarts. It contacts nothing before its
+         config and secrets load, and a token Discord refuses stops the Gateway
+         without ending the process, so restarts cannot spend Discord's daily
+         identify budget. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.tangleclaw/logs/bridge-helper.log</string>
+</dict>
+</plist>
