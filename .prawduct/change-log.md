@@ -58,6 +58,28 @@ The PM dispatched this over Medusa. The Architect admitted Chunk 01 as a low-ris
 
 **2026-10-07: main merged in, and the Master's nudge given its own wording.** The branch had fallen behind two releases, so `origin/main` was merged in (a true merge; the `CHANGELOG.md` entries moved under the current `[Unreleased]`, the golden primes were regenerated). A cumulative review at the merged head, `rev-20261007T182304Z-54ead0f0`, found 1 blocking finding in the original change: the nudge template is shared with the Project Master, and the rewrite put `tc message` commands in it. `tc message` resolves a project name, which the Master lacks, so each of those commands refuses in its pane and the only route left in the line was the raw ack. Fix: the API base now picks the form (`lib/medusa-wake.js#_nudgeText`). The Master's line names `POST …/send` then `POST …/read`, reply first, with no `tc message` command; the stranded-nudge matcher derives one pattern from each form and accepts a form only with its own kind of base. Tests: `test/medusa-wake.test.js`, `test/medusa-wake-stranded-nudge.test.js`. The full suite ran on the merged tree; one failure, `test/setup-scan-own-install.test.js`, is the load-sensitive #1999 and is outside this change.
 
+## 2026-09-27 — Claude panes get a private socket root, so native messaging never needs a shared /tmp (#1904)
+
+<!-- prawduct: type=bugfix | scope=claude-socket-root -->
+
+The PM dispatched this over Medusa. Plan: `.prawduct/artifacts/build-plan-1904-claude-socket-root.md` (local, not tracked).
+
+**Problem.** Claude Code 2.1.283 binds its cross-session socket at `(XDG_RUNTIME_DIR || CLAUDE_CODE_TMPDIR || "/tmp")/cc-socks/<pid>.sock` (read from the binary) and refuses a directory another local user could tamper with. A `/private/tmp` at `0777` therefore switched native messaging off in every pane TangleClaw launched.
+
+**The change.**
+- **Module.** `lib/engine-temp-root.js` provisions `<store base>/run/<engine>-tmp` at `0700` and vets it with Claude's own rule: no symlinked TangleClaw-owned component, no ancestor that is group- or world-writable without the sticky bit or owned by another user, and a socket path within 103 bytes.
+- **Fails closed.** A root that fails is omitted, and the log names the path, a command to run by hand, and whether Claude's default root works. The launch is not refused (assumption A1, stated on the PR). Nothing TangleClaw does not own is ever chmodded.
+- **Profile-driven.** The Claude profile declares `capabilities.privateTempRoot`, which is registered in `READ_CAPABILITIES`.
+- **Wiring.** Project panes and the Project Master's pane get the variable above the ambient env floor and below `launch.env`, so an operator-set `CLAUDE_CODE_TMPDIR` wins. `POST /api/sessions/:project` returns `privateTempRoot`.
+- **Docs.** `docs/engine-guide.md` separates native messaging from Medusa and gives the manual cleanup for the root, which the OS never clears.
+
+**Evidence.**
+- `test/engine-temp-root.test.js`: 24 cases on the real filesystem and through seams.
+- Seam tests (sessions, master, a `launchSession` pane hop, the route's 201 field): each is mutation-checked red.
+- The targeted ring is green: 29 files, 1306 tests. The full suite was not run, under the Pilot Envelope.
+- Live: a throwaway Claude 2.1.283 pane logged `[uds-messaging] Listening: <root>/cc-socks/<pid>.sock`.
+- Critic: cumulative review `rev-20260927T225544Z-09327fc5` (1 blocking, the plan's format), resolved by `rev-20260927T230515Z-18770e58` with 0 blocking.
+
 ## 2026-10-07 — #2154: a Leave keeps a file out of the wrap commit whatever a later step concludes
 
 <!-- prawduct: type=bugfix | scope=2154-keep-local-leave -->
