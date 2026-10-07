@@ -35,7 +35,7 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
-## 2026-10-07 — #2165: release panels, two more car states, a car-state legend and a car info popover on served plan pages
+## 2026-10-07 — #2165: release panels, two more car states, a car-state legend and car details on served plan pages
 
 <!-- prawduct: type=feature | scope=2165-release-panel -->
 
