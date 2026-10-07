@@ -56,6 +56,27 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 **#1709's point 5 is NOT done by this PR, and the PR does not close #1709.** The issue's own acceptance list includes migrating four specific, already-live rows (Builder1 rules 6, 7, 33; Builder2 rule 41) to `retired`. This PR ships the mechanism those rows need, but does not touch them: a schema migration cannot safely guess which pre-existing disabled rows are genuinely dead versus a rule an operator deliberately, reversibly switched off — exactly the distinction #1709 exists to preserve, so auto-retiring on migration would violate the issue's own stated principle. Those four rows are owed one manual Retire action each, through the mechanism this PR ships, once it is live — an Operator/Builder1/Builder2-session action, not a migration. PR body changed from `Closes #1709` to a plain reference so merge does not auto-close it prematurely.
 
 **Review.** Cumulative Critic on `4997ad28b` (rev-20261007T164153Z-96809607): 0 blocking, 1 warning (above, filed), 2 note (backlog reconciliation — #1047/#2016 are pre-existing, untouched, out of scope; #1709's disposition is recorded above rather than closed). Synced to `origin/main` after (merge commit `d80cd8eed`, no conflicts; schema v56 and `sessionRuleCaller` both unmoved on main since the design's merge-base) — full suite re-run green on the merged tree before the PR review. A second cumulative pass at the PR boundary (`rev-20261007T171054Z-8b9a5cbf`, commit `d425bd595`) caught one real BLOCKING gap: `restore()`'s `'restore'`-origin replacement-proposal path was untested, and 3 pre-existing restore tests had silently gone no-op from the same active-rule-edit-defers-to-proposal behavior change this PR introduces. Fixed in `705396f0e` (4 test files: 3 corrected fixtures, 2 new direct-coverage tests, mutation-verified) and closed by `/prawduct:critic verify-resolutions` (`rev-20261007T173715Z-15781152`): 0 findings, composed coverage spans the whole branch with 0 unresolved blocking. The Architect then put the PR itself on a blocking architecture review (ruling A88, above) — fixed per this entry's own addenda.
+## 2026-09-27 — Claude panes get a private socket root, so native messaging never needs a shared /tmp (#1904)
+
+<!-- prawduct: type=bugfix | scope=claude-socket-root -->
+
+The PM dispatched this over Medusa. Plan: `.prawduct/artifacts/build-plan-1904-claude-socket-root.md` (local, not tracked).
+
+**Problem.** Claude Code 2.1.283 binds its cross-session socket at `(XDG_RUNTIME_DIR || CLAUDE_CODE_TMPDIR || "/tmp")/cc-socks/<pid>.sock` (read from the binary) and refuses a directory another local user could tamper with. A `/private/tmp` at `0777` therefore switched native messaging off in every pane TangleClaw launched.
+
+**The change.**
+- **Module.** `lib/engine-temp-root.js` provisions `<store base>/run/<engine>-tmp` at `0700` and vets it with Claude's own rule: no symlinked TangleClaw-owned component, no ancestor that is group- or world-writable without the sticky bit or owned by another user, and a socket path within 103 bytes.
+- **Fails closed.** A root that fails is omitted, and the log names the path, a command to run by hand, and whether Claude's default root works. The launch is not refused (assumption A1, stated on the PR). Nothing TangleClaw does not own is ever chmodded.
+- **Profile-driven.** The Claude profile declares `capabilities.privateTempRoot`, which is registered in `READ_CAPABILITIES`.
+- **Wiring.** Project panes and the Project Master's pane get the variable above the ambient env floor and below `launch.env`, so an operator-set `CLAUDE_CODE_TMPDIR` wins. `POST /api/sessions/:project` returns `privateTempRoot`.
+- **Docs.** `docs/engine-guide.md` separates native messaging from Medusa and gives the manual cleanup for the root, which the OS never clears.
+
+**Evidence.**
+- `test/engine-temp-root.test.js`: 24 cases on the real filesystem and through seams.
+- Seam tests (sessions, master, a `launchSession` pane hop, the route's 201 field): each is mutation-checked red.
+- The targeted ring is green: 29 files, 1306 tests. The full suite was not run, under the Pilot Envelope.
+- Live: a throwaway Claude 2.1.283 pane logged `[uds-messaging] Listening: <root>/cc-socks/<pid>.sock`.
+- Critic: cumulative review `rev-20260927T225544Z-09327fc5` (1 blocking, the plan's format), resolved by `rev-20260927T230515Z-18770e58` with 0 blocking.
 
 ## 2026-10-07 — #2154: a Leave keeps a file out of the wrap commit whatever a later step concludes
 
