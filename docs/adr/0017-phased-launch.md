@@ -218,8 +218,8 @@ for advisory" as two different things a file can say.
 A project's first launch under the advisory default says so once, above its task step, and the launch
 that carried it is recorded (`projectRecoveryInheritedNotice`). One file shape gets no notice: a
 `project.json` whose `launchSequence` block is present with no `recoveryMode` key holds no value at all,
-resolves as `default`, and takes advisory silently. No save produces that shape, so it is a hand-edited
-file. The notice is claimed when the launch is recorded, so a first launch that ends before its task
+resolves as `default`, and takes advisory silently. No save by a released version produces that shape, so it is in
+practice a hand-edited file. The notice is claimed when the launch is recorded, so a first launch that ends before its task
 step is served has still used it. The notice does not say the project
 "moved": a project that has never launched and one that ran operator-cleared for a year both hold the
 seeded value nobody chose, and the sentence has to be true of both.
