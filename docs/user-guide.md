@@ -679,7 +679,7 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 - A plan moved to `plans/archive/` answers 404 with **Plan archived**, so a stale link says why it stopped working.
 - A plan is addressed by its file name alone — a path, `..`, or a symlink pointing outside the plans directory is refused.
 - Sessions discover the links with `GET /api/projects/<projectId>/plans` (numeric id or project name), which returns every plan with its URL on the host you reach TangleClaw on — never `localhost`, and `url: null` with a note when TangleClaw cannot tell which host that is. `tc capabilities` names the endpoint.
-- Raw HTML in a plan is shown as text, never rendered. The one styled block is a **train card**: a fenced block tagged `tc-train` whose body is one JSON object. The card shows a 🚂 row of issue cars, green when closed, with the train's name, a closed/total count and an optional `verified` badge. Clicking it expands the thesis, the issue table and the sequencing note. The Roadmap Board uses these cards.
+- Raw HTML in a plan is shown as text, never rendered. The one styled block is a **train card**: a fenced block tagged `tc-train` whose body is one JSON object. The card shows a 🚂 row of issue cars, green when closed, and under it the train's name, a closed/total count and an optional `verified` badge. Clicking the name row expands the thesis, the issue table and the sequencing note. The Roadmap Board uses these cards.
 
   ````
   ```tc-train
@@ -706,7 +706,9 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
 
   A dropped car is left out of the count on both sides: a train of five cars with one dropped and two closed reads **(2/4)**, and the expanded card adds **1 dropped**. A train whose cars were all dropped reads **(0/0)**.
 
-  Each car shows a small **info popover** when you hover over it, move to it with the Tab key, or tap it. It gives the issue number and title, the car's state with what that state means (the same words as the legend), and the lane that owns the train when the block names an `owner`. A car may also carry `reason`, up to 300 characters, saying why it needs attention; the popover shows it as **Reason: …**. A car with no `title` and no `reason` still shows its number, state and meaning. Tapping a car also opens or closes its card, as tapping anywhere on that row does. The cars in a release panel work the same way.
+  Each car opens a **detail** when you hover over it, move to it with the Tab key, or tap it. The detail appears in the row, directly under the line its car is on, and the cars after it move down to make room; it closes when you move away. It gives the issue number and title, the car's state with what that state means (the same words as the legend), and the lane that owns the train when the block names an `owner`. A car may also carry `reason`, up to 300 characters, saying why it needs attention; the detail shows it as **Reason: …**. A car with no `title` and no `reason` still shows its number, state and meaning. Nothing in a detail is cut off, however long. You can move the pointer down into an open detail, to read or select its text, and it stays open. The cars in a release panel work the same way.
+
+  The cars sit on their own row above the train's name. Pressing a car never opens or closes the card; press the name row for that.
 - A **release panel** is a fenced block tagged `tc-release`. It draws one planned release as a single panel: a header with the version, a status badge and the count, then one train card per workstream, in the order written. Every row shows without a click, and each card still opens to its own thesis, issue table and sequencing note.
 
   ```tc-release
