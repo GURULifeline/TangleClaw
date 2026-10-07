@@ -25,6 +25,8 @@ setLevel('error');
 
 const store = require('../lib/store');
 const projectConfig = require('../lib/project-config');
+const recoveryDefault = require('../lib/recovery-default');
+const authGate = require('../lib/auth-gate');
 const projects = require('../lib/projects');
 const launchSequence = require('../lib/launch-sequence');
 const tmux = require('../lib/tmux');
@@ -54,23 +56,18 @@ function tableDdl() {
 }
 
 /**
- * Run a block with the shipped default recovery mode set to `advisory`.
- *
- * The inherited row of the resolver depends on the shipped default, which is
- * still `operator`, so the row is unreachable in production today. It is
- * built now so the default can change later without touching this machinery,
- * and this is how its tests reach it.
+ * Run a block on an install whose login is in force, which is where advisory
+ * is the default recovery mode. Installs the gate probe `server.js` installs
+ * once its listener is bound, answering `armed`, and removes it afterwards.
  * @param {function(): *} fn - The block
  * @returns {*} Whatever the block returns
  */
 function withAdvisoryDefault(fn) {
-  const block = projectConfig.DEFAULT_PROJECT_CONFIG.launchSequence;
-  const shipped = block.recoveryMode;
-  block.recoveryMode = 'advisory';
+  recoveryDefault.setGateStateProbe(() => authGate.GATE_STATES.ARMED);
   try {
     return fn();
   } finally {
-    block.recoveryMode = shipped;
+    recoveryDefault.setGateStateProbe(null);
   }
 }
 
@@ -183,24 +180,55 @@ describe('the recovery-mode resolver (#1937)', () => {
     assert.doesNotMatch(against.discrepancy, /pinned/);
   });
 
-  it('with no decision on record the file decides, and a notice-only row reads exactly like no row', () => {
+  it('with no decision on record and advisory not the default, every recognised file value is operator', () => {
+    // A notice-only row reads exactly like no row. The file cannot choose
+    // advisory here: it sits where the project's own session can write it.
     for (const pin of [null, undefined, noticeOnly]) {
-      assert.deepEqual(resolve(file(undefined), pin), { mode: 'operator', source: 'default' });
-      assert.deepEqual(resolve(file('operator'), pin), { mode: 'operator', source: 'launchSequence' });
-      assert.deepEqual(resolve(file('advisory'), pin), { mode: 'advisory', source: 'launchSequence' });
+      for (const options of [undefined, {}, { advisoryDefault: false }]) {
+        assert.deepEqual(resolve(file(undefined), pin, options), { mode: 'operator', source: 'not-armed' });
+        assert.deepEqual(resolve(file('operator'), pin, options), { mode: 'operator', source: 'not-armed' });
+        const asked = resolve(file('advisory'), pin, options);
+        assert.equal(asked.mode, 'operator', 'a file saying advisory does not get it');
+        assert.equal(asked.source, 'not-armed');
+        assert.match(asked.warning, /no operator decision on record/);
+        assert.match(asked.warning, /PATCH \/api\/projects\/:name/, 'and the warning names what does choose it');
+        assert.equal(asked.discrepancy, undefined, 'nobody decided anything, so there is nothing to disagree with');
+      }
     }
   });
 
-  it('a hand-written operator is not a pin: under an advisory default it reads as inherited, with no discrepancy', () => {
-    withAdvisoryDefault(() => {
-      for (const pin of [null, noticeOnly]) {
-        assert.deepEqual(resolve(file('operator'), pin), { mode: 'advisory', source: 'inherited' });
+  it('only the boolean true makes advisory the default', () => {
+    for (const advisoryDefault of [false, null, undefined, 'true', 1, {}, 'armed']) {
+      for (const value of [undefined, 'operator', 'advisory']) {
+        assert.equal(resolve(file(value), null, { advisoryDefault }).mode, 'operator',
+          `${JSON.stringify(advisoryDefault)} with file ${JSON.stringify(value)}`);
       }
-      assert.deepEqual(resolve(file(undefined), null), { mode: 'advisory', source: 'default' });
-      assert.equal(resolve(file('operator'), pinned).source, 'pinned', 'a real pin still holds');
-      assert.equal(resolve(file('operator'), chosen).source, 'chosen', 'a recorded choice is never the migration');
-    });
-    assert.equal(resolve(file('operator'), null).source, 'launchSequence', 'and the row is unreachable while the default is operator');
+    }
+    assert.equal(resolve(file(undefined), null, { advisoryDefault: true }).mode, 'advisory');
+  });
+
+  it('a decision on record and an unrecognised value answer the same whether or not advisory is the default', () => {
+    for (const value of ['operator', 'advisory', undefined, 'garbage']) {
+      for (const pin of [pinned, chosen]) {
+        assert.deepEqual(resolve(file(value), pin, { advisoryDefault: true }), resolve(file(value), pin),
+          `${JSON.stringify(value)} under ${pin.pinnedMode || 'chosen'}`);
+      }
+    }
+    assert.deepEqual(resolve(file('Advisory'), null, { advisoryDefault: true }), resolve(file('Advisory'), null));
+    assert.equal(resolve(file('Advisory'), null, { advisoryDefault: true }).mode, 'operator',
+      'an advisory default does not rescue a value nobody recognises');
+  });
+
+  it('a hand-written operator is not a pin: under an advisory default it reads as inherited, with no discrepancy', () => {
+    const armed = { advisoryDefault: true };
+    for (const pin of [null, noticeOnly]) {
+      assert.deepEqual(resolve(file('operator'), pin, armed), { mode: 'advisory', source: 'inherited' });
+      assert.deepEqual(resolve(file(undefined), pin, armed), { mode: 'advisory', source: 'default' });
+      assert.deepEqual(resolve(file('advisory'), pin, armed), { mode: 'advisory', source: 'launchSequence' });
+    }
+    assert.equal(resolve(file('operator'), pinned, armed).source, 'pinned', 'a real pin still holds');
+    assert.equal(resolve(file('operator'), chosen, armed).source, 'chosen', 'a recorded choice is never the migration');
+    assert.equal(resolve(file('operator'), null).source, 'not-armed', 'and the row is unreachable while advisory is not the default');
   });
 });
 
@@ -268,7 +296,8 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
    * @returns {object} The resolver's answer
    */
   function effective(project) {
-    return projectConfig.resolveRecoveryMode(store.projectConfig.load(project.path), store.projectRecoveryState.get(project.id));
+    return projectConfig.resolveRecoveryMode(store.projectConfig.load(project.path), store.projectRecoveryState.get(project.id),
+      { advisoryDefault: recoveryDefault.gateAnswer().advisoryDefault });
   }
 
   /**
@@ -478,7 +507,13 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
 
     it('a project that was never inherited never sets the marker', () => {
       withAdvisoryDefault(() => {
+        // A `launchSequence` block with no `recoveryMode` in it: the one file
+        // shape that reads as holding nothing, and so as `default`.
         const absent = makeProject();
+        fs.mkdirSync(path.join(absent.path, '.tangleclaw'), { recursive: true });
+        fs.writeFileSync(path.join(absent.path, '.tangleclaw', 'project.json'),
+          JSON.stringify({ launchSequence: { pasteRules: 'pull' } }) + '\n');
+        assert.equal(effective(absent).source, 'default', 'precondition: this project holds no value');
         const advisory = makeProject('advisory');
         const pinned = makeProject('operator');
         store.projectRecoveryState.recordDecision(pinned.id, 'operator', 'operator');
@@ -493,7 +528,21 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
       });
       const today = makeProject('operator');
       launch(today);
-      assert.equal(store.projectRecoveryState.get(today.id), null, 'and nothing claims while the default is operator');
+      assert.equal(store.projectRecoveryState.get(today.id), null, 'and nothing claims while advisory is not the default');
+    });
+
+    it('a project with no file at all holds the seeded value, so its first launch under the default claims', () => {
+      // `load` hands a project with no file the default block, `operator`
+      // included, so it cannot be told from one saved long ago. Both read as
+      // inherited, which is why the notice does not say the project moved.
+      const fresh = makeProject();
+      assert.equal(fileMode(fresh), undefined, 'precondition: nothing was written');
+      withAdvisoryDefault(() => {
+        assert.equal(effective(fresh).source, 'inherited');
+        const first = launch(fresh);
+        assert.equal(first.recoveryMode, 'advisory');
+        assert.equal(store.projectRecoveryState.get(fresh.id).inheritedNoticeLaunchId, first.launchId);
+      });
     });
 
     it('a launch whose insert fails leaves the marker unset and no row, and the next launch carries the notice', () => {
@@ -583,7 +632,11 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
       assert.equal(fileMode(project), 'advisory');
       assert.deepEqual(store.projects.getByName(project.name).tags, []);
       assert.equal(store.projectRecoveryState.get(project.id), null);
-      assert.deepEqual(effective(project), { mode: 'advisory', source: 'launchSequence' }, 'the effective mode is unchanged');
+      // Read where the file's `advisory` counts, so "unchanged" is told apart
+      // from the operator pin the failed request asked for.
+      withAdvisoryDefault(() => {
+        assert.deepEqual(effective(project), { mode: 'advisory', source: 'launchSequence' }, 'the effective mode is unchanged');
+      });
     });
 
     it('the store succeeds and the file fails: the mode is as requested, and the answer names what did not land', async () => {
@@ -717,12 +770,15 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
   describe('what the live read reports', () => {
     it('names the source, the decision and the marker, and null for a project that does not exist', () => {
       const project = makeProject('advisory');
-      assert.deepEqual(launchSequence.projectRecoveryNow(project.id), {
-        projectRecoveryMode: 'advisory',
-        projectRecoverySource: 'launchSequence',
-        projectRecoveryDiscrepancy: null,
-        projectRecoveryDecision: null,
-        projectRecoveryInheritedNotice: null
+      withAdvisoryDefault(() => {
+        assert.deepEqual(launchSequence.projectRecoveryNow(project.id), {
+          projectRecoveryMode: 'advisory',
+          projectRecoverySource: 'launchSequence',
+          projectRecoveryGateState: 'armed',
+          projectRecoveryDiscrepancy: null,
+          projectRecoveryDecision: null,
+          projectRecoveryInheritedNotice: null
+        });
       });
       store.projectRecoveryState.claimInheritedNotice(project.id, 'launch-n');
       const noticed = launchSequence.projectRecoveryNow(project.id);
@@ -737,7 +793,29 @@ describe('recovery state in the store and on the launch path (#1937)', () => {
       assert.equal(pinned.projectRecoveryDecision.decidedBy, 'operator');
       assert.equal(pinned.projectRecoveryInheritedNotice.launchId, 'launch-n');
       for (const missing of [999999, null, undefined]) {
-        assert.deepEqual(Object.values(launchSequence.projectRecoveryNow(missing)), [null, null, null, null, null]);
+        assert.deepEqual(Object.values(launchSequence.projectRecoveryNow(missing)), [null, null, null, null, null, null]);
+      }
+    });
+
+    it('resolves against the login gate as it stands, and reports the state it used', () => {
+      const seeded = makeProject('operator');
+      const asked = makeProject('advisory');
+      const read = (project) => {
+        const now = launchSequence.projectRecoveryNow(project.id);
+        return [now.projectRecoveryMode, now.projectRecoverySource, now.projectRecoveryGateState];
+      };
+      assert.deepEqual(read(seeded), ['operator', 'not-armed', null], 'a process that cannot ask the gate');
+      for (const state of Object.values(authGate.GATE_STATES)) {
+        recoveryDefault.setGateStateProbe(() => state);
+        try {
+          const armed = state === authGate.GATE_STATES.ARMED;
+          assert.deepEqual(read(seeded), armed ? ['advisory', 'inherited', state] : ['operator', 'not-armed', state], state);
+          assert.deepEqual(read(asked), armed ? ['advisory', 'launchSequence', state] : ['operator', 'not-armed', state], state);
+          assert.equal(launchSequence.projectRecoveryNow(999999).projectRecoveryGateState, state,
+            'the gate state is the install\'s, so it is reported for a project this install does not have');
+        } finally {
+          recoveryDefault.setGateStateProbe(null);
+        }
       }
     });
   });

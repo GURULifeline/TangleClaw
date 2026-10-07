@@ -174,12 +174,70 @@ recorded. Architect rulings A1–A5 of 2026-09-24:
 
 ## Two rulings this ADR is required to carry
 
-### R3 — the recovery default is `operator` (operator, 2026-09-17)
+### R3 — the recovery default is `advisory` while TangleClaw's login is in force, and `operator` everywhere else (operator, 2026-10-06; Architect, 2026-10-07; #1937)
 
 When the preflight says the project's handoff state needs recovering, `operator` mode withholds the
 task step and refuses READY until a person clears it from the project's Launch readiness panel;
 `advisory` mode serves the task step behind a warning and lets the session clear its own recovery by
 attesting with a written reconciliation.
+
+**The ruling.** On 2026-10-06 the operator reopened the default on #1937 and reversed it. The
+ProjectManager described advisory mode back to them from this ADR's text and relayed the answer:
+*"if you mean advisory can do its own clear recovery then yes thats what i want"*. The Architect
+approved it (A91). On existing projects the operator said *"I never deliberately pinned any project"*,
+so every project with no decision on record is read as having inherited the old default and takes the
+new one on its next launch, with no exceptions. An install whose operator has said nothing gets the
+same default as everyone else.
+
+**The Architect's condition (2026-10-07).** Advisory must not become the effective default on an
+install where nothing can say who the operator is. In advisory mode the reconciliation is the whole of
+the gate, and R3b's readback is what lets an operator see it; that readback is served to a signed-in
+operator and refused everywhere else. So the default follows the readback:
+
+- **While TangleClaw's login is in force** (the gate state `armed`), a project with no operator
+  decision on record resolves `advisory`.
+- **In every other gate state** (`open`, `fallback`, `account-required`, `locked`, `unreadable`, and a
+  process that could not ask) it resolves `operator`, as it did before the ruling. This includes a
+  project whose file says `advisory` with no decision behind it: the file sits in the project's own
+  checkout, where its session can write it, so honouring it there would let a session choose advisory
+  for itself.
+- An operator's own decision stands in every gate state: a pin is `operator`, a recorded choice of
+  advisory is `advisory`. On an install with no login that record's provenance is
+  `open-install-unverified`, which is a request with the dashboard's shape and not a verified operator.
+  Whether such a decision should carry this weight is an open question the operator has been asked
+  separately.
+
+The default is decided when a launch resolves its mode, from the gate state at that moment, and frozen
+with the launch. It is not the seeded value in `lib/project-config.js`, which stays `operator`: every
+project save writes that value into `project.json`, so seeding `advisory` would put it in every
+project's file. A file that says `advisory` is a request, and where the login is not in force that
+request is refused with a warning, so every saved project on such an install would warn at every
+launch about a request nobody made. Leaving the seed alone keeps "holds the seeded value" and "asked
+for advisory" as two different things a file can say.
+
+A project's first launch under the advisory default says so once, above its task step, and the launch
+that carried it is recorded (`projectRecoveryInheritedNotice`). One file shape gets no notice: a
+`project.json` whose `launchSequence` block is present with no `recoveryMode` key holds no value at all,
+resolves as `default`, and takes advisory silently. No save by a released version produces that shape, so it is in
+practice a hand-edited file. The notice is claimed when the launch is recorded, so a first launch that ends before its task
+step is served has still used it. The notice does not say the project
+"moved": a project that has never launched and one that ran operator-cleared for a year both hold the
+seeded value nobody chose, and the sentence has to be true of both.
+
+**What a held launch is told.** A launch frozen in `operator` mode is told why and what can be done,
+and the two halves come from different facts. Why is the project's mode and source as they stand: it
+is pinned, or it froze `operator` before the project's default changed, or the login is not in force,
+or its setting is unrecognised. What can be done is the gate state at the moment of asking, because
+that is what the clear route reads: in `armed` a signed-in operator clears it; in `open` the clear is
+served to any request with the dashboard's shape and recorded as unverified, which a local process
+can reproduce, so the sentence names no operator and claims no proof; in `fallback` and the other
+enforcing states the clear is refused, and the sentence says so and does not point at the panel.
+
+**History.** 2026-09-17: the operator ruled `operator` (the text below). 2026-09-20: reaffirmed when
+#1673 asked for the automatic clear. 2026-10-06 05:28Z: the operator reopened the question on #1937.
+2026-10-06: the reversal above. 2026-10-07: the Architect's condition.
+
+#### R3 as first ruled (operator, 2026-09-17) — superseded 2026-10-06
 
 The Architect said no to `advisory` as the default. The operator ruled `operator` — *"for now, until
 it's proven there are no issues"* — and reaffirmed it on 2026-09-20 when #1673 asked for the
@@ -196,7 +254,9 @@ record a consent nobody gave.
 #### R3a — the operator chooses the recovery mode (Architect, 2026-09-27, #1937)
 
 The mode decides whether a session may clear its own recovery, so the choice is not the session's to
-make. `PATCH /api/projects/:name` refuses the whole request, before anything is looked up or written,
+make. Since advisory became the default where the login is in force (R3), what this refusal protects
+is an operator's pin: the session a pin constrains must not be the one to lift it.
+`PATCH /api/projects/:name` refuses the whole request, before anything is looked up or written,
 with `403 OPERATOR_ONLY` whenever a non-operator caller names `launchSequence.recoveryMode`, even at
 its current value. The operator's path is unchanged, the project's other settings are not affected, and
 each launch still freezes the mode it started with.
@@ -210,10 +270,57 @@ session's reach is a broader configuration-authority change, tracked as #1982.
 the server store (`project_recovery_state`, schema v55), written only by the operator's `PATCH` and
 read by the launch beside the file. The record outranks the file. A pin on record cannot be loosened
 by any edit to `project.json`, and a value written into the file by hand creates no pin. The paragraph
-above still describes a project with no decision on record: there the file decides, and a session can
-still write it. One direction stays open to the file by design: an unrecognised value reads as
+above still describes a project with no decision on record, with one change made on 2026-10-07 (R3):
+there the file can ask for `advisory` only while the login is in force, and a session can still write
+it. One direction stays open to the file by design: an unrecognised value reads as
 `operator`, so a session can make its own gate stricter and cannot make it looser. This is the first
 operator-authority setting moved out of the session's reach; the rest remain #1982.
+
+#### R3b — the operator can read what a session reconciled (Architect A83, 2026-10-06, #1937)
+
+In `advisory` mode the reconciliation is the whole of the gate, and until this ruling it was written
+and never read: stored in the launch's READY artifact, returned to nobody but the session replaying
+its own attestation. The Architect ruled that an oversight and made closing it a condition of
+`advisory` becoming the default.
+
+`POST /api/sessions/:project/launch/reconciliation` returns the stored text with the launch it
+belongs to: the sequence, the revision the attestation was accepted against, when it was accepted,
+the digest of the accepted attestation, the preflight verdict and how the recovery was cleared. Four
+properties are the ruling, and each is held by a test:
+
+- **Operator only.** The route runs the operator proof in `server.js` (`_requireOperatorWrite`) and
+  serves only a result of `operator-verified`: a signed-in session with its CSRF token. It is a `POST`
+  although it changes nothing, because that proof asserts the CSRF token and the dashboard sends the
+  token only with a state-changing method. The session that wrote the text is refused like any other
+  session: one agent reading another's reconciliation would be a channel between agents that no
+  operator sees.
+- **Refused where there is no login** (Architect, amending A83, 2026-10-06). On an install with no
+  enabled login the read is refused for every caller, the dashboard included, with
+  `403 LOGIN_GATE_REQUIRED`. Nothing on such an install identifies a person. The most a request can
+  show there is its shape (same-origin, browser-shaped, carrying a page token from
+  `GET /api/auth/me`), and a session on the same machine can produce that shape, so it cannot satisfy
+  "operator only". The refusal is keyed on the proof's result, not on the gate state that produced it,
+  so any future result other than a verified operator is refused too. The panel shows a line in place
+  of the button on such an install.
+- **Nowhere else.** The text is not added to `GET /api/launch-sequences`, which every caller may read,
+  nor to `tc start status`, `tc start review` or the activity log. A dedicated route was chosen over an
+  operator-only field on that list because the list has no caller check to get wrong while the text is
+  simply absent from it.
+- **An assertion, not evidence.** The server checks the text's length and nothing else. The answer
+  carries `provenance: agent-authored-unverified` as a constant, and the Launch readiness panel says
+  above the text that TangleClaw did not check it. The panel escapes it and fetches it only when the
+  operator asks.
+
+The read writes nothing: the READY artifact, its digest and the recovery columns are as they were, and
+no activity event is recorded.
+
+**What this does not settle.** The first version of this route served the request-shape proof on an
+install with no login, and its review showed a local process could read the text that way; the
+Architect ruled that shape cannot stand in for an operator here. The ruling is about this route. That
+the recovery clear accepts the same shape on such an install, recording `open-install-unverified`, is
+not a precedent for the read: the Architect named it a separate question, and it is not decided here.
+A consequence carried to the default flip: `advisory` is not to become the effective default on an
+install with no login, where the operator could not read what a session reconciled.
 
 ### #1650 — a preflight that could not run must not grant READY
 
@@ -372,7 +479,8 @@ engine's, not TangleClaw's.
 **Preallocate the session row before tmux.** Rejected in § Decision 4: it creates `active` rows for
 launches that failed, and fixing the label costs every lifecycle consumer.
 
-**Let the agent self-clear recovery by default.** This is `advisory` mode. The Architect said no as a
-*default* and the operator ruled the same way; it remains available per project. The argument for it
-— the operator is away most of the time and an `operator` default can stall a launch overnight — is
-recorded in the plan's advisory and is not settled by this ADR.
+**Let the agent self-clear recovery by default.** This is `advisory` mode. It was refused as a
+*default* on 2026-09-17, by the Architect and the operator both, and stayed available per project. The
+argument for it — the operator is away most of the time and an `operator` default can stall a launch
+overnight — was left unsettled then. It is settled now: R3 above, as ruled on 2026-10-06 and
+conditioned on 2026-10-07, makes it the default while TangleClaw's login is in force and nowhere else.

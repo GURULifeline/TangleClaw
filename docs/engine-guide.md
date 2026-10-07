@@ -373,13 +373,20 @@ a well-formed artifact exist:*
     (a snapshot revision, or drift between the handoff's rules and the live ones).
 
 **Recovery has two modes, per project** (`launchSequence.recoveryMode`, and see
-`docs/configuration-reference.md`). In `operator` — the shipped default — the task step is withheld
+`docs/configuration-reference.md`). In `operator` the task step is withheld
 and only a person clears it, from the project's Launch readiness panel. In `advisory` the task step
 is served behind a warning and the session clears its own recovery by attesting with a written
-reconciliation, recorded as `agent-reconciled`. An unrecognised value reads as `operator`, so a typo
-can never be why a damaged handoff went unnoticed. While the task step is withheld, the unready nudge and
-`tc start status` say the launch is waiting on the operator and stop pointing at `tc start next` and
-`tc start ready`, which would both refuse (#1937). The mode is the operator's choice (ADR 0017 R3a): a
+reconciliation, recorded as `agent-reconciled`. **Which one is the default depends on the install**
+(ADR 0017 R3): a project nobody decided for runs `advisory` while TangleClaw's login is in force, where
+a signed-in operator can read the reconciliation back, and `operator` everywhere else. A project's
+first launch under the advisory default prints a one-time notice above its task step. An unrecognised value reads as `operator`, so a typo
+can never be why a damaged handoff went unnoticed. While the task step is withheld, the step itself, the READY refusal,
+the unready nudge and `tc start status` all carry one sentence saying why the launch is held and what
+can be done about it, and stop pointing at `tc start next` and `tc start ready`, which would both
+refuse (#1937). What can be done follows the login gate as it stands: a signed-in operator clears it
+where the login is in force; on an install with no login the clear from the panel is recorded as
+unverified; and where the login is stood down or otherwise unavailable the sentence says the launch
+cannot be cleared until that is resolved. The mode is the operator's choice (ADR 0017 R3a): a
 session that names it in `PATCH /api/projects/:name` is refused `403 OPERATOR_ONLY`. The operator's
 decision is recorded in the server store, which outranks the project's `.tangleclaw/project.json`
 (#1937): once the operator has pinned a project to `operator`, no edit to that file loosens it, and a

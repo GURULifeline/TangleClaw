@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The advisory READY path, pinned before advisory becomes the default (#1937).
+ * The advisory READY path (#1937).
  *
  * In advisory mode a session clears its own recovery, so the READY attestation
  * is the only gate left between a damaged handoff and a session building on
@@ -118,6 +118,9 @@ describe('advisory READY path (#1937 audit)', () => {
     const conf = store.projectConfig.load(dir) || {};
     conf.launchSequence = { ...(conf.launchSequence || {}), recoveryMode };
     store.projectConfig.save(dir, conf);
+    // The operator's choice of advisory is a decision on record, as their PATCH
+    // writes it. The file alone says advisory only while the login is in force.
+    if (recoveryMode === 'advisory') store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
     DAMAGE[verdict](project);
     const session = launch(name).session;
     const sequence = store.launchSequences.getBySession(session.id);

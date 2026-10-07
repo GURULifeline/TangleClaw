@@ -269,6 +269,7 @@ const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
 const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
+const recoveryDefault = require('./lib/recovery-default');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
@@ -587,7 +588,7 @@ let _gateFallbackReadFailure = null;
  * subprocess on a recovery path is cheaper than that, and it is bounded by
  * `caddy-drift`'s adapt timeout.
  *
- * The listener is read from the socket's own server, not from config: what
+ * The listener is read from the server that is bound, not from config: what
  * decides who can reach TangleClaw is the address actually bound.
  *
  * A marker or Caddyfile that exists but cannot be `stat`ed or read answers "not
@@ -595,10 +596,11 @@ let _gateFallbackReadFailure = null;
  * an honoured fallback is logged when its marker goes, so the log shows both
  * edges of a stand-down.
  *
- * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @param {net.Server|null|undefined} server - The listener the question is
+ *   asked of: a request's own, or the bound server when no request exists.
  * @returns {{ honoured: boolean, reason: string|null }}
  */
-function _gateFallback(socket) {
+function _gateFallbackForListener(server) {
   const refuseOnce = (what, err) => {
     const failure = `${what}:${err.code || err.message}`;
     if (_gateFallbackReadFailure !== failure) {
@@ -619,7 +621,6 @@ function _gateFallback(socket) {
     _gateFallbackReadFailure = null;
     return { honoured: false, reason: null };
   }
-  const server = socket && socket.server;
   const bound = server && typeof server.address === 'function' ? server.address() : null;
   const listenerAddress = bound && typeof bound === 'object' ? bound.address : null;
   const upstreamPort = bound && typeof bound === 'object' ? bound.port : null;
@@ -669,6 +670,32 @@ function _gateFallback(socket) {
   }
   _gateFallbackCache = { key, value };
   return value;
+}
+
+/**
+ * {@link _gateFallbackForListener} for a request, asked of the listener that
+ * request arrived on.
+ * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @returns {{ honoured: boolean, reason: string|null }}
+ */
+function _gateFallback(socket) {
+  return _gateFallbackForListener(socket && socket.server);
+}
+
+/**
+ * The login gate's state as a request on `server` would find it, for a caller
+ * that has no request: a launch deciding whether advisory recovery is the
+ * default (`lib/recovery-default.js`).
+ *
+ * The same four inputs `handleRequest` passes, with the fallback asked of the
+ * bound listener itself. A launch is not always inside a request, and a
+ * request's socket would say nothing a launch can rely on once it is gone.
+ * @param {net.Server} server - The bound listener
+ * @returns {() => string} A probe returning a member of `authGate.GATE_STATES`
+ */
+function _recoveryGateProbeFor(server) {
+  return () => authGate.resolveGateState(_gateConfig, store.authSessions, _gateIngress,
+    () => _gateFallbackForListener(server));
 }
 
 let _servedHostsCache = null;
@@ -8020,7 +8047,12 @@ registerMedusaRoutes('/api/master/medusa', resolveMasterMedusaTarget);
  *
  * One implementation for every write that records a decision as an operator's
  * (the launch recovery clear, the startup prompt), so the proof cannot drift
- * between them. The branches key on the GATE STATE first, never on "is there a
+ * between them. The launch reconciliation read uses it too, although it
+ * changes nothing: what it serves is for the operator alone, and it is sent as
+ * a POST so that this proof applies to it whole. That route serves only an
+ * `operator-verified` result and refuses the open-install one.
+ *
+ * The branches key on the GATE STATE first, never on "is there a
  * session". An `armed` install with a failed authentication has no
  * `req.tcSession`, and the order below is what keeps that request from falling
  * through to the open-install branch and being honoured as an anonymous
@@ -8226,6 +8258,94 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
     recoveryClearedAt: cleared.recoveryClearedAt,
     recoveryClearedBy: cleared.recoveryClearedBy
   });
+});
+
+// POST /api/sessions/:project/launch/reconciliation — the operator reads the
+// reconciliation a session wrote into its READY attestation (#1937).
+// Body: {sessionId, sequenceId}
+//
+// The text is the session's own account of why it may proceed, and in advisory
+// mode it is what cleared the launch's recovery. It is an agent's assertion,
+// so it is served to the operator and to nobody else: one session reading
+// another's would be a channel between agents that no operator sees. That is
+// why it has a route of its own and is absent from `GET /api/launch-sequences`,
+// which every caller class may read.
+//
+// It is refused outright on an install with no enabled login (ADR 0017 R3b).
+// There the proof below is of a request's SHAPE — same-origin, browser-shaped,
+// carrying a page token — and a session on this machine can produce that
+// shape, so it cannot establish that the reader is the operator. Only a
+// reader the proof names `operator-verified` is served.
+//
+// A POST although it changes nothing. The operator proof is the recovery
+// clear's, branch for branch, and on an armed install that proof asserts the
+// CSRF token, which the dashboard sends only with a state-changing method. A
+// GET would have needed a second proof, and a second proof is one that can
+// drift from the first.
+route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params, body) => {
+  const refusal = 'Refused a launch reconciliation read';
+  const noLoginReadback = 'This install has no login, so a session\'s reconciliation cannot be read here: '
+    + 'nothing would establish that the reader is the operator. Turn the login on, sign in, and read it '
+    + 'from the Launch readiness panel.';
+  const proof = _requireOperatorWrite(req, res, {
+    logEvent: refusal,
+    logContext: { project: params.project },
+    fallbackAction: 'read a launch reconciliation',
+    sameOriginWhat: 'A launch reconciliation read',
+    unauthenticated: 'Sign in to read a launch reconciliation: this install requires a login, and a session\'s '
+      + 'reconciliation is served to the operator only.',
+    machineClient: 'A session\'s reconciliation is served to the operator only, and a local process is not one. '
+      + noLoginReadback,
+    openToken: noLoginReadback,
+    gateUnsupported: (gateState) =>
+      `A launch reconciliation cannot be read while the login gate is "${gateState}". Resolve the gate first.`
+  });
+  if (!proof) return;
+  // Keyed on what the proof established, not on the gate state that led to it:
+  // any clearance other than a verified operator is refused, so a clearance
+  // added to the proof later is refused here until someone decides otherwise.
+  if (proof.clearance !== 'operator-verified') {
+    log.warn(refusal, { code: 'LOGIN_GATE_REQUIRED', project: params.project, readerProof: proof.clearance });
+    return errorResponse(res, 403, noLoginReadback, 'LOGIN_GATE_REQUIRED');
+  }
+
+  const sessionId = Number(body && body.sessionId);
+  const sequenceId = Number(body && body.sequenceId);
+  if (![sessionId, sequenceId].every(Number.isInteger)) {
+    log.warn(refusal, { code: 'BAD_REQUEST', project: params.project });
+    return errorResponse(res, 400,
+      'sessionId and sequenceId are required, and name the launch whose reconciliation you are reading.',
+      'BAD_REQUEST');
+  }
+
+  const project = store.projects.getByName(params.project);
+  if (!project) {
+    log.warn(refusal, { code: 'NOT_FOUND', project: params.project, reason: 'no such project' });
+    return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
+  }
+  const sequence = store.launchSequences.getBySession(sessionId);
+  // Project-scoped, and logged: the caller here is a signed-in operator, and
+  // one naming another project's launch gets no answer about it and leaves a
+  // trace of having asked.
+  if (!sequence || sequence.id !== sequenceId || sequence.projectId !== project.id) {
+    log.warn(refusal, {
+      code: 'NOT_FOUND', project: params.project, askedSession: sessionId, askedSequence: sequenceId
+    });
+    return errorResponse(res, 404,
+      'That launch sequence does not belong to this project, or no longer exists.', 'NOT_FOUND');
+  }
+  const readback = launchSequence.reconciliationReadback(sequence);
+  if (!readback) {
+    log.warn(refusal, { code: 'NOT_ATTESTED', project: params.project, sequence: sequence.id });
+    return errorResponse(res, 409,
+      'This launch has not attested READY, so no reconciliation has been accepted for it.', 'NOT_ATTESTED');
+  }
+  // Logged without the text: the log is read by more than the operator.
+  log.info('Launch reconciliation read', {
+    project: project.name, sequence: sequence.id, readerProof: proof.clearance, reader: proof.actor,
+    carriedText: readback.reconciliation !== null
+  });
+  jsonResponse(res, 200, readback);
 });
 
 /**
@@ -12322,6 +12442,10 @@ if (require.main === module) {
   });
 
   const onListening = () => {
+    // Installed here and not before: until the listener is bound it has no
+    // address, the fallback check would be asked about a door that does not
+    // exist yet, and with no probe a launch takes the operator-cleared default.
+    recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(server));
     log.info(`TangleClaw v${_getVersion()} listening on ${protocol}://${bindLabel}:${port}${caddyMode ? ' (behind Caddy)' : ''}`, {
       node: process.version,
       pid: process.pid,
@@ -12502,4 +12626,4 @@ function _routePatterns() {
   return routes.map((r) => ({ method: r.method, pattern: r.pattern }));
 }
 
-module.exports = { _routePatterns, createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
+module.exports = { _routePatterns, createServer, _recoveryGateProbeFor, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };

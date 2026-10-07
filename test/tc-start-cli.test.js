@@ -436,6 +436,40 @@ describe('tc start (car 21.3)', () => {
       'a server that predates the field is not second-guessed: `tc start next` itself says withheld');
   });
 
+  it('prints the server\'s own sentence for a held launch, and its old one for a server that sends none (#1937)', () => {
+    const steps = ['identity', 'governance', 'state', 'task'].map((id, index) => ({
+      index, id, pageCount: 1, pagesServed: [0], servedAt: 'x', ackedAt: index < 3 ? 'x' : null
+    }));
+    const held = { cursor: 3, ready: false, recovery: 'required', recoveryMode: 'operator', recoveryRevision: 2, unready: true, taskWithheld: true };
+    /**
+     * Render a status held at the task step.
+     * @param {object} extra - Further fields of the status block
+     * @returns {string} The printed page
+     */
+    const render = (extra) => tcVerbs.renderStartStatus({
+      sequence: 'present', sessionId: 7, sequenceId: 3, revision: 1, applicability: 'applicable',
+      preflight: { verdict: 'crash-recovery' }, pageBudget: 19332, toolOutput: null, pending: null,
+      renderContext: 'recorded', status: { ...held, ...extra }, steps
+    });
+    // What can be done depends on the login gate, which only the server knows.
+    // A stood-down login is the case the client's own sentence got wrong: it
+    // pointed at a clear the server refuses there.
+    const recoveryHint = 'This project is pinned to operator-cleared recovery by the operator. It cannot be cleared right now: '
+      + 'TangleClaw\'s login is stood down behind Caddy\'s. Tell the operator; the clear works again once they restore the '
+      + 'login and end the fallback.';
+    const told = render({ recoveryHint });
+    assert.ok(told.includes(`(recovery revision 2). ${recoveryHint}`), told);
+    assert.doesNotMatch(told, /Launch readiness/, 'the client adds no way through of its own');
+    assert.equal(told.split('\n').filter((line) => line.startsWith('Recovery required')).length, 1, 'one recovery line, not two');
+    for (const absent of [{}, { recoveryHint: '' }, { recoveryHint: null }, { recoveryHint: 7 }]) {
+      const older = render(absent);
+      assert.match(older, /until the operator clears it from Settings → Project Rules → Launch readiness \(recovery revision 2\)/,
+        JSON.stringify(absent));
+    }
+    const advisory = render({ recoveryMode: 'advisory', taskWithheld: false, recoveryHint });
+    assert.ok(!advisory.includes(recoveryHint), 'an advisory launch is not held, so a stray sentence is not printed');
+  });
+
   it('prints the missing render context, because a re-render can then be thinner', () => {
     // The status payload and the printed page are two halves of one
     // disclosure; delete either and a session loses the only warning it gets
