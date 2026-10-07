@@ -49,7 +49,7 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 **Decision: the page owns the legend's once-per-page state.** The plan had `renderPlanBody` create it at depth 0. That would have put the legend in front of a lone `tc-train` block's output, which an existing test anchors at `<details class="train-card">` and which ruling A86 item 6 keeps byte-compatible. `renderPlanPage` creates `{ shown: false }` instead and `renderPlanBody` draws no legend without it. Rejected: editing the anchored test. `server.js#servePlanPage` reaches the renderer only through `renderPlanPage`, so a reader always gets the legend.
 
-**Accepted divergence from ADR 0024 Decision 4.** The ADR as merged says the Release view excludes buckets. Ruling A86 item 4 makes release-scoped buckets rows of the panel that count in its total, because most of a release's cars live in them. The PM's amendment of Decision 4 is PR #2169; the panel must not become the board's default layout before it merges.
+**Buckets are rows of the panel.** Architect ruling A86 item 4 makes release-scoped Topic Buckets rows that count in the panel's total, because most of a release's cars live in them. ADR 0024 Amendment 1 (`docs/adr/0024-roadmap-release-grouping.md`) records this; Decision 4 as first written excluded buckets from the Release view. Making the panel the board's default layout is a separate step under that amendment's conditions, not something this work does.
 
 **Legend wording is a proposal.** The meanings are issue #2165's text and await the Operator's ratification. `CAR_STATE_MEANING` is the one place to change.
 
