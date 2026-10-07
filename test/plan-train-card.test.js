@@ -1411,6 +1411,16 @@ describe('a car\'s info popover (#2165)', () => {
       assert.match(css, /\n\.train-car:focus-visible\{outline:2px solid var\(--link\);outline-offset:2px\}/);
     });
 
+    it('shows the hovered car\'s popover alone when another car in the row still has focus', () => {
+      // Every popover of a row draws in the same place, and a click or tap leaves focus behind.
+      assert.match(css, /\nsummary\.train-summary:has\(\.train-car:hover\) \.train-car:focus:not\(:hover\)>\.car-info\{opacity:0\}/);
+      assert.match(css, /\n\.train-car:hover>\.car-info\{z-index:6\}/);
+      assert.match(popover, /(^|;)z-index:5(;|$)/);
+      const reveal = css.indexOf('\n.train-car:hover>.car-info,.train-car:focus>.car-info{opacity:1}');
+      const yieldTo = css.indexOf('\nsummary.train-summary:has(.train-car:hover)');
+      assert.ok(reveal > -1 && yieldTo > reveal, 'the rule that hides the focused one comes after the rule that shows it');
+    });
+
     it('lets the popover wrap and read as ordinary text inside a one-line pill', () => {
       assert.match(popover, /(^|;)white-space:normal(;|$)/);
       assert.match(popover, /(^|;)color:var\(--fg\)(;|$)/);
