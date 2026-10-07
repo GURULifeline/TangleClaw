@@ -1,8 +1,12 @@
 # ADR 0024: Release Versions group one or more Trains, superseding one-train-one-release
 
 **Status:** Accepted (2026-10-07). Records the Architect's ruling A84 on an Operator-directed
-roadmap restructuring proposal. Implementation (schema/generator changes, the train/issue sweep)
-is tracked separately and has not started.
+roadmap restructuring proposal. Amended same day, before merge, per the Architect's PR review of
+this ADR: fixed a contradiction in Decision 4 (bucket/unscoped Trains stay visible in the unchanged
+Train view, excluded only from the new Release view, not hidden in some third "backlog"), added
+`target_release` canonicalization against existing `release:vX.Y` labels (Decision 1), and labeled
+the Release view as planned targets rather than a shipped-version index (Decision 4). Implementation
+(schema/generator changes, the train/issue sweep) is tracked separately and has not started.
 **Source:** Operator request, relayed by the ProjectManager; ruled by the Architect as A84.
 **Supersedes:** the shipping model ratified 2026-07-30 ("each version ships ONE train with all its
 cars, v5.1 is one complete train, v5.2 the next"), where it conflicts — see Decision 2.
@@ -34,9 +38,15 @@ time someone cuts a release — not by which Train is "done."
 ## Decision
 
 1. **Add `target_release` to the Train schema in `board-data.json`.** A new, nullable, mutable
-   string field (e.g. `"5.32.0"`). `null` means unscoped — not yet assigned to a release, shown in
-   backlog. This is a planning field, not a new identity field; it does not join, rename, or
-   renumber anything the Permanent Train Identity policy governs.
+   string field, canonical form `"X.Y.Z"` (full semver, e.g. `"5.32.0"` — not `"v5.32"`). `null`
+   means unscoped — not yet assigned to a release. This is a planning field, not a new identity
+   field; it does not join, rename, or renumber anything the Permanent Train Identity policy
+   governs.
+   - **Normalization against existing `release:vX.Y` issue labels:** a label names a minor line
+     (e.g. `release:v5.32`), not a patch; it maps to that line's next unreleased version at the
+     time of reconciliation (typically `X.Y.0`) and is re-checked at sweep time, not assumed fixed.
+     The label and `target_release` are never required to carry identical text — the label lives on
+     the issue, `target_release` on the Train that issue ends up in.
 
 2. **Cardinality, and the resulting policy supersession:**
    - One Train → **zero or one** `target_release`. A Train is never split across two releases; if
@@ -54,10 +64,16 @@ time someone cuts a release — not by which Train is "done."
    evidence of what a release actually contains — that remains merged PRs, `CHANGELOG.md`, the git
    tag, or the release manifest. Nothing reads `target_release` as a release's shipped contents.
 
-4. **Two views over one dataset.** The existing Train view (thematic) is unchanged. A new Release
-   view groups Trains by `target_release` and rolls up their live-derived cars; its index is the
-   release-version list the Operator asked for. The Release view **excludes** `kind: "bucket"`
-   entries and unscoped (`target_release: null`) Trains — those remain visible only in backlog.
+4. **Two views over one dataset.** The existing Train view (thematic) is **unchanged**:
+   `build-board.py` continues to render every configured Train and bucket entry there exactly as it
+   does today, regardless of `target_release`. The new Release view is additional, not a
+   replacement — it groups Trains by `target_release` and rolls up their live-derived cars, and its
+   index is the release-version list the Operator asked for. The Release view **excludes**
+   `kind: "bucket"` entries and unscoped (`target_release: null`) Trains; excluded means **absent
+   from this one new view**, not hidden anywhere else — they stay exactly as visible in the
+   (unchanged) Train view as every other configured entry. The Release view is labeled as **planned
+   targets**, not a complete or authoritative shipped-version index — see Decision 3; it shows
+   intent, and actual release membership is still tag/CHANGELOG/manifest-derived.
 
 5. **The 18 currently-orphaned labeled issues are reconciled individually**, not bulk-retargeted.
    A `release:vX.Y` label on an issue is a proposal to consider, never authority to force that
