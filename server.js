@@ -338,6 +338,7 @@ const openInstallToken = require('./lib/open-install-token');
 const passwordHashing = require('./lib/password');
 const sessionOwnership = require('./lib/session-ownership');
 const planDocs = require('./lib/plan-docs');
+const scorecardCache = require('./lib/scorecard-cache');
 const strandedWraps = require('./lib/stranded-wraps');
 const strandedCheck = require('./lib/stranded-check');
 const serviceToken = require('./lib/service-token');
@@ -1313,7 +1314,8 @@ function servePlanPage(res, pathname) {
     file,
     relative: resolved.relative,
     modifiedAt: resolved.modifiedAt,
-    markdown
+    markdown,
+    scorecard: () => scorecardCache.readScorecardCache(scorecardCache.cachePath(store._getBasePath()))
   }));
 }
 

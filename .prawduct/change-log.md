@@ -92,6 +92,29 @@ Chunk 01 of the #1937 plan: the three pieces salvaged from PR #1986, which is to
 - **Tests.** Ported with the code: the gate's answer across operator, cleared and advisory launches; the nudge unit and end-to-end through the monitor; the status page with and without the field (an older server sends none); the GET before and after a setting change; the PATCH refusal for a session at a new value, at the current value, and beside another key, with the file unchanged each time.
 - **Mutations.** Six, one per guard or call-site argument, each turned a test red: the PATCH branch disabled; the presence check weakened to a change-of-value check; `projectRecoveryMode` hard-coded; the monitor's `taskWithheld` argument forced false; the status page's condition removed; `taskStepWithheld` widened to advisory.
 
+## 2026-09-27 — tc-progress cards: Project Health and Recent Progress from a local scorecard cache (#1949 C03)
+
+<!-- prawduct: type=feature | scope=scorecard-renderer-1949-c03 -->
+
+Chunk C03 of #1949 (Train 30). The PM dispatched it over Medusa (379ec59b). The Architect's rulings came back through the PM (70703325), and the Architect added an addendum (8bb8eae6).
+
+**Problem.** Plan pages had no way to show project health or recent progress without hand-editing tracked documents, which churns every checkout. C02 (Pilot-B5) publishes only certification documents. No producer and no schema existed for development figures.
+
+**Rulings.** The renderer only validates and displays, and never computes trend or net. HTTP requests read a local, sanitized cache that is replaced atomically, never `origin/metrics`. There is ONE scorecard document, `tc.scorecard/v1`, with `development` (this chunk) and `certification` (B5; its summary shape `tc.release-certification.summary/v1` is agreed with B5 and approved by the PM). Open backlog means open GitHub issues excluding PRs. Today is the Pacific calendar day. The addendum adds `openBacklog.staleOver90Days`. Placement is done by the PM from directives this chunk hands over.
+
+**The change.**
+- `lib/scorecard-cache.js`: a closed-schema validator for `tc.scorecard/v1`; a reader at `<store base>/scorecard/v1.json` that returns ok, stale, missing, unreadable or invalid, never throws, and caps size; and `writeScorecardCache`, which validates and then writes atomically through `lib/staged-write.js`.
+- `lib/plan-progress-card.js`: the `tc-progress` block names a card and holds no figures. It renders the Project Health card, or the Recent Progress card with a drawer. Times are in America/Los_Angeles with PDT/PST, and Delivery is shown apart from Discovery / Intake.
+- `lib/plan-docs.js`: dispatches the block and carries its CSS. `renderPlanPage` memoizes the reader, so the cache is read at most once per page and never for a plan without the block. `server.js#servePlanPage` supplies the reader.
+
+**Review.** Cumulative review `rev-20260927T193009Z-2562c027`: 0 blocking. R-3 caught `today` duplicated in `days[0]` with nothing checking they agreed; they are now required to be the same record. R-2: an old newest day now reads "Latest day", not "Today". R-4: a doc cited `lib/release-certification/`, which is not on main (the features-index test caught it too). Fixed in `d2b0fe5f` and verified in `rev-20260927T194454Z-0b432642`. After the PR review, the PM flagged that `Number.isSafeInteger` accepts epoch values past 8.64e15, where `Date#toISOString` throws, so a document could pass validation and still crash the card. `generatedAt` and `freshUntil` are now bounded by `MAX_EPOCH_MS`.
+
+**Tests.** `test/scorecard-cache.test.js`, `test/plan-progress-card.test.js`, one HTTP case in `test/api-plan-docs.test.js`, and the fixture `test/fixtures/scorecard-v1.json`.
+
+**Added 2026-10-06, before merge.** C02 landed on `main` (#1975) while this PR waited, so the certification section is no longer accepted as any object. `validateScorecard` now passes it to `lib/release-certification/scorecard.js#validateCertificationSummary` and refuses the document on any violation, naming up to five codes, each cut to 60 characters because a code can end in a key name from the document. This is an intentional test-contract change, dispatched by the PM (ca09f1ad): the case that accepted `{ anything: … }` is replaced by cases that accept an empty and a populated real summary and refuse seven malformed ones, plus a read/write case. Removing the validator call fails two of them. The PR still only reads the local cache and publishes nothing (ADR 0021 point 7).
+
+**Not done here.** The producer and collector, and whatever refreshes the cache: a follow-on chunk, and who writes the file is still open with the PM. Placing the blocks in the Registry and the board (the PM's job). VRF-1949-C03 is queued for the visual check.
+
 ## 2026-10-04 — #1949: soak certification judge, successor to #2056
 
 <!-- prawduct: type=feature | scope=1949-soak-judge -->
