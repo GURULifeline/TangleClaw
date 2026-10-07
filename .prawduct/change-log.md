@@ -72,6 +72,43 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 **Found while building.** `test/checkout-freshness.test.js` "two clones of one repository read the same observed upstream" compares two `describe()` calls whose wording carries a wall-clock age, so it fails when a second boundary falls between them. It failed once in a full run on a loaded host and passes in isolation. This branch does not touch it. Filed as #2175. A second full run, on the tree as it stood before the car info popover, passed that test and failed one other, `test/startup-control-codex.test.js` "an accepted turn whose end no notification reports is still settled from the record by the poll", the known load race in #2057, which also passes in isolation and which this branch does not touch. Each run passed every other test. No uncontended full run was possible on the host that day, so the local evidence is recorded as degraded and CI on the PR head is the full-suite evidence.
 
+## 2026-10-07 — #2189: an engine change no longer carries the launch mode onto the new engine
+
+<!-- prawduct: type=bugfix | scope=2189-engine-change-mode-reset -->
+
+Dispatched by the PM as the prerequisite for #2188 (Architect ruling A122, item 5: the engine-change mode reset is required).
+
+**What landed.** `lib/projects.js#launchModeAfterUpdate` decides the default launch mode a project holds after an update: a mode named in the update, else `default` on an engine change, else the stored mode reconciled as before. The hidden-picker guard and the engine-change write both read it. The save's `warnings` name the reset. The dashboard settings modal shows `default` when its engine dropdown moves to another engine and always sends the mode with an engine change (`tcLaunchModeForEngine`, `tcLaunchModePatch` in `public/api-helper.js`).
+
+**A contract was reversed, deliberately.** Two tests from #731 pinned the old behaviour: "preserves bypass when switching to an engine that DOES honor it" and "demands re-confirmation when the new engine DOES honor the warned mode", which then kept Bypass. Both are rewritten to the new rule, not weakened: the first now asserts the reset in four switch directions among the engines sharing the key, the second that no confirmation is asked when the switch itself resets the mode, with a new sibling asserting that Bypass named for the new engine behind a hidden picker is still refused until confirmed. The reason is in the tests' comments: #731 itself noted the carried posture differs in blast radius, and that difference is the defect.
+
+**Why the server fix alone was not enough.** The modal carried the selected mode across the dropdown change when the new engine had the same key, then omitted it from the save because it equalled the stored value. With only the server reset, the modal would have shown Bypass while the server stored Interactive, and an operator who re-chose Bypass for the new engine would have had the choice dropped.
+
+**Added after the cumulative review.** A launch with `engineOverride` applied the stored default to the override engine whenever it honored the key, the same carry-over by another route (API callers only; no UI sends the field). `launchSession` now applies the stored default only to the project's own engine. The review also showed that no test told "reset every mode" from "reset only a warned one", since `bypassPermissions` is the only non-default key Claude, Codex, Antigravity and Aider share; a Claude to OpenClaw case on the warning-free `plan` now does, and the modal test derives its engine list from `data/engines/`.
+
+**Added after the Architect's exact-head review (A143).** The reset was reported only when the request left the mode out. The dashboard never does that: its mode control resets when the engine dropdown moves and the save sends the default by name, so a dashboard operator got no word after the save. The warning now follows the outcome (the project went in on a non-default mode and came out on the default across an engine change), and a mode the request chose for the new engine is not called a reset. The same review's CI run failed two tests in `test/wrap-intent-cancel.test.js`, whose harness runs the real `doSaveSettings` and did not supply the new `tcLaunchModePatch`; it now passes the real helper. I had not run that file: every file that evaluates `doSaveSettings` is now in the local run.
+
+**Not covered.** The Project Master's own `master.launchMode` follows the older keep-if-honored rule when its engine changes; that is a separate setting with its own store and was outside this issue. Filed as #2197. No live launch was run; the launch command is asserted from the stored mode through `_buildLaunchCommand`.
+
+## 2026-10-07 — #2049: one clear-one-launch function, the fleet read, and no clear for an ended session
+
+<!-- prawduct: type=feature | scope=2049-bulk-recovery-clear -->
+
+#2049 chunk 1 of the plan the Architect ruled on as A93, on the ProjectManager's lease (Medusa `ca422e7b`). Three parts, each its own commit, with the review's fixes in a commit after them. The batch write, its audit and migration, and the fleet panel are later chunks and are held.
+
+**The extraction.** `lib/launch-recovery-clear.js#clearOneLaunch` holds the single clear's checks, the compare-and-set and the `launch.recovery-cleared` activity row. The route keeps the operator proof, status codes, messages and log lines. `test/launch-recovery-clear.test.js` is unedited and passes, which is the evidence that nothing a caller sees changed.
+
+**The ended-session refusal.** The single clear now answers `409 SESSION_ENDED` for a launch whose session is not active. It applies only where the clear would otherwise have been written: an already-cleared launch, a moved revision and an advisory launch keep their answers, so the stale response is unchanged.
+
+**The fleet read.** `GET /api/launch/recovery-held`, served only while the login gate is `armed` and the request carries an operator's session; no CSRF proof, since it changes nothing. The Architect reviewed the field and source mapping before it was built (A96, yes with changes). What changed from the mapping as sent: the startup-fire part states the retention guarantee that actually holds (rows of an active session are exempt), an empty stranded-wrap read is marked `incomplete-history`, a throwing source sends a stable reason code and logs the error, the nudge is labelled a send attempt, and the session status is labelled as stored.
+
+**A requirement that arrived mid-build.** "Uncertain queued work" had no definition when the lease was written. The Architect defined it as reported evidence from identifiable durable sources, with unknown or unavailable where there is none (Architect commit `83192f9`). No source records pane input, so that part always says `unavailable`.
+
+**Review.** Two cumulative Critic reviews, on `29c7e9581` and then on the tree with main merged in: 0 blocking in both. From the first: the fleet read's no-login refusal was aligned with the reconciliation read's (`403 LOGIN_GATE_REQUIRED`) and the API reference row completed; the Launch readiness panel still offering Clear recovery for an ended session's launch is filed as #2178, a panel change outside this chunk. From the second, carried to the batch-write chunk: the rule for which launches an operator may clear is stated in the fleet list's SQL and in `clearOneLaunch`, and the two differ on archived projects.
+
+**Architect hold A133, fixed.** The fleet read had built its own four-field copy of the preflight record, dropping `requiresRecovery`, `requiresReconciliation` and `worktreeDirty` and turning an unparseable record into a null verdict with two false flags. A96 had asked for the stored evidence unchanged. It now sends the stored record as it is, and null when the store cannot parse it; tests pin the three fields, that `worktreeDirty` null stays null, and that an unknown field passes through.
+
+**Not verified.** No live request was made against the running install: this checkout's primary is the running server, and the route has no page yet.
 ## 2026-10-07 — #2188: the rules for which model an engine may be launched with
 
 <!-- prawduct: type=feature | scope=2188-engine-model-selection -->
