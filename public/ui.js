@@ -2571,6 +2571,7 @@ async function refreshProjectLaunchSequences(projectId) {
   // renderer that also attached listeners could not be rendered anywhere that
   // is not a live document.
   wireLaunchRecoveryClears(list);
+  wireLaunchReconciliationReads(list);
   wireStartupFires(list);
   return true;
 }
@@ -2758,6 +2759,127 @@ function launchRecoveryHtml(s) {
 }
 
 /**
+ * How much of a reconciliation is shown before the reader has to open it.
+ * Long enough for a short one to be read whole, short enough that one launch's
+ * text does not push the other rows off the panel.
+ */
+const LAUNCH_RECONCILIATION_PREVIEW_CHARS = 400;
+
+/**
+ * The control that reads one launch's reconciliation, and the place its answer
+ * is rendered (#1937).
+ *
+ * On every attested row and on no other: a launch that has not attested has no
+ * accepted text to read, and the list this panel renders from does not say
+ * which attestations carried one — the text and any sign of it stay out of
+ * that list, which every caller may read. So the button asks, and the answer
+ * says when there is nothing.
+ * @param {object} s - A sequence row from `GET /api/launch-sequences`
+ * @returns {string} Markup, or an empty string for a launch that has not attested
+ */
+function launchReconciliationControlHtml(s) {
+  if (!s.readyAt) return '';
+  return `<br><button type="button" class="btn btn-sm" data-launch-reconciliation="${esc(s.sequenceId)}" `
+    + `data-session-id="${esc(s.sessionId)}">Read the session's reconciliation</button>`
+    + `<div data-launch-reconciliation-out="${esc(s.sequenceId)}"></div>`;
+}
+
+/**
+ * One launch's reconciliation, as the operator reads it (#1937).
+ *
+ * The text is an agent's own account and is rendered as one: the label comes
+ * first and says TangleClaw did not check it, every character is escaped, and
+ * it sits in a `<pre>` so nothing in it is laid out as part of the panel. The
+ * facts around it — which launch and revision, when it was accepted, the
+ * digest of the accepted attestation, the verdict it answered and how the
+ * recovery was cleared — are the server's and are worded apart from it.
+ *
+ * Long text shows a preview and keeps the whole of it in a `<details>`, which
+ * opens without script.
+ * @param {object} r - The answer of `POST /api/sessions/:project/launch/reconciliation`
+ * @returns {string} Markup, already escaped
+ */
+function launchReconciliationHtml(r) {
+  const rec = r.recovery || {};
+  const verdict = rec.verdict ? `<code>${esc(rec.verdict)}</code>` : 'no verdict recorded';
+  const attested = rec.attestedVerdict && rec.attestedVerdict !== rec.verdict
+    ? ` (the session attested <code>${esc(rec.attestedVerdict)}</code>)`
+    : '';
+  // An absent state is not "none": only the server's own word says a launch
+  // needed no recovery.
+  let recovery = 'no recovery state was reported';
+  if (rec.state === 'none') {
+    recovery = 'this launch needed no recovery';
+  } else if (rec.state === 'cleared') {
+    recovery = `${launchClearanceLabel({ recoveryClearance: rec.clearance, recoveryClearedBy: rec.clearedBy })}`
+      + `${rec.clearedAt ? ` at ${esc(rec.clearedAt)}` : ''}`;
+  } else if (rec.state) {
+    recovery = `recovery is ${esc(rec.state)}`;
+  }
+  const facts = `<small class="session-rule-meta">Launch sequence ${esc(r.sequenceId)}, revision ${esc(r.revision)} | `
+    + `accepted ${esc(r.acceptedAt)} | attestation digest <code>${esc(r.readyDigest ? String(r.readyDigest).slice(0, 12) : 'none')}</code>`
+    + `<br>Preflight verdict: ${verdict}${attested} | Recovery: ${recovery}</small>`;
+  if (typeof r.reconciliation !== 'string' || r.reconciliation === '') {
+    return `<div class="launch-reconciliation">${facts}`
+      + '<br><small class="session-rule-meta">This attestation carried no reconciliation.</small></div>';
+  }
+  const label = '<small class="session-rule-meta rules-status-err">Written by the session. TangleClaw did not check it: '
+    + 'this is the session\'s own account, not evidence that the account is true.</small>';
+  const text = r.reconciliation;
+  const pre = (body) => `<pre style="white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0">${esc(body)}</pre>`;
+  const shown = text.length > LAUNCH_RECONCILIATION_PREVIEW_CHARS
+    ? `${pre(`${text.slice(0, LAUNCH_RECONCILIATION_PREVIEW_CHARS)}…`)}`
+      + `<details><summary>Show all ${esc(text.length)} characters</summary>${pre(text)}</details>`
+    : pre(text);
+  return `<div class="launch-reconciliation">${label}<br>${facts}${shown}</div>`;
+}
+
+/**
+ * Wire every Read-reconciliation button the panel just rendered (#1937).
+ *
+ * Re-wired per refresh for the reason `wireLaunchRecoveryClears` states. The
+ * text is fetched on the click and never with the list, and the request
+ * carries what a recovery clear carries, because the route proves the operator
+ * the same way. A refusal is shown as the server worded it and the button
+ * stays usable; an answer replaces the button's output and leaves the rest of
+ * the panel alone, so reading one launch's text does not discard another's.
+ * @param {HTMLElement} list - The panel's container element
+ * @returns {void}
+ */
+function wireLaunchReconciliationReads(list) {
+  for (const btn of list.querySelectorAll('[data-launch-reconciliation]')) {
+    btn.addEventListener('click', async () => {
+      const projectId = projectRulesTargetId;
+      const projectName = projectRulesTargetName;
+      if (!projectName) return;
+      btn.disabled = true;
+      const me = await api('/api/auth/me');
+      const headers = { 'Content-Type': 'application/json' };
+      if (me && me.openInstallToken) headers['X-TC-Open-Token'] = me.openInstallToken;
+      const answer = await api(
+        `/api/sessions/${encodeURIComponent(projectName)}/launch/reconciliation`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            sessionId: Number(btn.dataset.sessionId),
+            sequenceId: Number(btn.dataset.launchReconciliation)
+          })
+        }
+      );
+      btn.disabled = false;
+      if (projectRulesTargetId !== projectId) return;
+      if (!answer || answer.sequenceId !== Number(btn.dataset.launchReconciliation)) {
+        _setProjectRulesStatus(api.lastError || 'The reconciliation could not be read', false);
+        return;
+      }
+      const out = list.querySelector(`[data-launch-reconciliation-out="${btn.dataset.launchReconciliation}"]`);
+      if (out) out.innerHTML = launchReconciliationHtml(answer);
+    });
+  }
+}
+
+/**
  * Render the launch-readiness rows.
  *
  * Every row says all three things, including the ones that are nothing: a
@@ -2801,6 +2923,7 @@ function renderProjectLaunchSequences(sequences) {
         <br><small class="session-rule-meta">Served: ${esc(served)}/${esc(s.of)} step(s) | Acknowledged: ${esc(acked)}/${esc(s.of)} | ${nudges}</small>
         <br><small class="session-rule-meta">Launched ${esc(s.createdAt)} | revision ${esc(s.revision)}</small>
         ${launchRecoveryHtml(s)}
+        ${launchReconciliationControlHtml(s)}
         ${launchStartupControlHtml(s)}
       </div>
     </div>`;

@@ -7947,7 +7947,11 @@ registerMedusaRoutes('/api/master/medusa', resolveMasterMedusaTarget);
  *
  * One implementation for every write that records a decision as an operator's
  * (the launch recovery clear, the startup prompt), so the proof cannot drift
- * between them. The branches key on the GATE STATE first, never on "is there a
+ * between them. The launch reconciliation read uses it too, although it
+ * changes nothing: what it serves is for the operator alone, and it is sent as
+ * a POST so that this proof applies to it whole.
+ *
+ * The branches key on the GATE STATE first, never on "is there a
  * session". An `armed` install with a failed authentication has no
  * `req.tcSession`, and the order below is what keeps that request from falling
  * through to the open-install branch and being honoured as an anonymous
@@ -8153,6 +8157,79 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
     recoveryClearedAt: cleared.recoveryClearedAt,
     recoveryClearedBy: cleared.recoveryClearedBy
   });
+});
+
+// POST /api/sessions/:project/launch/reconciliation — the operator reads the
+// reconciliation a session wrote into its READY attestation (#1937).
+// Body: {sessionId, sequenceId}
+//
+// The text is the session's own account of why it may proceed, and in advisory
+// mode it is what cleared the launch's recovery. It is an agent's assertion,
+// so it is served to the operator and to nobody else: one session reading
+// another's would be a channel between agents that no operator sees. That is
+// why it has a route of its own and is absent from `GET /api/launch-sequences`,
+// which every caller class may read.
+//
+// A POST although it changes nothing. The operator proof is the recovery
+// clear's, branch for branch, and on an armed install that proof asserts the
+// CSRF token, which the dashboard sends only with a state-changing method. A
+// GET would have needed a second proof, and a second proof is one that can
+// drift from the first.
+route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params, body) => {
+  const refusal = 'Refused a launch reconciliation read';
+  const proof = _requireOperatorWrite(req, res, {
+    logEvent: refusal,
+    logContext: { project: params.project },
+    fallbackAction: 'read a launch reconciliation',
+    sameOriginWhat: 'A launch reconciliation read',
+    unauthenticated: 'Sign in to read a launch reconciliation: this install requires a login, and a session\'s '
+      + 'reconciliation is served to the operator only.',
+    machineClient: 'A session\'s reconciliation is served to the operator only, and a local process is not one. '
+      + 'Read it from the Launch readiness panel on the dashboard.',
+    openToken: 'This install has no login, so a reconciliation read must carry the anti-forgery token its '
+      + 'dashboard was issued. Reload the dashboard and try again.',
+    gateUnsupported: (gateState) =>
+      `A launch reconciliation cannot be read while the login gate is "${gateState}". Resolve the gate first.`
+  });
+  if (!proof) return;
+
+  const sessionId = Number(body && body.sessionId);
+  const sequenceId = Number(body && body.sequenceId);
+  if (![sessionId, sequenceId].every(Number.isInteger)) {
+    log.warn(refusal, { code: 'BAD_REQUEST', project: params.project });
+    return errorResponse(res, 400,
+      'sessionId and sequenceId are required, and name the launch whose reconciliation you are reading.',
+      'BAD_REQUEST');
+  }
+
+  const project = store.projects.getByName(params.project);
+  if (!project) {
+    log.warn(refusal, { code: 'NOT_FOUND', project: params.project, reason: 'no such project' });
+    return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
+  }
+  const sequence = store.launchSequences.getBySession(sessionId);
+  // Project-scoped for the clear route's reason, and logged for it too: on an
+  // open install a page-token holder could otherwise walk sequence ids against
+  // another project's launches and leave no trace.
+  if (!sequence || sequence.id !== sequenceId || sequence.projectId !== project.id) {
+    log.warn(refusal, {
+      code: 'NOT_FOUND', project: params.project, askedSession: sessionId, askedSequence: sequenceId
+    });
+    return errorResponse(res, 404,
+      'That launch sequence does not belong to this project, or no longer exists.', 'NOT_FOUND');
+  }
+  const readback = launchSequence.reconciliationReadback(sequence);
+  if (!readback) {
+    log.warn(refusal, { code: 'NOT_ATTESTED', project: params.project, sequence: sequence.id });
+    return errorResponse(res, 409,
+      'This launch has not attested READY, so no reconciliation has been accepted for it.', 'NOT_ATTESTED');
+  }
+  // Logged without the text: the log is read by more than the operator.
+  log.info('Launch reconciliation read', {
+    project: project.name, sequence: sequence.id, readerProof: proof.clearance, reader: proof.actor,
+    carriedText: readback.reconciliation !== null
+  });
+  jsonResponse(res, 200, readback);
 });
 
 /**
