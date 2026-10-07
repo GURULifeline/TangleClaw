@@ -816,14 +816,31 @@ describe('api/session-rules caller gate (#2013)', () => {
     });
 
     it('the operator can restore, recorded as the operator even when the body says otherwise', async () => {
-      const governing = activeRule(own.id, 'op restore v1');
-      store.sessionRules.update(governing.id, { content: 'op restore v2', changedBy: 'operator' });
-      const firstVersion = store.sessionRules.listVersions(governing.id).at(-1).versionNo;
-      const res = await request('POST', `/api/session-rules/${governing.id}/restore`,
+      // #1696: a still-PROPOSED rule's restore applies in place (200) — the
+      // same roll back on an already-ACTIVE rule instead files a replacement
+      // proposal (202), covered separately below.
+      const proposal = proposedRule(own.id, 'op restore v1');
+      await request('PUT', `/api/session-rules/${proposal.id}`, { content: 'op restore v2' }, asOwn);
+      const firstVersion = store.sessionRules.listVersions(proposal.id).at(-1).versionNo;
+      const res = await request('POST', `/api/session-rules/${proposal.id}/restore`,
         { versionNo: firstVersion, changedBy: 'ai' }, asOperator);
       assert.equal(res.status, 200);
-      assert.equal(store.sessionRules.get(governing.id).content, 'op restore v1');
-      assert.equal(newestVersion(governing.id).changedBy, 'operator');
+      assert.equal(store.sessionRules.get(proposal.id).content, 'op restore v1');
+      assert.equal(newestVersion(proposal.id).changedBy, 'operator');
+    });
+
+    it('rolling an ACTIVE rule back to different text files a replacement proposal instead of rewriting it, origin "restore"', async () => {
+      const governing = activeRuleWithHistory(own.id, 'http restore origin v1', 'http restore origin v2');
+      const firstVersion = store.sessionRules.listVersions(governing.id).at(-1).versionNo;
+      const res = await request('POST', `/api/session-rules/${governing.id}/restore`, { versionNo: firstVersion }, asOperator);
+      assert.equal(res.status, 202);
+      assert.ok(res.data.replacementProposed);
+      assert.equal(res.data.replacementProposed.content, 'http restore origin v1');
+      assert.equal(res.data.replacementProposed.replacesRuleId, governing.id);
+      assert.equal(res.data.replacementProposed.replacementOrigin, 'restore');
+      assert.equal(newestVersion(res.data.replacementProposed.id).changedBy, 'operator');
+      // The original rule is untouched — still governing its approved text.
+      assert.equal(store.sessionRules.get(governing.id).content, 'http restore origin v2');
     });
 
     it('restoring an active rule to different text while a replacement is already pending is refused REPLACEMENT_PENDING', async () => {

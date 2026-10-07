@@ -407,6 +407,24 @@ describe('session rule lifecycle (#1696, #1709)', () => {
       assert.equal(unchanged.content, 'original edit text', 'the active rule keeps governing its approved text');
     });
 
+    it('rolling an active rule back to a different version becomes a replacement proposal too, with origin "restore"', () => {
+      const pid = mkProject('proj-restore-proposal');
+      // Build real version history before approval (#1696: an active rule's
+      // content change defers), then approve into force governing v2.
+      const proposal = store.sessionRules.create({ content: 'restore origin v1', projectId: pid, createdBy: 'ai' });
+      store.sessionRules.update(proposal.id, { content: 'restore origin v2', changedBy: 'ai' });
+      const rule = store.sessionRules.setStatus(proposal.id, 'active', { changedBy: 'operator', expectedContent: 'restore origin v2' });
+      const firstVersion = store.sessionRules.listVersions(rule.id).at(-1).versionNo;
+
+      const result = store.sessionRules.restore(rule.id, firstVersion);
+      assert.ok(result.replacementProposed, 'rolling an active rule back to different text must file a proposal');
+      assert.equal(result.replacementProposed.status, 'proposed');
+      assert.equal(result.replacementProposed.content, 'restore origin v1');
+      assert.equal(result.replacementProposed.replacesRuleId, rule.id);
+      assert.equal(result.replacementProposed.replacementOrigin, 'restore');
+      assert.equal(store.sessionRules.get(rule.id).content, 'restore origin v2', 'the active rule keeps governing its approved text');
+    });
+
     it('approving an edit proposal whose target already retired is refused REPLACEMENT_TARGET_INACTIVE', () => {
       const pid = mkProject('proj-stale-edit');
       const rule = mkActiveRule(pid, 'about to retire');

@@ -109,7 +109,10 @@ describe('sessionRules self-improvement (D1b)', () => {
     });
 
     it('logs a session_rule.restored activity event', () => {
-      const rule = store.sessionRules.create({ content: 'x', projectId: mkProject('sip-8') });
+      // #1696: `status: 'proposed'` so the update below actually changes the
+      // content in place — an active rule's update would instead file a
+      // replacement proposal, leaving the restore below a same-to-same no-op.
+      const rule = store.sessionRules.create({ content: 'x', projectId: mkProject('sip-8'), status: 'proposed' });
       store.sessionRules.update(rule.id, { content: 'y' });
       store.sessionRules.restore(rule.id, 1);
       assert.equal(store.activity.query({ eventType: 'session_rule.restored' }).length, 1);

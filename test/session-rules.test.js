@@ -277,9 +277,13 @@ describe('sessionRules store API (#347/D1a)', () => {
     });
 
     it('kind survives a version restore (immutable)', () => {
+      // #1696: `createdBy: 'ai'` lands 'proposed', where a content update
+      // still applies in place — an active rule's update would instead file
+      // a replacement proposal, leaving this fixture's own v1 content
+      // unchanged and the restore below a no-op that proves nothing.
       const pid = mkProject('proj-restore');
-      const wrap = store.sessionRules.create({ content: 'v1', projectId: pid, kind: 'wrap' });
-      store.sessionRules.update(wrap.id, { content: 'v2' });
+      const wrap = store.sessionRules.create({ content: 'v1', projectId: pid, kind: 'wrap', createdBy: 'ai' });
+      store.sessionRules.update(wrap.id, { content: 'v2', changedBy: 'ai' });
       const restored = store.sessionRules.restore(wrap.id, 1);
       assert.equal(restored.kind, 'wrap');
       assert.equal(restored.content, 'v1');
