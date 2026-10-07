@@ -269,6 +269,7 @@ const sessions = require('./lib/sessions');
 const projectConfig = require('./lib/project-config');
 const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
+const recoveryDefault = require('./lib/recovery-default');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
 const workload = require('./lib/workload');
@@ -587,7 +588,7 @@ let _gateFallbackReadFailure = null;
  * subprocess on a recovery path is cheaper than that, and it is bounded by
  * `caddy-drift`'s adapt timeout.
  *
- * The listener is read from the socket's own server, not from config: what
+ * The listener is read from the server that is bound, not from config: what
  * decides who can reach TangleClaw is the address actually bound.
  *
  * A marker or Caddyfile that exists but cannot be `stat`ed or read answers "not
@@ -595,10 +596,11 @@ let _gateFallbackReadFailure = null;
  * an honoured fallback is logged when its marker goes, so the log shows both
  * edges of a stand-down.
  *
- * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @param {net.Server|null|undefined} server - The listener the question is
+ *   asked of: a request's own, or the bound server when no request exists.
  * @returns {{ honoured: boolean, reason: string|null }}
  */
-function _gateFallback(socket) {
+function _gateFallbackForListener(server) {
   const refuseOnce = (what, err) => {
     const failure = `${what}:${err.code || err.message}`;
     if (_gateFallbackReadFailure !== failure) {
@@ -619,7 +621,6 @@ function _gateFallback(socket) {
     _gateFallbackReadFailure = null;
     return { honoured: false, reason: null };
   }
-  const server = socket && socket.server;
   const bound = server && typeof server.address === 'function' ? server.address() : null;
   const listenerAddress = bound && typeof bound === 'object' ? bound.address : null;
   const upstreamPort = bound && typeof bound === 'object' ? bound.port : null;
@@ -669,6 +670,32 @@ function _gateFallback(socket) {
   }
   _gateFallbackCache = { key, value };
   return value;
+}
+
+/**
+ * {@link _gateFallbackForListener} for a request, asked of the listener that
+ * request arrived on.
+ * @param {net.Socket|null|undefined} socket - The request's socket.
+ * @returns {{ honoured: boolean, reason: string|null }}
+ */
+function _gateFallback(socket) {
+  return _gateFallbackForListener(socket && socket.server);
+}
+
+/**
+ * The login gate's state as a request on `server` would find it, for a caller
+ * that has no request: a launch deciding whether advisory recovery is the
+ * default (`lib/recovery-default.js`).
+ *
+ * The same four inputs `handleRequest` passes, with the fallback asked of the
+ * bound listener itself. A launch is not always inside a request, and a
+ * request's socket would say nothing a launch can rely on once it is gone.
+ * @param {net.Server} server - The bound listener
+ * @returns {() => string} A probe returning a member of `authGate.GATE_STATES`
+ */
+function _recoveryGateProbeFor(server) {
+  return () => authGate.resolveGateState(_gateConfig, store.authSessions, _gateIngress,
+    () => _gateFallbackForListener(server));
 }
 
 let _servedHostsCache = null;
@@ -8224,9 +8251,9 @@ route('POST', '/api/sessions/:project/launch/reconciliation', (req, res, params,
     return errorResponse(res, 404, `Project "${params.project}" not found`, 'NOT_FOUND');
   }
   const sequence = store.launchSequences.getBySession(sessionId);
-  // Project-scoped for the clear route's reason, and logged for it too: on an
-  // open install a page-token holder could otherwise walk sequence ids against
-  // another project's launches and leave no trace.
+  // Project-scoped, and logged: the caller here is a signed-in operator, and
+  // one naming another project's launch gets no answer about it and leaves a
+  // trace of having asked.
   if (!sequence || sequence.id !== sequenceId || sequence.projectId !== project.id) {
     log.warn(refusal, {
       code: 'NOT_FOUND', project: params.project, askedSession: sessionId, askedSequence: sequenceId
@@ -12342,6 +12369,10 @@ if (require.main === module) {
   });
 
   const onListening = () => {
+    // Installed here and not before: until the listener is bound it has no
+    // address, the fallback check would be asked about a door that does not
+    // exist yet, and with no probe a launch takes the operator-cleared default.
+    recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(server));
     log.info(`TangleClaw v${_getVersion()} listening on ${protocol}://${bindLabel}:${port}${caddyMode ? ' (behind Caddy)' : ''}`, {
       node: process.version,
       pid: process.pid,
@@ -12522,4 +12553,4 @@ function _routePatterns() {
   return routes.map((r) => ({ method: r.method, pattern: r.pattern }));
 }
 
-module.exports = { _routePatterns, createServer, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };
+module.exports = { _routePatterns, createServer, _recoveryGateProbeFor, serverProtocol, _setInstallPriorUse, warnUnbindablePortEnv, handleRequest, handleUpgrade, route, matchRoute, jsonResponse, errorResponse, parseBody, parseQuery, reqUrl, MAX_BODY_SIZE, MESSAGE_BODY_LIMIT_BYTES, _setRestartScheduler, _setCutoverSpawner, _recoveryFailures, _openclawProxyHeaders, _openclawWsRequestLines, _hostIsAllowed, _servedHostsOrEmpty, _sharedDocWatchers: sharedDocWatchers, _sharedDocDebounceTimers: docDebounceTimers, _activityObserver: activityObserver };

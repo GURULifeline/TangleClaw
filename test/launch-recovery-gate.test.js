@@ -95,6 +95,9 @@ describe('launch recovery gate (Train 21, #1587)', () => {
       const conf = store.projectConfig.load(dir) || {};
       conf.launchSequence = { ...(conf.launchSequence || {}), recoveryMode };
       store.projectConfig.save(dir, conf);
+      // The operator's choice of advisory is a decision on record, as their PATCH
+      // writes it. The file alone says advisory only while the login is in force.
+      if (recoveryMode === 'advisory') store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
     }
     fs.mkdirSync(lockfile.handoffDir(project), { recursive: true });
     fs.writeFileSync(lockfile.currentPath(project), '{"schema":"not-a-handoff"}\n', 'utf8');
@@ -206,7 +209,10 @@ describe('launch recovery gate (Train 21, #1587)', () => {
       assert.equal(answer.body.verdict, 'handoff-corrupt');
       assert.equal(answer.body.recoveryRevision, 1);
       assert.equal(answer.body.next, 'recovery-clear');
-      assert.match(answer.body.content, /Launch readiness panel/);
+      assert.equal(answer.body.content, 'The task step is withheld: the launch preflight returned `handoff-corrupt`, so this '
+        + "project's handoff state needs recovering before a session builds on it, and this launch clears recovery "
+        + `in OPERATOR mode. ${launchSequence.operatorHeldHintFor(sequence).text} \`tc start ready\` will refuse until `
+        + 'it is cleared.', 'the step says why it is held and what can be done, in the one sentence every surface prints');
       const task = store.launchSequences.listSteps(sequence.id, 1)[3];
       assert.deepEqual(task.pagesServed, [], 'a withheld step was not served');
       assert.equal(task.servedAt, null);

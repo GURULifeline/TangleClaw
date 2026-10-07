@@ -35,6 +35,30 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-07 — #1937: advisory is the default recovery mode where the login is in force
+
+<!-- prawduct: type=feature | scope=1937-default-flip -->
+
+#1937 Chunk 04b, on the PM's dispatch (Medusa `74a6a092`), to the plan the Architect approved at revision 3. The Operator ruled on 2026-10-06 that advisory is the default; the Architect ruled on 2026-10-07 that it must not be the effective default where nothing can say who the operator is.
+
+**The change.** A project with no operator decision on record resolves `advisory` while the login gate is `armed` and `operator` in every other state. `lib/recovery-default.js` owns that answer and carries the gate state with it; `server.js` installs its probe once the listener is bound, built from the listener and not from a request. `lib/project-config.js#resolveRecoveryMode` takes the answer as a boolean and stays free of a store or gate dependency. The launch reads the gate once, beside the operator's decision, and freezes the result.
+
+**Departure from the parent plan, recorded.** Its section 3.3 flipped the seeded constant to `advisory`. The constant stays `operator`: every save writes it into `project.json`, and a file saying `advisory` is a request that is refused with a warning where the login is not in force.
+
+**Tightened.** A file saying `advisory` with no decision on record no longer chooses advisory unless the gate is `armed` (Architect, approved). The file is in the project's checkout, where its session can write it.
+
+**What a held launch is told.** One function, `operatorHeldHint`, writes the sentence the withheld step, the READY refusal, the unready nudge and `tc start status` print. Why comes from the project's live mode and source; what can be done comes from the gate state at the moment of asking. The Architect's blocking correction to revision 1 was that every non-`armed` state had been described as "no login" and pointed at a clear the route refuses in four of them. The PM's correction to revision 2 was that the open-install clear is reproducible by a local process, not refused; the sentence there names no operator and claims no proof.
+
+**Found while building, and decided.** `load` hands a project with no file the seeded block, so "no file" and "saved long ago" both read as `inherited`, and the plan's notice ("this project moved from operator-cleared") would have been false for a project that never launched. The notice now says what the project's launches do from here on. It is served from the marker the claim wrote, which names the launch, so it needs no snapshot field.
+
+**Tests.** Both install modes through the real launch path, every gate state from `GATE_STATES`; the gate and the decision each read once, held by a probe that changes its answer after its first call; each hint held against the real clear and readback routes in all six gate states, with the two open-install request shapes driven separately; the real probe on a real listener. Existing fixtures that reached advisory through the file alone now record the operator's decision, as the PATCH does; no assertion was weakened. A mutation pass over each mechanism added went red on every case.
+
+**Carried in from earlier reviews.** The comment above the project-scoped 404 on the reconciliation route now describes the caller that reaches it; "pinned before advisory becomes the default" is gone from `test/advisory-ready-audit.test.js` and its `FEATURES.md` entry. The `project.recovery-mode-decided` event's `detail` is not touched: `lib/projects.js#updateProject` was not edited.
+
+**Review.** Cumulative `rev-20261007T083228Z-a13e02bd`: 0 blocking, 5 warnings, 7 notes. Fixed in a docs-only commit: ADR 0017's "Alternatives considered" still called advisory-as-default refused and unsettled beside the R3 that settles it; and the docs promised the one-time notice without its two limits (a file whose `launchSequence` block has no `recoveryMode` key takes the default with no notice, and the notice is claimed when the launch is recorded, not when it is read). Filed as #2150: the launch does not record which gate state decided its frozen mode, the notice read's failure path has no test, a stale JSDoc, a duplicated predicate. Accepted: the probe install line in `server.js` has run only in tests of the probe it installs; its failure direction is operator-cleared, and the live check is owed after merge.
+
+**After the PR opened (#2151).** The Architect approved both build-time decisions (PM Medusa `3ef4e590`) and required one copy fix: the notice ended "This notice is shown once", which is not true of a first launch that ends before its task step is served. It now says the notice belongs to the project's first launch under the default and is not repeated. A test pins the wording and that case.
+
 ## 2026-10-06 — #1937: the operator can read a launch's reconciliation
 
 <!-- prawduct: type=feature | scope=1937-reconciliation-readback -->
@@ -66,179 +90,6 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 **Evidence.** Twelve single-line source mutations in `lib/launch-sequence.js` and `lib/store.js`, one for each guard the tests rely on, each turned at least one of these tests red and were reverted.
 
 **What the audit found.** No defect in the gate. Two things outside it, reported to the PM and not changed here: the reconciliation text is stored in the launch's READY artifact and no route, panel or command returns it to an operator; and `tc start status` still says an attestation "will need a reconciliation" on a launch that has already attested.
-
-## 2026-09-28 — The wizard-scan routing test stubs both scanner entry points (#1993)
-
-<!-- prawduct: type=bugfix | scope=scanner-routing-test-1993 -->
-
-The PM dispatched this over Medusa for v5.31. The Architect scoped it strictly to the test: production scanner code and `PROJECT_SCAN_TIMEOUT_MS` stay unchanged.
-
-**Problem.** In `test/projects.test.js`, *uses a scanner the background poll cannot kill underneath it* stubbed only `dirScanner.request` and then ran a real interactive scan through the scanner child under the 5 s `PROJECT_SCAN_TIMEOUT_MS`. Under full-suite parallelism and fleet load (load average 20-27), spawning the child and walking the directory could overrun the deadline. The test then failed for a busy host, not for crossed routes.
-
-**The change.** Test-only. Both entry points are stubbed, count their calls, and are restored in `finally`. `request` rejects if it is reached; `interactiveRequest` answers at once. The test asserts `ok`, that the result is the interactive answer, one interactive call with `scanEntries`, and zero background calls. No child is spawned and no directory is walked.
-
-**Evidence.** Pointing `scanDirectoryForProjects` at `dirScanner.request` turned the test red; I reverted that mutation. It passed 20 of 20 at a load average near 29, and `test/projects.test.js` passed with none failing. The full declared suite passed with none failing. Critic `rev-20260928T013441Z-2f7f6123` found 0 blocking. It raised 1 warning, stale evidence, which the recorded suite run closed. Its 2 notes were accepted and flagged to the PM: other unstubbed real scans, including the sibling `createProjectsDir` routing test, and a pre-existing `withScanner` JSDoc naming the wrong entry point.
-
-## 2026-10-06 — #1937: the operator's recovery-mode decision is recorded in the store (schema v55)
-
-<!-- prawduct: type=feature | scope=1937-recovery-state-store -->
-
-Chunk 02 of the #1937 plan (revision 6, sections 4.3 and 4.4), on PM dispatch (Medusa `3b2004a1`).
-
-- **What.** Table `project_recovery_state` and the v54→v55 migration (`lib/store.js`), with `store.projectRecoveryState` (`get`, `recordDecision`, `claimInheritedNotice`). `lib/project-config.js#resolveRecoveryMode` takes the decision as a second argument and answers with a source and, where the file disagrees with a decision on record, a discrepancy. `lib/sessions.js#_resolveLaunchRecoveryMode` reads the decision once per launch. `lib/projects.js#updateProject` writes the store before any other write of a request that names the mode, and the file after. `lib/launch-sequence.js#projectRecoveryNow` is the one live read behind `GET /api/launch-sequences` and `tc start status`.
-- **Unchanged.** The default mode is still `operator`. A project with no decision on record resolves exactly as before. The gate, its ordering and what each mode does are not touched.
-- **Built and not yet reachable.** The resolver's `inherited` row is keyed on the shipped default, so it cannot be reached while the default is `operator`, and nothing claims the notice marker in production. The claim, its transaction with the launch insert and its rollback are tested by setting the default for the duration of a block. The notice text is chunk 4's.
-- **Departures from the plan, each recorded in the chunk's build plan.** A launch that cannot read the decision takes `operator`; the plan did not name that case. With no decision on record a recognised file value keeps the source word `launchSequence`; plan 4.3's table calls the advisory case `default`, which describes the world after the default flips. Plan 4.4's test of a launch-level claim on a row "pinned once, then unpinned, never noticed" cannot occur since revision 6 made an unpin a recorded decision: that project resolves `chosen` and claims nothing. The claim statement is tested against such a row at the store level.
-- **The operator-bridge runbooks stay at schema 54, by ruling.** `test/operator-bridge-runbooks.test.js` tied the two Tier 3 runbooks to the store's current schema by asserting `lib/store.js` said 54. The Architect ruled (Medusa `3d27f665`, confirmed by the PM in `55c3bb6c`) that the v5.31.0 rollback boundary stays exact: the put-back procedure restores a snapshot from before v5.31.0, so accepting a store a later build has opened would present a rollback that drops later data as a supported path. The restore guard and step 5 keep 54. The test now pins 54 as a literal fact about v5.31.0 and no longer reads the store's version. `docs/runbooks/activate-the-operator-bridge.md` gains a check of the newest release before the update is started, with a stop for anything later than v5.31.0, and `docs/runbooks/put-back-the-build-before-the-operator-bridge.md` says why a schema above 54 is refused. No pasted block changed. A rollback procedure for later builds is separate work, not part of this chunk.
-- **The PATCH answers.** A store failure is `500 RECOVERY_DECISION_NOT_SAVED` with nothing applied. A file failure behind a saved decision is `200` with `recoveryMode.fileWritten: false` and a `RECOVERY_FILE_NOT_WRITTEN` warning. A failure elsewhere in the request after the decision is saved keeps its usual status and answers `RECOVERY_DECISION_SAVED_UPDATE_FAILED` with the decision in `recoveryMode`.
-- **Fixed after the cumulative review (`rev-20261006T234840Z-2d673a12`, 0 blocking, 4 warnings), on the PM's approval.** The route dropped `updateProject`'s statement that the decision had been saved on both later-failure exits; it now carries it as a field on each, with route-level tests. An unrecognised file value with no decision on record no longer sets a discrepancy, so the field means what its documentation says; the test that asserted the old behaviour changed with it. Every recorded decision writes a `project.recovery-mode-decided` activity event and a log line. The CHANGELOG no longer says the printed `tc start status` reports the source and the last decision: the status route's JSON carries them, and the printed verb adds a line only for a discrepancy.
-- **Contract change in an existing test.** `test/store-bridge-migration.test.js` pinned the store's schema version at 54 in three assertions. The bridge's own version is still asserted as exactly 54. Two of the three now assert that an upgraded store ends at `store.CURRENT_SCHEMA_VERSION`; the third asserts the store's version is no older than the bridge's.
-- **Carried from chunk 1's review.** The operator-path PATCH test sets its own state; `taskStepWithheld`'s JSDoc no longer claims every describer reads it; the A24 comment sentence on the GET is gone; the API reference has rows for the two routes.
-
-## 2026-10-06 — Governed hooks work on direct-mode HTTPS (#1947, salvaged from PR #1951)
-
-<!-- prawduct: type=bugfix | scope=hooks-https-trust-1947 -->
-
-The PM dispatched this over Medusa (ca09f1ad) as a salvage, not a rebase. PR #1951 carried two changes. Its release-notes gate shipped separately through #2085, so that half is dropped here: `.github/workflows/release.yml`, `scripts/release-notes-gate.js`, its two tests and `docs/release-process.md` are untouched by this branch. The hooks half was on no branch but #1951's, and is carried over unchanged onto a fresh branch from `main`.
-
-**Problem.** On a direct-mode HTTPS install `_apiOrigin` writes `https://localhost:<port>` into the governed marker, and the hook's plain `fetch` does not trust the operator's mkcert root, so every governed commit, push and wrap failed closed (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`).
-
-**The change.**
-- `lib/https-setup.js#localTrustAnchor` returns the `rootCA.pem` (from `$CAROOT`, mkcert's platform default, then `mkcert -CAROOT`) only when it provably issued the served certificate, by name and signature.
-- `syncControlHooks` records it as the marker's `caFile`, and logs where it looked when none is found.
-- The dispatcher check is a self-contained `_controlCheck` function embedded by its source. `caFile` is used only after the host is proven literally `localhost`, `127.0.0.1` or `[::1]`. The request goes to the literal loopback address with `ca` replacing the default roots and full verification on. A non-loopback or `http:` origin with `caFile` is refused before connecting. An untrusted certificate is reported as untrusted, not as unreachable.
-
-**Tests.** `test/control-hooks-https.test.js`, with a throwaway CA made by openssl: HTTPS allow and hold, 127.0.0.1, untrusted, wrong CA, unreachable, non-loopback names with a hit counter proving no connection, `caFile` beside http or unreadable, push to a bare remote, the wrap commit step allowed and held, the marker, `localTrustAnchor`, and an in-process HTTPS instance end to end.
-
-**History.** #1951's own review (cumulative rev-20260927T160500Z-d2ccab90, 0 blocking) covered these files on the old base; the silent-null-anchor finding from it is the `log.warn` in `syncControlHooks`. This branch is reviewed again on the new base.
-
-## 2026-10-06 — #1937: a held launch is not asked for what the gate refuses; the operator chooses the recovery mode
-
-<!-- prawduct: type=bugfix | scope=1937-recovery-gate-salvage -->
-
-Chunk 01 of the #1937 plan: the three pieces salvaged from PR #1986, which is to be closed in favour of this work.
-
-- **What.** `lib/launch-sequence.js#taskStepWithheld` is the recovery gate's own answer, carried on the status block as `taskWithheld`. The unready nudge (`lib/launch-unready.js#nudgeLine`) and `tc start status` (`lib/tc-verbs.js#renderStartStatus`) read it. `GET /api/launch-sequences` adds `projectRecoveryMode`. `PATCH /api/projects/:name` is operator-only when the body names `launchSequence.recoveryMode`.
-- **Not carried from #1986.** Its `ADVISORY_RECOVERY_HINT`, which told readers how to opt in to advisory mode, and every test assertion on that wording. The default recovery mode is about to change (operator ruling 2026-10-06), so the hint would have described an opt-in that is going away. Two tests now assert the opposite: the withheld nudge and status page do not mention advisory mode.
-- **Unchanged.** The default mode, the gate's ordering, and what advisory mode does.
-- **Tests.** Ported with the code: the gate's answer across operator, cleared and advisory launches; the nudge unit and end-to-end through the monitor; the status page with and without the field (an older server sends none); the GET before and after a setting change; the PATCH refusal for a session at a new value, at the current value, and beside another key, with the file unchanged each time.
-- **Mutations.** Six, one per guard or call-site argument, each turned a test red: the PATCH branch disabled; the presence check weakened to a change-of-value check; `projectRecoveryMode` hard-coded; the monitor's `taskWithheld` argument forced false; the status page's condition removed; `taskStepWithheld` widened to advisory.
-
-## 2026-09-27 — tc-progress cards: Project Health and Recent Progress from a local scorecard cache (#1949 C03)
-
-<!-- prawduct: type=feature | scope=scorecard-renderer-1949-c03 -->
-
-Chunk C03 of #1949 (Train 30). The PM dispatched it over Medusa (379ec59b). The Architect's rulings came back through the PM (70703325), and the Architect added an addendum (8bb8eae6).
-
-**Problem.** Plan pages had no way to show project health or recent progress without hand-editing tracked documents, which churns every checkout. C02 (Pilot-B5) publishes only certification documents. No producer and no schema existed for development figures.
-
-**Rulings.** The renderer only validates and displays, and never computes trend or net. HTTP requests read a local, sanitized cache that is replaced atomically, never `origin/metrics`. There is ONE scorecard document, `tc.scorecard/v1`, with `development` (this chunk) and `certification` (B5; its summary shape `tc.release-certification.summary/v1` is agreed with B5 and approved by the PM). Open backlog means open GitHub issues excluding PRs. Today is the Pacific calendar day. The addendum adds `openBacklog.staleOver90Days`. Placement is done by the PM from directives this chunk hands over.
-
-**The change.**
-- `lib/scorecard-cache.js`: a closed-schema validator for `tc.scorecard/v1`; a reader at `<store base>/scorecard/v1.json` that returns ok, stale, missing, unreadable or invalid, never throws, and caps size; and `writeScorecardCache`, which validates and then writes atomically through `lib/staged-write.js`.
-- `lib/plan-progress-card.js`: the `tc-progress` block names a card and holds no figures. It renders the Project Health card, or the Recent Progress card with a drawer. Times are in America/Los_Angeles with PDT/PST, and Delivery is shown apart from Discovery / Intake.
-- `lib/plan-docs.js`: dispatches the block and carries its CSS. `renderPlanPage` memoizes the reader, so the cache is read at most once per page and never for a plan without the block. `server.js#servePlanPage` supplies the reader.
-
-**Review.** Cumulative review `rev-20260927T193009Z-2562c027`: 0 blocking. R-3 caught `today` duplicated in `days[0]` with nothing checking they agreed; they are now required to be the same record. R-2: an old newest day now reads "Latest day", not "Today". R-4: a doc cited `lib/release-certification/`, which is not on main (the features-index test caught it too). Fixed in `d2b0fe5f` and verified in `rev-20260927T194454Z-0b432642`. After the PR review, the PM flagged that `Number.isSafeInteger` accepts epoch values past 8.64e15, where `Date#toISOString` throws, so a document could pass validation and still crash the card. `generatedAt` and `freshUntil` are now bounded by `MAX_EPOCH_MS`.
-
-**Tests.** `test/scorecard-cache.test.js`, `test/plan-progress-card.test.js`, one HTTP case in `test/api-plan-docs.test.js`, and the fixture `test/fixtures/scorecard-v1.json`.
-
-**Added 2026-10-06, before merge.** C02 landed on `main` (#1975) while this PR waited, so the certification section is no longer accepted as any object. `validateScorecard` now passes it to `lib/release-certification/scorecard.js#validateCertificationSummary` and refuses the document on any violation, naming up to five codes, each cut to 60 characters because a code can end in a key name from the document. This is an intentional test-contract change, dispatched by the PM (ca09f1ad): the case that accepted `{ anything: … }` is replaced by cases that accept an empty and a populated real summary and refuse seven malformed ones, plus a read/write case. Removing the validator call fails two of them. The PR still only reads the local cache and publishes nothing (ADR 0021 point 7).
-
-**Not done here.** The producer and collector, and whatever refreshes the cache: a follow-on chunk, and who writes the file is still open with the PM. Placing the blocks in the Registry and the board (the PM's job). VRF-1949-C03 is queued for the visual check.
-
-## 2026-10-04 — #1949: soak certification judge, successor to #2056
-
-<!-- prawduct: type=feature | scope=1949-soak-judge -->
-
-PM dispatch (Medusa 93e011e0), Architect ruling (011fef17) and corrections (6c0b466f). Supersedes #2056, whose code never landed.
-
-**Why.** The v5.30.0 soak's evidence was evaluated by hand, and `rc-cert host-finalize` certified without reading the bundle. #2056's judge would have closed that gap but failed the soak that shipped: it treated every failed event as fatal, with no path for an Operator to review one.
-
-**What.**
-- `lib/soak/judge.js`: verdicts `pass`, `awaiting-review`, `fail`. Terminal reasons are never waived, and any fault event that is not `ok` is terminal. A failed or skipped load event and the driver's ownership-unverified state are reviewable. A disposition proposal (`tc.soak-disposition/v1`) is validated and bound by digest, and never changes the verdict.
-- `lib/release-certification/state-machine.js#accept`, `scorecard.js`: the operator's acceptance binds the proposal's sha256 with the candidate and run, and the scorecard publishes it.
-- `lib/release-certification/host-checks.js`, `host-publish.js`: the finalization is `ok` for a pass or for covered findings; `certifiedFrom` certifies covered findings only when the acceptance names that exact digest.
-- `scripts/rc-cert.js`: `host-finalize --soak-bundle [--soak-disposition]`, `accept --soak-disposition-sha256`.
-- `lib/soak/bundle.js`, `lib/soak/driver.js`, `scripts/soak.js`: carried over from #2056. The bundle records its candidate SHA, and a run writes `end` at its horizon.
-- Docs: `deploy/soak/README.md` ("Judging the bundle"), ADR 0021 point 14, the bundle runbook.
-
-**Not done, by ruling.** v5.30.0 is not re-judged. RM09's monitoring layer stays outside the repo (#2079).
-
-## 2026-09-28 — New installs default the projects directory to ~/Projects (#880)
-
-<!-- prawduct: type=feature | scope=default-projects-dir-880 -->
-
-The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-projects-dir.md` (local, not tracked).
-
-**Problem.** The shipped `projectsDir` was `~/Documents/Projects`, under a macOS TCC-protected folder. The setup wizard cautions on protected paths by shape alone, so every fresh Mac opened the wizard with a caution about its own pre-filled value.
-
-**The change.**
-- The default is `~/Projects`. The Create-it offer makes it, and existing installs keep their persisted value.
-- The new `lib/tcc-folders.js` owns the protected-folder list and prose. `server.js` builds `config.protectedRoots` from it, and the server-side messages read it.
-- Hand copies that cannot import it are held by `test/tcc-folders.test.js`: the wizard's caution, the EACCES hint, `install.sh`'s `case` arms, and the default's install.sh and browser fallbacks. The installer's default check now derives from `DEFAULT_CONFIG` instead of a literal.
-- #880 said the wizard held its own folder list. It no longer did (it reads `config.protectedRoots`); the real duplicates were server-side prose.
-
-**Review.** The first Critic pass (rev-20260928T000124Z-734ba1ca) found 0 blocking. Its observations were fixed: a helper only tests called was replaced by the roots builder the server uses; an unpinned third copy; two wrong comments. The verify pass (rev-20260928T000637Z-0f0b6f70) was clean.
-
-**Evidence.** The full suite is green on the final tree, after the merges of main (the last clean run is recorded tree-valid in the evidence store). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
-
-**Added 2026-10-06, before merge.** Review found "existing installs keep their directory" asserted but unpinned: `config.load()` merges defaults, so a `config.json` with no `projectsDir` key would have moved to `~/Projects` on upgrade, with its projects still on disk and none listed. `load()` now gives a file that exists but lacks the key `LEGACY_PROJECTS_DIR` (`~/Documents/Projects`), and the next save writes it out. Only a missing file, a new install, gets the new default. `deploy/install.sh` read the same file with the new default as its keyless fallback, which would have silenced its protected-folder note for that same install; it now answers the way the server does. Tests: `test/projects-dir-upgrade.test.js`, and an executed case in `test/install-sh.test.js` that runs the installer's inline reader against real files. One assertion there changed on purpose: it refused any `Documents/Projects` in the block, and now allows exactly one, the keyless fallback. Removing either guard fails two tests. `public/` is unchanged from the diff the Architect cleared under A24.
-
-## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
-
-<!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->
-
-The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane D), and the Architect's overnight drain directive carried it to completion. It re-lands PR #1972 on a fresh branch off main, taken after #1902 merged because both touch `public/landing.js` and `test/inline-handler-args.test.js`. The old diff applied cleanly on top of #1902, and its three toggles already pass their keys through `jsArg`. It follows up #1906/#1915.
-
-**Problem.** `togglePortGroup`, `toggleGroupItem` and `toggleOpenclawItem` flipped state and re-rendered the whole panel. `innerHTML` replaced the pressed button, so keyboard focus fell to `<body>`. The same happened every 30 s when the polling loaders (`loadPorts`, `loadGroups`, `loadOpenclawConnections`) re-rendered.
-
-**The change** (`public/ui.js`, `public/landing.js`):
-- `foldToggleInPlace(button, open)` flips `aria-expanded`, the arrow and the row's content (`.toggle-row` then its next sibling) with no re-render. Each toggle takes the pressed button (`onclick="…(key, this)"`) and falls back to the old re-render when there's no button or row. Opening a group in place still calls `loadGroupDetail`.
-- `renderKeepingFoldFocus(container, render)` wraps the three polling renders: if focus was on a toggle inside the panel, it is returned to the new toggle with the same `data-fold-key` (added to each toggle). Focus elsewhere is never moved. The restore passes `preventScroll`, which #1972 did not: without it, an operator who focused a toggle and scrolled away would be pulled back on every poll. The Critic raised this as an observation and it was fixed before the first commit.
-- The render functions themselves are unchanged apart from the new attribute and handler argument.
-
-**Tests.** `test/panel-toggle-rows.test.js` runs the shipped functions against small fakes:
-- each toggle folds in place and never re-renders;
-- each still falls back to a re-render without a button;
-- a group opened in place loads its details, and closing loads nothing;
-- the rendered toggles carry `data-fold-key` and pass `this`;
-- focus is restored after a re-render without scrolling the page, left alone when it wasn't on a toggle, and not stolen when the toggle is gone;
-- all three loaders call the wrapper;
-- each panel's real rendered HTML puts the content element immediately after the toggle row, which is the adjacency in-place folding relies on.
-
-Against main's `ui.js` and `landing.js`, 15 of the file's 28 tests fail. Harness updates: `port-owner-kind-panel` lifts the new wrapper, because it runs `loadPorts`. `inline-handler-args` still asserts the exact name as the first argument and now also expects the button.
-
-## 2026-10-04 — Release notes are measured before anything is tagged (#2080)
-
-<!-- prawduct: type=bugfix | scope=2080-release-notes-gate -->
-
-PM dispatch (Medusa 637106be) per an Architect ruling of 2026-10-04. Split out of #1951, which carried this gate together with the mkcert trust-anchor fix for governed hooks (#1947). The two halves share no code, and the trust-anchor change needs its own security review, so the gate lands alone and #1951 keeps the hooks work.
-
-**Why.** v5.30.0's publish step failed with GitHub's `body is too long (maximum is 125000 characters)`: the promoted section was about 191,000 characters. `release.yml` pushes the tag before `gh release create`, so the tag existed with no Release until it was recovered by hand.
-
-**What.**
-- `scripts/release-notes-gate.js` and a `notes-gate` step between extraction and tagging, taken from #1951 unchanged apart from the issue it cites. It refuses empty notes and notes over 120,000 UTF-8 bytes, and never truncates (the Architect's earlier ruling on #1947). The tag step requires `steps.notes-gate.outcome == 'success'`.
-- `test/changelog-unreleased-size.test.js` (new): the early warning from the closed #1959, rebuilt to promote `[Unreleased]` in a scratch copy and read it through `lib/changelog-notes.js`, so it is fence-aware and measures what the release would publish. It reads the ceiling from the gate and warns at 110,000 bytes.
-- `docs/release-process.md`, `FEATURES.md`, `CHANGELOG.md`.
-
-**After review of PR #2085 (the Architect and Pilot-B1, independently).**
-- The size test counted the extractor's return value, one byte short of the file the workflow publishes, because the extractor command appends a newline. It now runs that command and counts the file it writes; 110,000 passes and 110,001 fails. The same file is also run through the gate CLI at the 120,000 boundary.
-- The recovery steps named a regeneration command from a test message that does not fire in this state, and that command rebuilds the whole lock. They now say to delete the one version's lock line and run `scripts/release-prepare.js`, which re-adds only that line and refuses other drift. Tried in a scratch copy on the real 5.30.0 section. A tag already on origin with oversized notes is called out as an Operator escalation.
-
-**Tests.** `test/release-notes-gate.test.js` (boundary-1, boundary, boundary+1, multibyte, empty, CLI exits), `test/release-workflow.test.js` (step order, the tag step's condition, nothing overrides a refusal) and the new size test. Mutation-checked: main's `release.yml` fails 3 of the new workflow pins, and a padded `[Unreleased]` fails the size test. The gate run on the real v5.30.0 notes refuses them at 191,040 bytes.
-
-## 2026-10-04 — The Codex receipt test follows its read-back, not 20/80 ms timers (#1964)
-
-<!-- prawduct: type=bugfix | scope=codex-receipt-test-1964 -->
-
-The PM dispatched this over Medusa after the v5.30.0 release (post-release PR cleanup, Lane C). It re-lands the fix from PR #1969 on a fresh branch off current main, because that branch had fallen dozens of merges behind; the test file had since changed under #1955 and #1978, so the fix was re-applied by hand rather than cherry-picked.
-
-**Problem.** `test/startup-control-codex.test.js`, *accepted on the echoed clientId + bytes notification…*: the fake app-server sent `turn/started` and `item/completed` on a 20 ms timer, and the completion on an 80 ms one. On a slow runner both fired before the adapter's post-subscribe read-back, the fire settled, and the read-back was skipped, so `one read-back` saw 0.
-
-**The change.** Test-only. The notifications are sent from the fake server's `request` event, which fires after the answer is written, on the first `thread/turns/list` after `turn/start`. That read answers with the turn still in progress and nothing echoed, so the read-back always runs first and acceptance can only come from the notification. Socket order carries `item/completed` ahead of `turn/completed`. Every assertion is unchanged. Unlike #1969, it sequences only on a read-back after `turn/start`, so a list call made before the turn exists cannot fire the notifications with no turn to report.
-
-**Evidence.** With the old timers set to 0 and 1 ms, the test failed 6 runs in 10 on `one read-back` (0 !== 1), matching CI. The new shape passed 30 of 30 under 8 CPU-bound loads. File: 54 of 54.
 
 ## 2026-08-20 — #990: forensic review of the ungoverned Antigravity window fixes 8 confirmed bugs
 
