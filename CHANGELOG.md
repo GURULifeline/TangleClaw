@@ -75,6 +75,8 @@ All notable changes to TangleClaw are documented in this file.
 
 - **The Feature Index gains two entries it was missing**: ADR 0024 (release versions group Trains) and `test/operator-bridge-runbooks.test.js`. A session wrap's index step found both undescribed and stubbed them as `TBD` on a local branch; they are written out here in full, so no placeholder reaches `main`.
 
+- **ADR 0024 gains Amendment 1: a release holds its whole workload** (#2157, #2165). It amends Decision 4 and parts of Decisions 2 and 5. Decision 4 excluded bucket entries from the release view. The roadmap now plans work by release, and most release-scoped workstreams have no permanent Train id yet, so that rule would have left most of a release outside it. The amendment admits release-scoped buckets, says a bucket is not a Train and gets no Train number until a recorded identity decision, and keeps dependencies structured and visible. A Train spanning releases is reviewed, not split automatically, and placing an issue in a release settles its forecast but not its Train. Release targets remain forecasts.
+
 ## [5.31.0] - 2026-10-06
 
 ### Added
