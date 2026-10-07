@@ -8168,7 +8168,9 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
 // so it is served to the operator and to nobody else: one session reading
 // another's would be a channel between agents that no operator sees. That is
 // why it has a route of its own and is absent from `GET /api/launch-sequences`,
-// which every caller class may read.
+// which every caller class may read. "Nobody else" is as strong as the install's
+// gate: with no login the proof below is of a request's shape, not of a person,
+// and a local process that imitates the dashboard is served (ADR 0017 R3b).
 //
 // A POST although it changes nothing. The operator proof is the recovery
 // clear's, branch for branch, and on an armed install that proof asserts the

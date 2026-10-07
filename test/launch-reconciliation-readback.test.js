@@ -20,7 +20,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { setLevel } = require('../lib/logger');
+const { setLevel, getLevel, setConsoleStream } = require('../lib/logger');
 
 setLevel('error');
 
@@ -411,6 +411,22 @@ describe('the launch reconciliation readback (#1937)', () => {
       }
     });
 
+    it('cannot tell a local process that imitates the dashboard from the dashboard: the limit of an install with no login', async () => {
+      // Recorded as a test so nobody reads the refusals above as more than
+      // they are. An install with no login has nothing that identifies a
+      // person, so what the open branch proves is the SHAPE of the request: a
+      // same-origin browser request carrying a page token. A process on this
+      // machine that sends that shape, with a token it fetched itself, is
+      // served. Only a login closes this, which is what the armed block shows.
+      const mine = reconciled();
+      const token = await pageToken();
+      const res = await send('POST', readUrl(mine.project), {
+        body: mine.body, headers: { ...boundHeaders(mine), 'x-tc-open-token': token }
+      });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).reconciliation, RECONCILIATION);
+    });
+
     it('refuses a browser that will not vouch for its own origin', async () => {
       const { project, body } = reconciled();
       const token = await pageToken();
@@ -597,6 +613,46 @@ describe('the launch reconciliation readback (#1937)', () => {
           for (const key of ['reconciliation', 'readyArtifact', 'readyDigest']) assert.equal(key in s, false, `${who}: ${key}`);
         }
       }
+    });
+
+    it('is absent from the launch list for the Master, who reads more of that list than a session does', async () => {
+      const mine = reconciled();
+      const master = require('../lib/master');
+      const real = master.liveMasterLaunchId;
+      master.liveMasterLaunchId = () => ({ launchId: 'master-live', answered: true, cause: null });
+      let res;
+      try {
+        res = await send('GET', `/api/launch-sequences?projectId=${mine.project.id}`, {
+          browser: false, headers: { 'x-tangleclaw-role': 'master', 'x-tangleclaw-launch-id': 'master-live' }
+        });
+      } finally {
+        master.liveMasterLaunchId = real;
+      }
+      assert.equal(res.statusCode, 200, res.body);
+      const row = json(res).sequences.find((s) => s.sequenceId === mine.sequence.id);
+      assert.ok(row && row.startupControl, 'the caller really resolved as the Master: it got the block only the Master and the operator get');
+      assert.equal(res.body.includes(SENTINEL), false);
+      for (const key of ['reconciliation', 'readyArtifact', 'readyDigest']) assert.equal(key in row, false, key);
+    });
+
+    it('is absent from the server log, for a read that worked and for one that was refused', async () => {
+      const { project, body } = reconciled();
+      const token = await pageToken();
+      const lines = [];
+      const level = getLevel();
+      setConsoleStream({ write: (line) => { lines.push(String(line)); } });
+      setLevel('debug');
+      try {
+        assert.equal((await send('POST', readUrl(project), { body, headers: { 'x-tc-open-token': token } })).statusCode, 200);
+        assert.equal((await send('POST', readUrl(project), { body, browser: false })).statusCode, 403);
+      } finally {
+        setLevel(level);
+        setConsoleStream(null);
+      }
+      const logged = lines.join('');
+      assert.match(logged, /Launch reconciliation read/, 'the successful read is in what was captured');
+      assert.match(logged, /Refused a launch reconciliation read/, 'and so is the refusal');
+      assert.equal(logged.includes(SENTINEL), false, 'neither line carries the text');
     });
 
     it('is absent from the session\'s own status and review, and from the activity log', () => {
