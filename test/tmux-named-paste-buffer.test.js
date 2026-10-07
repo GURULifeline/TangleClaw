@@ -66,7 +66,9 @@ function installRecordingTmux(behaviour = {}) {
     'verb="$1"',
     'if [ "$verb" = load-buffer ]; then',
     '  for last; do :; done',
-    '  mode=$(stat -f %Lp "$last" 2>/dev/null || stat -c %a "$last")',
+    // GNU first: its `stat -f` is a different command that prints a filesystem
+    // report, so the BSD spelling can only be the fallback.
+    '  mode=$(stat -c %a "$last" 2>/dev/null || stat -f %Lp "$last")',
     `  cp "$last" '${dir}/loaded'`,
     '  printf \'@file\\t%s\\t%s\\n\' "$last" "$mode" >> "$log"',
     'fi',
@@ -316,7 +318,9 @@ describe('sendKeys binds its load and its paste to one buffer name (#2173)', () 
 describe('named delivery buffers on a real tmux server (#2173)', () => {
   const saved = { TMUX: process.env.TMUX, TMUX_TMPDIR: process.env.TMUX_TMPDIR };
   let root = null;
-  const started = [];
+  // The private server's socket, set only once tmux has been seen answering
+  // from it. Teardown stops the server at this path and no other.
+  let privateSocket = null;
 
   /**
    * Run tmux against the private server and return its output.
@@ -324,7 +328,8 @@ describe('named delivery buffers on a real tmux server (#2173)', () => {
    * @returns {string} stdout
    */
   function t(args) {
-    return execFileSync('tmux', args, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.ok(privateSocket, 'the private tmux server was not established; refusing to run tmux');
+    return execFileSync('tmux', ['-S', privateSocket, ...args], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   }
 
   /**
@@ -340,9 +345,9 @@ describe('named delivery buffers on a real tmux server (#2173)', () => {
     const name = uniqueSessionName(label);
     const out = path.join(root, `${name}.out`);
     const channel = `done-${name}`;
-    execFileSync('tmux', ['new-session', '-d', '-s', name, '-x', '200', '-y', '50',
+    assert.ok(privateSocket, 'the private tmux server was not established; refusing to start a session');
+    execFileSync('tmux', ['-S', privateSocket, 'new-session', '-d', '-s', name, '-x', '200', '-y', '50',
       `head -n ${lines} > '${out}'; tmux wait-for -S '${channel}'; exec sleep 600`], { timeout: 10000 });
-    started.push(name);
     return {
       name,
       received: () => {
@@ -367,22 +372,35 @@ describe('named delivery buffers on a real tmux server (#2173)', () => {
     // Proven before any test relies on it: the server this process reaches is
     // the one under `root`. A pane on the host's own server would otherwise
     // receive this file's pastes.
+    // `-f /dev/null`: this call starts the server, and the operator's own
+    // tmux config, hooks and plugins have no place in it.
     const probe = uniqueSessionName('isolation-probe');
-    execFileSync('tmux', ['new-session', '-d', '-s', probe, 'exec sleep 600'], { timeout: 10000 });
-    started.push(probe);
-    const socket = t(['display-message', '-p', '-t', `=${probe}:`, '#{socket_path}']).trim();
-    assert.ok(fs.realpathSync(socket).startsWith(fs.realpathSync(root) + path.sep),
-      `the test server must be private to this file, but tmux answered from ${socket}`);
+    execFileSync('tmux', ['-f', '/dev/null', 'new-session', '-d', '-s', probe, 'exec sleep 600'], { timeout: 10000 });
+    const socket = execFileSync('tmux', ['display-message', '-p', '-t', `=${probe}:`, '#{socket_path}'],
+      { encoding: 'utf8', timeout: 10000 }).trim();
+    if (!fs.realpathSync(socket).startsWith(fs.realpathSync(root) + path.sep)) {
+      // Not ours. Take back the one session just started there, by its exact
+      // name, and stop: nothing below may run against that server.
+      try { execFileSync('tmux', ['kill-session', '-t', `=${probe}`], { timeout: 10000, stdio: 'ignore' }); } catch (_) { /* gone */ }
+      assert.fail(`the test server must be private to this file, but tmux answered from ${socket}`);
+    }
+    privateSocket = socket;
   });
 
   after(() => {
-    try { t(['kill-server']); } catch (_) { /* already gone */ }
+    // Only a server proven private is stopped, and by its socket path. `after`
+    // runs even when `before` threw, and a bare kill-server at that point
+    // would go to whichever server the environment names.
+    if (privateSocket) {
+      try { t(['kill-server']); } catch (_) { /* already gone */ }
+    }
     if (saved.TMUX === undefined) delete process.env.TMUX; else process.env.TMUX = saved.TMUX;
     if (saved.TMUX_TMPDIR === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = saved.TMUX_TMPDIR;
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
   afterEach(() => {
+    if (!privateSocket) return;
     for (const leftover of bufferNames()) t(['delete-buffer', '-b', leftover]);
   });
 
@@ -447,7 +465,8 @@ describe('named delivery buffers on a real tmux server (#2173)', () => {
   });
 
   it('an empty send leaves the pane and the operator\'s buffer as they were', () => {
-    // With the unnamed form this pasted, and deleted, whatever was newest.
+    // tmux creates no buffer from an empty file, so a paste that named none
+    // would take, and delete, the operator's.
     const pane = startReader('empty', 1);
     t(['set-buffer', 'what the operator copied']);
 
