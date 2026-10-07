@@ -40,6 +40,7 @@
     },
     "trustDialog": {
       "provenance": "live-capture",
+      "note": "Captured in a git folder (/private/tmp/cx2059/repo). In the folder the other panes of this set used, which is not a git repository, 0.161.0 went from its opening screen to a session without showing this prompt. Apart from the folder row it reads the same as the 0.159.0 prompt.",
       "lines": [
         "",
         "  Folder access",

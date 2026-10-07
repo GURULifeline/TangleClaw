@@ -326,13 +326,9 @@ describe('what refuses a Codex pane when no channel has spoken (#2059)', () => {
     assert.deepEqual(withStart, ['0.156.1', '0.159.0', '0.161.0']);
   });
 
-  for (const [version, name, lines] of LIVE_PANES.filter(([, name]) => name === 'startScreen')) {
+  for (const [version, , lines] of LIVE_PANES.filter(([, name]) => name === 'startScreen')) {
     it(`codex-cli ${version}: the start screen is not at rest under the shipped profile`, () => {
       assert.equal(paneVerdict(lines, shipped()), 'not-at-rest');
-    });
-
-    it(`codex-cli ${version}: without an at-rest marker the start screen would read idle`, () => {
-      assert.equal(paneVerdict(lines, markerless()), 'idle', `${name} is the case a markerless rule gets wrong`);
     });
   }
 
@@ -341,12 +337,36 @@ describe('what refuses a Codex pane when no channel has spoken (#2059)', () => {
     assert.ok(shipped().idleMarker.length > 0);
   });
 
+  /**
+   * What the pane gate would say of each live pane if no at-rest marker were
+   * required. Every live pane name has an entry, so a new pane cannot go
+   * unjudged. `idle` on `startScreen` is the case a markerless rule gets
+   * wrong; every other `idle` is a pane that really is at rest.
+   */
+  const WITHOUT_A_MARKER = {
+    idle: 'idle',
+    idleWithNeighbour: 'idle',
+    clippedStatusRow: 'idle',
+    quotedProse: 'idle',
+    idleDefaultLayout: 'idle',
+    idleRunState: 'idle',
+    startScreen: 'idle',
+    busy: 'turn-in-flight',
+    busyDefaultLayout: 'turn-in-flight',
+    busyRunState: 'turn-in-flight',
+    dialog: 'no-prompt',
+    trustDialog: 'no-prompt',
+    updateDialog: 'no-prompt',
+    typing: 'no-prompt'
+  };
+
   for (const [version, name, lines] of LIVE_PANES) {
-    const refusal = { busyDefaultLayout: 'turn-in-flight', busyRunState: 'turn-in-flight', busy: 'turn-in-flight', trustDialog: 'no-prompt', updateDialog: 'no-prompt', dialog: 'no-prompt', typing: 'no-prompt' }[name];
-    if (!refusal) continue;
-    it(`codex-cli ${version}: ${name} is refused as ${refusal} even with no at-rest marker required`, () => {
-      assert.equal(paneVerdict(lines, markerless()), refusal);
-      assert.notEqual(paneVerdict(lines, shipped()), 'idle');
+    const expected = WITHOUT_A_MARKER[name];
+    it(`codex-cli ${version}: with no at-rest marker required, ${name} reads ${expected}`, () => {
+      assert.ok(name in WITHOUT_A_MARKER, 'a new live pane needs an expected verdict here');
+      assert.equal(paneVerdict(lines, markerless()), expected);
+      // A pane refused without the marker is refused with it too.
+      if (expected !== 'idle') assert.notEqual(paneVerdict(lines, shipped()), 'idle');
     });
   }
 
