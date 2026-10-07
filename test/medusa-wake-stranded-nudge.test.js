@@ -99,8 +99,13 @@ describe('isOwnNudge — the composer holds only the switchboard\'s nudge (#1621
     assert.equal(wake.isOwnNudge(crossed(master, '/api/master/medusa', '/api/sessions/proj-a/medusa')), false);
   });
 
-  it('refuses a nudge whose three paths disagree', () => {
-    const tampered = strandedNudge().replace('/api/sessions/proj-a/medusa/send', '/api/sessions/other/medusa/send');
+  it('refuses a nudge whose paths disagree', () => {
+    // Only the Master's form names its base more than once; the project form
+    // names it once, to stay under the composer's verbatim-paste limit.
+    const master = wakeTransports.withNonce(wake._nudgeLineFor('/api/master/medusa', 1, 'http://localhost:3102'), 'a1b2c3d4e5f6');
+    assert.equal(wake.isOwnNudge(master), true);
+    const tampered = master.replace('/api/master/medusa/send', '/api/sessions/other/medusa/send');
+    assert.notEqual(tampered, master);
     assert.equal(wake.isOwnNudge(tampered), false);
   });
 

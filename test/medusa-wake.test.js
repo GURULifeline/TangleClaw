@@ -505,12 +505,16 @@ describe('medusa-wake — nudge injection', () => {
     assert.ok(!cmd.includes('EVIL'), 'inbound text must not reach the pane');
     assert.ok(!cmd.includes('\n'), 'nudge must be a single line');
     assert.match(cmd, /\[TangleClaw Switchboard\]/);
-    assert.match(cmd, /GET \/api\/sessions\/proj-a\/medusa\/messages/);
-    assert.match(cmd, /POST \/api\/sessions\/proj-a\/medusa\/read/);
+    // The project form names its verbs through `tc` and the API base once
+    // (#1976): every further mention of the base costs the encoded project
+    // name again against the composer's verbatim-paste limit.
+    assert.match(cmd, /tc message read/);
+    assert.match(cmd, /tc message ack <message-id>/);
+    assert.match(cmd, /the API at \S+\/api\/sessions\/proj-a\/medusa;/);
   });
 
-  it('URL-encodes the project name in the nudge paths', () => {
-    assert.match(wake._nudgeLine('My Proj', 2), /\/api\/sessions\/My%20Proj\/medusa\/messages/);
+  it('URL-encodes the project name in the nudge path', () => {
+    assert.match(wake._nudgeLine('My Proj', 2), /\/api\/sessions\/My%20Proj\/medusa;/);
   });
 
   it('watermark keys off the production row shape: inner `id` primary, envelope `messageId` honored, length fallback', () => {
@@ -964,8 +968,11 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     // never named the send path. The reply obligation lived only in the prime,
     // read at session start and subject to compaction, while the nudge is what
     // is actually in front of the model at the moment it acts.
+    // The reply path a project session is given is now `tc message send`, which
+    // carries its launch headers (#1976); the API base stays as the fallback.
     const line = wake._nudgeLineFor('/api/sessions/p/medusa', 1, 'http://localhost:3102');
-    assert.match(line, /POST \/api\/sessions\/p\/medusa\/send/);
+    assert.match(line, /tc message send --in-reply-to <message-id> <sender-workspace-id> "<reply>"/);
+    assert.match(line, /the API at http:\/\/localhost:3102\/api\/sessions\/p\/medusa;/);
     assert.match(line, /initiator closes the exchange/);
     assert.ok(!line.includes('\n'), 'still one line');
   });
@@ -983,6 +990,29 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     assert.match(line, /tc message owed/);
     assert.match(line, /Never use \/clear as an acknowledgement/);
     assert.ok(!line.includes('\n'), 'still one line');
+  });
+
+  it('stays under the composer\'s verbatim-paste limit for the longest valid project name (#1976)', () => {
+    // Claude Code shows a paste of up to COMPOSER_VERBATIM_MAX characters as
+    // typed and anything longer as `[Pasted text #N]`. A nudge whose Enter is
+    // lost is recognised by reading the composer back, so a collapsed nudge is
+    // never recognised and the session's wakes stop until the exchange
+    // escalates. The base carries the URL-encoded name: 64 spaces is the
+    // longest a valid name can encode to.
+    const { validateName } = require('../lib/projects');
+    const longest = ' '.repeat(64);
+    assert.equal(validateName(longest).valid, true, 'the worst case must be a name the registry accepts');
+    assert.equal(validateName('x'.repeat(65)).valid, false, 'and nothing longer is');
+    assert.equal(encodeURIComponent(longest).length, 192);
+    const wakeTransports = require('../lib/wake-transports');
+    const built = (base) => wakeTransports.withNonce(wake._nudgeLineFor(base, 99999, 'https://localhost:65535'), '0123456789ab');
+    const MARGIN = 32;
+    for (const base of [`/api/sessions/${encodeURIComponent(longest)}/medusa`, require('../lib/master').MASTER_MEDUSA_API_BASE]) {
+      const line = built(base);
+      assert.ok(line.length <= wake.COMPOSER_VERBATIM_MAX - MARGIN,
+        `${base.slice(0, 24)}… builds ${line.length} characters; the limit is ${wake.COMPOSER_VERBATIM_MAX} less a margin of ${MARGIN}`);
+      assert.equal(wake.isOwnNudge(line), true, 'and it is still recognised as our own nudge');
+    }
   });
 
   it('gives the Project Master only the raw routes: no tc message command (#1976)', () => {

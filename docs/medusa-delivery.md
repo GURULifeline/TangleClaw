@@ -126,7 +126,11 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   engine config also say never to use `/clear` as an acknowledgement.
   The Project Master's nudge states the same order with its raw routes only
   (`POST <base>/send`, then `POST <base>/read`): `tc message` needs a project
-  identity, which the Master does not have.
+  identity, which the Master does not have. Every nudge is built to stay
+  under 800 characters, wake reference included: Claude Code shows a longer
+  paste as `[Pasted text #N]`, and a nudge that collapses that way cannot be
+  recognised if its Enter is lost. The project nudge therefore names its API
+  base once.
 - **Closing:** the original sender closes an exchange with
   `POST <base>/medusa/exchanges/<exchange-id>/close` (`tc message close`).
 - **Listing:** `GET <base>/medusa/exchanges?direction=sent|received&open=1`
