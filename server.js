@@ -270,6 +270,7 @@ const projectConfig = require('./lib/project-config');
 const { protectedRootsFor } = require('./lib/tcc-folders');
 const launchSequence = require('./lib/launch-sequence');
 const launchRecoveryClear = require('./lib/launch-recovery-clear');
+const launchRecoveryHeld = require('./lib/launch-recovery-held');
 const recoveryDefault = require('./lib/recovery-default');
 const master = require('./lib/master');
 const sharedDocsAccess = require('./lib/shared-docs-access');
@@ -8195,6 +8196,52 @@ route('POST', '/api/sessions/:project/launch/recovery-clear', (req, res, params,
     recoveryClearance: cleared.recoveryClearance,
     recoveryClearedAt: cleared.recoveryClearedAt,
     recoveryClearedBy: cleared.recoveryClearedBy
+  });
+});
+
+// GET /api/launch/recovery-held — the signed-in operator reads every launch on
+// this install that is waiting on their clear (#2049).
+//
+// Served only while the login gate is `armed` and the request carries an
+// operator's session. It is the list an operator reviews before clearing
+// several launches, so it must never be served to a caller nobody proved: on
+// an install with no login the single clear still works and records itself as
+// unverified, but nothing there could show that the reader of a fleet-wide
+// list is the operator. Every other gate state refuses by its own branch, and
+// the gate state is decided before the session is looked at, as in
+// `_requireOperatorWrite`.
+//
+// A GET with no CSRF proof: it changes nothing, and a cross-site page cannot
+// read the answer.
+route('GET', '/api/launch/recovery-held', (req, res) => {
+  const gateState = req.tcGateState;
+  const refuse = (status, code, message, extra = {}) => {
+    log.warn('Refused a fleet recovery read', { code, gateState, ...extra });
+    return errorResponse(res, status, message, code);
+  };
+  if (gateState === authGate.GATE_STATES.FALLBACK) {
+    log.warn('Refused a fleet recovery read', { code: 'GATE_FALLBACK', gateState });
+    return _refuseDuringFallback(res, 'list the launches waiting on an operator');
+  }
+  if (gateState !== authGate.GATE_STATES.ARMED) {
+    if (authGate.isOpen(gateState)) {
+      return refuse(409, 'LOGIN_REQUIRED',
+        'This install has no login, so the launches waiting on an operator cannot be listed here: nothing would '
+        + 'establish that the reader is the operator. Turn the login on and sign in. Each project\'s Launch '
+        + 'readiness panel still shows its own launches.');
+    }
+    return refuse(409, 'GATE_STATE_UNSUPPORTED',
+      `The launches waiting on an operator cannot be listed while the login gate is "${gateState}". Resolve the `
+      + 'gate first.');
+  }
+  if (!req.tcSession) {
+    return refuse(401, 'UNAUTHENTICATED',
+      'Sign in to list the launches waiting on an operator: this install requires a login.');
+  }
+  jsonResponse(res, 200, {
+    gateState,
+    generatedAt: new Date().toISOString(),
+    launches: launchRecoveryHeld.listHeld()
   });
 });
 
