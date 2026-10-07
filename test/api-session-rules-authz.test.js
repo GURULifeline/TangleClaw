@@ -536,6 +536,35 @@ describe('api/session-rules caller gate (#2013)', () => {
         assert.equal(otherProjectRes.data.code, 'OTHER_PROJECT');
         assert.equal(store.sessionRules.get(otherProjectTarget.id).status, 'active');
       });
+
+      // #1053/#2013: approval has carried this same password gate since
+      // before #1971 — caught with no HTTP-level test covering it when a
+      // mutation audit for this chunk flagged the gate as never actually
+      // exercised at the route.
+      it('approving a proposal with a wrong or absent password is refused FORBIDDEN, and nothing is approved', async () => {
+        const wrongPwProposal = proposedRule(own.id, 'approval password-gated (wrong password)');
+        const wrong = await request('PUT', `/api/session-rules/${wrongPwProposal.id}/status`,
+          { status: 'active', expectedContent: wrongPwProposal.content, password: 'wrong' }, asOperator);
+        assert.equal(wrong.status, 403);
+        assert.equal(wrong.data.code, 'FORBIDDEN');
+        assert.equal(store.sessionRules.get(wrongPwProposal.id).status, 'proposed');
+
+        const absentPwProposal = proposedRule(own.id, 'approval password-gated (absent password)');
+        const absent = await request('PUT', `/api/session-rules/${absentPwProposal.id}/status`,
+          { status: 'active', expectedContent: absentPwProposal.content }, asOperator);
+        assert.equal(absent.status, 403);
+        assert.equal(absent.data.code, 'FORBIDDEN');
+        assert.equal(store.sessionRules.get(absentPwProposal.id).status, 'proposed');
+      });
+
+      it('approving a proposal with the correct password succeeds', async () => {
+        const proposal = proposedRule(own.id, 'approval password-gated (correct password)');
+        const res = await request('PUT', `/api/session-rules/${proposal.id}/status`,
+          { status: 'active', expectedContent: proposal.content, password: REAL_PASSWORD }, asOperator);
+        assert.equal(res.status, 200);
+        assert.equal(res.data.status, 'active');
+        assert.equal(store.sessionRules.get(proposal.id).status, 'active');
+      });
     });
 
     it('the operator restores a retired rule, with no password, and it comes back disabled', async () => {

@@ -186,6 +186,23 @@ describe('session rule lifecycle (#1696, #1709)', () => {
       for (const [from, to] of ALLOWED) assert.ok(SESSION_RULE_TRANSITIONS[from].includes(to));
     });
 
+    it('docs/session-rules-self-improvement.md renders this exact table — the doc cannot drift from the code', () => {
+      const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'session-rules-self-improvement.md'), 'utf8');
+      const m = doc.match(/const SESSION_RULE_TRANSITIONS = \{([\s\S]*?)\n\};/);
+      assert.ok(m, 'docs/session-rules-self-improvement.md must render the SESSION_RULE_TRANSITIONS table as a JS object literal');
+      // eslint-disable-next-line no-new-func
+      const rendered = new Function(`return {${m[1]}};`)();
+      assert.deepEqual(rendered, SESSION_RULE_TRANSITIONS);
+    });
+
+    it('a rule cannot be born retired — the table has no entry to reach it from', () => {
+      const pid = mkProject('proj-create-retired');
+      assert.throws(
+        () => store.sessionRules.create({ content: 'dead on arrival', projectId: pid, status: 'retired' }),
+        (err) => err.code === 'INVALID_TRANSITION'
+      );
+    });
+
     /** Put a fresh rule into `status`, bypassing setStatus's own checks. */
     function ruleAt(pid, status) {
       const rule = store.sessionRules.create({ content: `rule at ${status}-${Math.random()}`, projectId: pid });
@@ -315,7 +332,7 @@ describe('session rule lifecycle (#1696, #1709)', () => {
       assert.equal(retiredOriginal.supersededBy, replacement.id);
     });
 
-    it('a second replacement of an already-superseded rule is refused REPLACEMENT_SUPERSEDED', () => {
+    it('creating a second replacement naming an already-retired target is refused INVALID_REPLACES at creation — it never reaches the approval-time REPLACEMENT_SUPERSEDED check', () => {
       const pid = mkProject('proj-double-replace');
       const original = mkActiveRule(pid, 'original text 3');
       const first = store.sessionRules.create({
@@ -327,6 +344,39 @@ describe('session rule lifecycle (#1696, #1709)', () => {
         () => store.sessionRules.create({ content: 'second amendment', projectId: pid, createdBy: 'ai', replacesRuleId: original.id }),
         (err) => err.code === 'INVALID_REPLACES'
       );
+    });
+
+    it('approving a REJECTED replacement whose target was superseded by a DIFFERENT, later-approved one is refused REPLACEMENT_SUPERSEDED', () => {
+      // #1696 Architect ruling: single lineage. The INVALID_REPLACES test
+      // above refuses a second replacement at CREATION because its target is
+      // already gone. This is the other door into the same guarantee: a
+      // replacement that was proposed and REJECTED while the target was
+      // still active — so it was never blocked by the one-pending guard —
+      // can be moved rejected -> active later (an allowed transition). If a
+      // DIFFERENT replacement has since retired the target, resurrecting the
+      // rejected one would let two rules claim to have replaced one original.
+      const pid = mkProject('proj-resurrect-rejected');
+      const original = mkActiveRule(pid, 'original text 3b');
+      const loser = store.sessionRules.create({
+        content: 'rejected amendment', projectId: pid, createdBy: 'ai', replacesRuleId: original.id
+      });
+      store.sessionRules.setStatus(loser.id, 'rejected', { changedBy: 'operator' });
+      // Rejecting frees the target: a second (eventual winner) proposal may
+      // now be filed and approved, retiring `original`.
+      const winner = store.sessionRules.create({
+        content: 'winning amendment', projectId: pid, createdBy: 'ai', replacesRuleId: original.id
+      });
+      store.sessionRules.setStatus(winner.id, 'active', { changedBy: 'operator', expectedContent: 'winning amendment' });
+      assert.equal(store.sessionRules.get(original.id).status, 'retired');
+      assert.equal(store.sessionRules.get(original.id).supersededBy, winner.id);
+      // Now resurrect the rejected loser — `rejected -> active` is itself an
+      // allowed transition, so the refusal must come from the replacement
+      // guard, not INVALID_TRANSITION.
+      assert.throws(
+        () => store.sessionRules.setStatus(loser.id, 'active', { changedBy: 'operator', expectedContent: 'rejected amendment' }),
+        (err) => err.code === 'REPLACEMENT_SUPERSEDED'
+      );
+      assert.equal(store.sessionRules.get(loser.id).status, 'rejected', 'the refused approval must not have changed anything');
     });
 
     it('a second replacement of a rule with a STILL-PENDING replacement is refused INVALID_REPLACES — a distinct branch from the already-superseded case', () => {
@@ -384,6 +434,56 @@ describe('session rule lifecycle (#1696, #1709)', () => {
       assert.ok(approved.replacementSkipped);
       assert.equal(approved.replacementSkipped.id, rule.id);
     });
+
+    it('a project rule naming a Master rule as its replacement target is refused — by the project/kind mismatch, since a project rule is never kind "master"', () => {
+      const masterRule = store.sessionRules.create({ content: 'a master hard rule', kind: 'master', createdBy: 'system' });
+      const pid = mkProject('proj-replace-master');
+      assert.throws(
+        () => store.sessionRules.create({ content: 'not a real amendment', projectId: pid, createdBy: 'ai', replacesRuleId: masterRule.id }),
+        (err) => err.code === 'INVALID_REPLACES'
+      );
+    });
+
+    it('a Master rule cannot itself be created as a replacement — it has its own baseline lifecycle, exercising the dedicated master guard directly', () => {
+      // Distinct from the test above: that one is refused by the project/kind
+      // MISMATCH check (a 'startup' replacement naming a 'master' target).
+      // This one is refused by `_validateReplacesTarget`'s own `kind ===
+      // 'master'` guard, which fires before any target lookup at all — the
+      // only way to exercise it directly is a replacement that is ITSELF
+      // kind 'master'.
+      const existingMaster = store.sessionRules.create({ content: 'existing master rule', kind: 'master', createdBy: 'system' });
+      assert.throws(
+        () => store.sessionRules.create({ content: 'not a real amendment', kind: 'master', createdBy: 'system', replacesRuleId: existingMaster.id }),
+        (err) => err.code === 'INVALID_REPLACES'
+      );
+    });
+
+    it('a REJECTED replacement does not count as still pending — a fresh one may be filed for the same target', () => {
+      const pid = mkProject('proj-rejected-not-pending');
+      const original = mkActiveRule(pid, 'original text 5');
+      const firstAttempt = store.sessionRules.create({
+        content: 'first attempt', projectId: pid, createdBy: 'ai', replacesRuleId: original.id
+      });
+      store.sessionRules.setStatus(firstAttempt.id, 'rejected', { changedBy: 'operator' });
+      // The one-pending-replacement guard (_pendingReplacementOf) filters on
+      // status='proposed' specifically — a decided (rejected) replacement
+      // must not block a fresh attempt the way a still-undecided one would.
+      assert.doesNotThrow(() => store.sessionRules.create({
+        content: 'second attempt', projectId: pid, createdBy: 'ai', replacesRuleId: original.id
+      }));
+      assert.equal(store.sessionRules.get(original.id).status, 'active', 'the target is still active, untouched by the rejected attempt');
+    });
+
+    it('a replacement cannot name a target in a DIFFERENT project — same-project is required, not just same-kind', () => {
+      const ownPid = mkProject('proj-replace-own');
+      const otherPid = mkProject('proj-replace-other');
+      const target = mkActiveRule(ownPid, 'owned by the first project');
+      assert.throws(
+        () => store.sessionRules.create({ content: 'cross-project amendment', projectId: otherPid, createdBy: 'ai', replacesRuleId: target.id }),
+        (err) => err.code === 'INVALID_REPLACES'
+      );
+      assert.equal(store.sessionRules.get(target.id).status, 'active');
+    });
   });
 
   describe('the retire → edit → restore → switch-on hole (#1709)', () => {
@@ -400,6 +500,20 @@ describe('session rule lifecycle (#1696, #1709)', () => {
       // approval in between.
       const stillRetired = store.sessionRules.get(rule.id);
       assert.equal(stillRetired.content, 'frozen text');
+    });
+
+    it('a retired rule\'s text cannot be rolled back to a different version either — restore() carries the same freeze as update()', () => {
+      const pid = mkProject('proj-retired-restore');
+      const proposal = store.sessionRules.create({ content: 'v1 text', projectId: pid, createdBy: 'ai' });
+      store.sessionRules.update(proposal.id, { content: 'v2 text', changedBy: 'ai' });
+      const rule = store.sessionRules.setStatus(proposal.id, 'active', { changedBy: 'operator', expectedContent: 'v2 text' });
+      const firstVersion = store.sessionRules.listVersions(rule.id).at(-1).versionNo;
+      store.sessionRules.setStatus(rule.id, 'retired', { changedBy: 'operator' });
+      assert.throws(
+        () => store.sessionRules.restore(rule.id, firstVersion),
+        (err) => err.code === 'RULE_RETIRED'
+      );
+      assert.equal(store.sessionRules.get(rule.id).content, 'v2 text', 'the retired rule\'s frozen text must be untouched');
     });
   });
 
