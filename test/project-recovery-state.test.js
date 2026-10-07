@@ -95,8 +95,8 @@ describe('v54→55: the project recovery state table (#1937)', () => {
     return fresh;
   }
 
-  it('is the current schema version', () => {
-    assert.equal(store.CURRENT_SCHEMA_VERSION, 55);
+  it('is at least the schema version this table arrived in', () => {
+    assert.ok(store.CURRENT_SCHEMA_VERSION >= 55);
   });
 
   it('gives an upgraded store the same table as a fresh one, CHECKs and cascade included', () => {
@@ -116,7 +116,7 @@ describe('v54→55: the project recovery state table (#1937)', () => {
     store._setBasePath(dir);
     store.init();
     assert.equal(tableDdl(), fresh);
-    assert.equal(store.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get().v, 55);
+    assert.equal(store.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get().v, store.CURRENT_SCHEMA_VERSION);
     assert.ok(store.projects.getByName('carried'), 'the upgrade keeps the projects it found');
     assert.equal(store.projectRecoveryState.get(store.projects.getByName('carried').id), null,
       'and records no decision for any of them');
