@@ -124,6 +124,9 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
   acknowledgement with no reply leaves the sender waiting. The wake nudge, the
   prime and the engine config all state this order. The nudge and the
   engine config also say never to use `/clear` as an acknowledgement.
+  The Project Master's nudge states the same order with its raw routes only
+  (`POST <base>/send`, then `POST <base>/read`): `tc message` needs a project
+  identity, which the Master does not have.
 - **Closing:** the original sender closes an exchange with
   `POST <base>/medusa/exchanges/<exchange-id>/close` (`tc message close`).
 - **Listing:** `GET <base>/medusa/exchanges?direction=sent|received&open=1`

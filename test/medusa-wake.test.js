@@ -985,6 +985,26 @@ describe('medusa-wake — the Project Master is scanned like any session (#996)'
     assert.ok(!line.includes('\n'), 'still one line');
   });
 
+  it('gives the Project Master only the raw routes: no tc message command (#1976)', () => {
+    // `tc message` resolves a project name and the Master has none, so every
+    // `tc message` command refuses in its pane. A Master nudge that named them
+    // would leave it only the raw ack, which is the ack-without-reply the
+    // project wording exists to stop.
+    const base = require('../lib/master').MASTER_MEDUSA_API_BASE;
+    const line = wake._nudgeLineFor(base, 2, 'http://localhost:3102');
+    assert.doesNotMatch(line, /tc message/, 'no tc message command reaches the Master');
+    assert.doesNotMatch(line, /launch headers|inReplyTo|in-reply-to/, 'nor the project-only reply carrier');
+    assert.match(line, /POST \/api\/master\/medusa\/send \{"to":"<sender-workspace-id>","message":"<reply>"\}/);
+    assert.match(line, /POST \/api\/master\/medusa\/read \{"ids":\[\.\.\.\]\}/);
+    assert.ok(line.indexOf('/medusa/send') < line.indexOf('/medusa/read'), 'reply comes before the ack');
+    assert.match(line, /BEFORE marking it handled/);
+    assert.match(line, /initiator closes the exchange/);
+    assert.match(line, /Never use \/clear as an acknowledgement/);
+    assert.ok(!line.includes('\n'), 'still one line');
+    // The base picks the form, so a project session never gets the Master's.
+    assert.match(wake._nudgeLineFor('/api/sessions/master/medusa', 2, 'http://localhost:3102'), /tc message send --in-reply-to/);
+  });
+
   it('states the API origin outright instead of pointing at a guide (#1020)', () => {
     // "base URL + auth are in your project guide" dangled: the guide never
     // carried one, and for a plugin-governed project TangleClaw does not write
