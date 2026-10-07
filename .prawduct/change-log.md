@@ -35,6 +35,22 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-07 — #2188: the rules for which model an engine may be launched with
+
+<!-- prawduct: type=feature | scope=2188-engine-model-selection -->
+
+#2188 chunk 02 (the design's numbering; chunk 01 was the two spikes). Design approved by the Architect (A124, A131); the design document is kept outside this repository, with the builder's local plans.
+
+**What landed.** `lib/engine-models.js`: `checkSelection`, `offeredWithAvailability`, `roster`, `modelArgv`, `validateModelsBlock`. A model is selectable when it is on the profile's allowlist and in the roster the installed CLI reports now. The Codex profile declares `gpt-5.6-sol` and `gpt-6-luna` with the `codex-models-cache` reader, and `validateProfile` checks any `models` block.
+
+**Added under Architect ruling A135.** The roster carries a freshness bound the original design did not have: `roster.maxAgeHours: 168` for Codex, provisional. A list older than that, one with no readable fetch time, and one dated more than five minutes into the future are all `ROSTER_UNAVAILABLE`. A `models` block that is present but invalid is logged and refused as `MODELS_BLOCK_INVALID`; it is never read as an engine with no model selection. `selectionState` gives every caller the three answers (none, invalid with the errors, ok), and `offeredWithAvailability` returns that state with its list, after the review showed that a boolean and an empty list made a broken block look like an absent one to everything but `checkSelection`. The entry also covers `docs/engine-guide.md` ("Model selection"), `FEATURES.md` and the `CHANGELOG.md` line under Internal.
+
+**No behaviour change.** Nothing calls the module at save or launch yet. `test/engine-models.test.js` asserts the Codex launch command is byte-identical with and without the block.
+
+**From the spikes (design section 9a).** `codex --remote unix://<socket> --model <id>` sets the thread's model on codex-cli 0.156.1, a turn completed on each offered id on this account, and the thread id names the rollout file. That is the evidence recorded in the profile. Antigravity stopped at its folder-trust prompt and was not answered, so it declares no block; the Architect deferred that turn (A131).
+
+**Found, not fixed.** The bundled OpenClaw profile fails `validateProfile` on `main` (no `detection`, no `configFormat` fields). It is a connection-backed template and nothing appears to validate it, so this is recorded here and left alone; the new test compares each profile with itself minus `models` so it does not vouch for it.
+
 ## 2026-10-07 — #2059: version-qualified Codex pane fixtures and pinned refusals
 
 <!-- prawduct: type=debt | scope=2059-codex-wake-fixtures -->
