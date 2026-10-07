@@ -1,6 +1,6 @@
 # ADR 0024: Release Versions group one or more Trains, superseding one-train-one-release
 
-**Status:** Accepted (2026-10-07). **Decision 4 is amended by Amendment 1 below** (2026-10-07, Architect rulings A86 and A87), which supersedes its wording where the two conflict. Records the Architect's ruling A84 on an Operator-directed
+**Status:** Accepted (2026-10-07). **Decisions 2, 4 and 5 are amended by Amendment 1 below** (2026-10-07, Architect rulings A86 and A87), which supersedes their wording where the two conflict. Records the Architect's ruling A84 on an Operator-directed
 roadmap restructuring proposal. Amended same day, before merge, per the Architect's PR review of
 this ADR: fixed a contradiction in Decision 4 (bucket/unscoped Trains stay visible in the unchanged
 Train view, excluded only from the new Release view, not hidden in some third "backlog"), added
@@ -122,8 +122,8 @@ Tracked as [#2157](https://github.com/Jason-Vaughan/TangleClaw/issues/2157).
 ## Amendment 1 (2026-10-07): the release view holds a release's whole workload
 
 **Source:** Operator direction on the roadmap's shape, 2026-10-07; ruled by the Architect as A86
-(release panel contents) and A87 (workstream identity). **Amends:** Decision 4. Decisions 1, 2, 3,
-5, 6 and 7 stand as written.
+(release panel contents) and A87 (workstream identity). **Amends:** Decision 4 in full, and the
+parts of Decisions 2 and 5 named below. Decisions 1, 3, 6 and 7 stand as written.
 
 ### What changed, and why
 
@@ -166,11 +166,35 @@ buckets, and so excluded from their own release: release 5.32.0 would have shown
 7. **Decision 3 is unchanged and applies to everything above:** a release target is a forecast.
    What a version shipped is its tag, `CHANGELOG.md` and the release manifest.
 
+### Decision 2, as amended
+
+Decision 2 said one release holds one or many **Trains**, and that a Train whose cars span more
+than one release is split into new permanent Train ids. Two parts of that change.
+
+- **A release holds one or more workstreams**, each a numbered Train or a release-scoped bucket.
+  The rule that a Train rides at most one release, and is never split across two, stands.
+- **A Train whose cars span releases is not split automatically.** It is a candidate for the
+  identity review in item 4 above, decided on its own evidence under #1942. Until that review, the
+  cars that belong to another release may ride it as a bucket. No Train id is allocated in bulk
+  as a side effect of sorting.
+
+### Decision 5, as amended
+
+Decision 5 said each release-labelled issue outside a Train is folded into an existing Train or
+becomes the seed of a new one. Placing an issue in a release now answers a different question.
+
+- **Release placement reconciles the forecast only.** The sort put every open issue in a release
+  or in a named group of unscheduled work. That settles which version each is planned for. It
+  does not settle which Train an issue belongs to, and most were placed in buckets.
+- **The Train disposition Decision 5 asks for is still owed** for each such issue, and is made
+  through the same candidate-by-candidate identity review, not by the sort.
+- A `release:` label remains a proposal, never an assignment, as Decision 5 says.
+
 ### Consequences
 
 - The release panel in the plan renderer admits buckets as well as numbered Trains, each
   validated by the same rules as a stand-alone train card (#2165).
 - Roadmap 2's editorial data is the place release membership is recorded. GitHub milestones and
   `release:` labels are not changed by this amendment and are not required to match it.
-- Decision 5's individual reconciliation of release-labelled issues was carried out as part of
-  the full sort; the labels remain proposals, as that decision says.
+- Sorting the roadmap by release did not complete Decision 5: the Train identity of the issues it
+  placed in buckets is open, and is tracked with the identity review above.
