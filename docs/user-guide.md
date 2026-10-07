@@ -711,7 +711,7 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   - **Recent Progress** is a single line for today (the Pacific calendar day) and the current window. Click it to open a day-by-day table. If the scorecard's newest day is not today's date, the line says **Latest day**, so an old figure is never labelled as today's.
   - Every figure and trend is shown exactly as the scorecard states it. The page does not count or compare anything itself.
   - Times are in Pacific time (PDT/PST), never UTC. Each card says when it was last refreshed and gives both windows' names and dates.
-  - If no scorecard has been published, or it cannot be read or is malformed, the card says so and shows no numbers. If it is past its refresh deadline, the numbers are shown under a **Stale** warning.
+  - If no scorecard has been published, or it cannot be read or is malformed, the card says so and shows no numbers. If it is past its refresh deadline, the numbers are shown under a **Stale** warning. Nothing publishes the scorecard yet, so until a later release adds that, both cards say that no scorecard has been published.
 - Table cells never break a word, so issue numbers like `#1234` stay on one line; a wide table scrolls sideways instead.
 
 ## Mobile Tips
