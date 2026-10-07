@@ -22,7 +22,8 @@ setLevel('error');
 
 const store = require('../lib/store');
 const launchSequence = require('../lib/launch-sequence');
-const { createServer } = require('../server');
+const { createServer, _recoveryGateProbeFor } = require('../server');
+const recoveryDefault = require('../lib/recovery-default');
 
 /**
  * One JSON request against the test server.
@@ -144,6 +145,93 @@ describe('GET /api/launch-sequences (car 21.5)', () => {
     const theirs = await get(server, `/api/launch-sequences?projectId=${other.id}`);
     assert.equal(theirs.body.sequences.length, 1);
     assert.ok(!theirs.body.sequences.some((s) => ids.includes(s.sequenceId)));
+  });
+
+  // #1937: each row carries the mode its launch FROZE; the response also says
+  // the project's CURRENT mode, which a later change of the setting moves.
+  it('reports the project\'s current recovery mode beside the frozen per-launch one', async () => {
+    const before = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+    assert.equal(before.body.projectRecoveryMode, 'operator', 'the default, when nobody decided and no login is in force');
+    // The operator's choice is what moves it. The file saying advisory would
+    // not: this install's login is not in force.
+    store.projectRecoveryState.recordDecision(project.id, 'advisory', 'operator');
+    try {
+      const after = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(after.body.projectRecoveryMode, 'advisory');
+      assert.equal(after.body.projectRecoverySource, 'chosen');
+      assert.ok(after.body.sequences.every((s) => s.recoveryMode === before.body.sequences.find((b) => b.sequenceId === s.sequenceId).recoveryMode),
+        'a launch keeps the mode it froze');
+    } finally {
+      store.getDb().prepare('DELETE FROM project_recovery_state WHERE project_id = ?').run(project.id);
+    }
+    store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: { recoveryMode: 'advisory' } });
+    try {
+      const asked = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(asked.body.projectRecoveryMode, 'operator', 'a file saying advisory does not choose it without a login in force');
+      assert.equal(asked.body.projectRecoverySource, 'not-armed');
+    } finally {
+      store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: {} });
+    }
+    const unknown = await get(server, '/api/launch-sequences?projectId=999999');
+    assert.equal(unknown.body.projectRecoveryMode, null, 'no project, no mode to report');
+  });
+
+  // #1937: why the project is in its mode, the operator's decision on record,
+  // and the file disagreeing with it. The store outranks the file.
+  it('reports the source, the operator\'s decision and a file that disagrees with it', async () => {
+    const plain = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+    assert.equal(plain.body.projectRecoverySource, 'not-armed');
+    assert.equal(plain.body.projectRecoveryDiscrepancy, null);
+    assert.equal(plain.body.projectRecoveryDecision, null);
+    assert.equal(plain.body.projectRecoveryInheritedNotice, null);
+    store.projectRecoveryState.recordDecision(project.id, 'operator', 'operator');
+    store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: { recoveryMode: 'advisory' } });
+    try {
+      const pinned = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(pinned.body.projectRecoveryMode, 'operator', 'a file saying advisory does not loosen a pin');
+      assert.equal(pinned.body.projectRecoverySource, 'pinned');
+      assert.match(pinned.body.projectRecoveryDiscrepancy, /the pin decides/);
+      assert.equal(pinned.body.projectRecoveryDecision.pinnedMode, 'operator');
+      assert.equal(pinned.body.projectRecoveryDecision.decidedBy, 'operator');
+      assert.ok(pinned.body.projectRecoveryDecision.decidedAt);
+    } finally {
+      store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: {} });
+      store.getDb().prepare('DELETE FROM project_recovery_state WHERE project_id = ?').run(project.id);
+    }
+    const unknown = await get(server, '/api/launch-sequences?projectId=999999');
+    for (const field of ['projectRecoverySource', 'projectRecoveryDiscrepancy', 'projectRecoveryDecision', 'projectRecoveryInheritedNotice']) {
+      assert.equal(unknown.body[field], null, field);
+    }
+  });
+
+  // #1937: advisory is the default only while the login is in force. This is
+  // the probe `server.js` installs once it is listening, on a real listener,
+  // against the real config and user store.
+  it('reports the default this install gives, from the login gate as its own listener sees it', async () => {
+    const read = async () => {
+      const res = await get(server, `/api/launch-sequences?projectId=${project.id}`);
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      return [res.body.projectRecoveryMode, res.body.projectRecoverySource, res.body.projectRecoveryGateState];
+    };
+    // The seeded value, as any save leaves it in a project's file.
+    store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: { recoveryMode: 'operator' } });
+    const config = store.config.load();
+    try {
+      assert.deepEqual(await read(), ['operator', 'not-armed', null], 'no probe installed: the gate was not asked');
+      recoveryDefault.setGateStateProbe(_recoveryGateProbeFor(server));
+      store.config.save({ ...config, authEnabled: false });
+      assert.deepEqual(await read(), ['operator', 'not-armed', 'open'], 'an install with no login');
+      store.users.create('rosie', 'correct-horse-battery');
+      store.config.save({ ...config, authEnabled: true });
+      assert.deepEqual(await read(), ['advisory', 'inherited', 'armed'], 'the same project once a login is in force');
+      store.config.save({ ...config, authEnabled: false });
+      assert.deepEqual(await read(), ['operator', 'not-armed', 'open'], 'and operator-cleared again once it is switched off');
+    } finally {
+      recoveryDefault.setGateStateProbe(null);
+      store.getDb().prepare('DELETE FROM users').run();
+      store.config.save(config);
+      store.projectConfig.save(project.path, { ...store.projectConfig.load(project.path), launchSequence: {} });
+    }
   });
 
   it('keeps the rule-delivery record separate, and says when there is none', async () => {

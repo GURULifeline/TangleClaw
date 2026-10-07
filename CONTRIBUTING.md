@@ -37,6 +37,28 @@ Or install as a launchd service:
 ./deploy/install.sh
 ```
 
+### Governed clones: one `project-state.yaml` per checkout
+
+This repository is governed by the Prawduct plugin, and `.prawduct/*` is gitignored. So **a fresh
+clone does not get `.prawduct/project-state.yaml`**, and every checkout (a Pilot, Builder or reviewer
+clone) needs its own. Without it, Prawduct treats the frozen `.prawduct/backlog.md` as the live
+backlog. The session briefing then shows advisories to "migrate 42 pending items to GitHub Issues"
+and to groom "41 open backlog items".
+
+**Never accept that migration.** The backlog already moved to GitHub Issues on 2026-08-20, and those
+items are #1032–#1072. Running the migration again would create duplicate issues, and GitHub cannot
+delete an issue.
+
+Create a minimal file in the new checkout instead:
+
+```yaml
+# .prawduct/project-state.yaml: per-checkout, gitignored, not a copy of another clone's.
+backlog_service_repo: Jason-Vaughan/TangleClaw
+```
+
+Add other keys (for example `test_command`) only when this checkout needs them. The advisories
+re-evaluate at the next session start or `/clear`.
+
 ## Running Tests
 
 ```bash
@@ -50,6 +72,20 @@ Some tests can only run where the real thing exists — an installed engine CLI,
 ```bash
 node --test --test-reporter=junit --test-reporter-destination=test-results.xml 'test/*.test.js'
 node scripts/test-skip-audit.js test-results.xml
+```
+
+### Strict assertions
+
+Tests use `node:assert/strict`. A test in the suite fails when any `*.test.js` file under `test/`, at any depth, requires bare `node:assert` (or `assert`, the same module), and names each file and line. To ask outside the suite:
+
+```bash
+node scripts/assert-strict-guard.js
+```
+
+The fix is to change the import. If a file truly needs loose assertions, say so where it applies, on the line or the one above it. A waiver with no reason waives nothing:
+
+```js
+// prawduct:allow project/bare-assert -- <why this file needs loose assertions>
 ```
 
 ### The service-worker cache guard

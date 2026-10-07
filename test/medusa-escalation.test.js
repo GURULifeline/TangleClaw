@@ -113,6 +113,10 @@ describe('medusa watchdog escalation (#1839 chunk 04)', () => {
     watchdog._internal.workspaceForProject = (id) => workspaces[id] || null;
     watchdog._internal.isLocalWorkspace = () => false;
     watchdog._internal.logActivity = (e) => activity.push(e);
+    // The wake monitor is taken to be running, as these tests always assumed:
+    // with it stopped nothing retries, and every aged normal message is then
+    // the operator's at once (#2086, `test/medusa-aged-notice.test.js`).
+    watchdog._internal.monitorRunning = () => true;
   });
 
   afterEach(() => {
@@ -225,15 +229,26 @@ describe('medusa watchdog escalation (#1839 chunk 04)', () => {
       assert.equal(store.medusaExchanges.get(intent.exchange_id).esc_level, 'operator');
     });
 
-    it('ages normal mail and never escalates it', async () => {
+    // #2086 changed this contract by ruling. It used to read "ages normal mail
+    // and never escalates it", asserting `aged` and no activity row after 24
+    // hours. Normal mail that is merely waiting still never reaches the
+    // escalation route, but it no longer stays silent for ever: past
+    // `operatorNormalMs` the operator is alerted, once.
+    it('ages normal mail, never sends it to the escalation route, and alerts the operator once when it has waited an hour', async () => {
       routeToPm();
       const x = pmToBuilder({});
       await tickAt(T0 + 29 * MIN);
       assert.equal(store.medusaExchanges.get(x.exchange_id).esc_level, 'none');
       await tickAt(T0 + 30 * MIN);
-      await tickAt(T0 + 24 * 60 * MIN);
+      await tickAt(T0 + 59 * MIN);
       assert.equal(store.medusaExchanges.get(x.exchange_id).esc_level, 'aged');
       assert.equal(activity.length, 0);
+      await tickAt(T0 + 60 * MIN);
+      await tickAt(T0 + 24 * 60 * MIN);
+      assert.equal(store.medusaExchanges.get(x.exchange_id).esc_level, 'operator');
+      assert.equal(activity.length, 1);
+      assert.ok(!kinds(x).includes('escalated'), 'the escalation route is never told about normal mail');
+      assert.deepEqual(sent.map((n) => n.body.level), ['aged'], 'and the sender is told once, at the aged rung');
     });
 
     it('measures an acknowledged-but-unanswered reply from the ack, and stops once replied', async () => {

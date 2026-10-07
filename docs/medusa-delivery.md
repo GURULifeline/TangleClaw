@@ -68,7 +68,7 @@ has been replied to reads "satisfied, awaiting initiator close".
 | `escalateAfterMinutes` | Shortens the first escalation, down to 2 minutes. It can never lengthen it |
 | `reason` | `awaiting-ruling`, `awaiting-review`, `awaiting-dispatch`, `incident`, `question` or `other` |
 | `inReplyTo` | The Hub id of the message this answers |
-| `requestId` | An idempotency key; see above |
+| `requestId` | An idempotency key; see above. An id beginning with a prefix a TangleClaw component keeps for its own sends (the operator bridge's is `bridge:`) is refused, `400 REQUEST_ID_RESERVED`, with nothing sent |
 
 Who may claim what:
 
@@ -95,13 +95,22 @@ From a pane: `tc message send --priority blocking --reason awaiting-ruling <work
 
 ## Reading, acknowledging, replying, closing
 
-- `GET <base>/medusa/messages` records `read` for the messages it returns.
-  `POST <base>/medusa/read {"ids": [...]}` records `acknowledged`. Both apply
-  only to mail addressed to the reading session, and record who did it:
+- `GET <base>/medusa/messages` records `read` for the messages it returns,
+  except when the dashboard fetches them. `POST <base>/medusa/read {"ids": [...]}`
+  records `acknowledged`. Both apply only to mail addressed to the reading
+  session, and record who did it:
   - `recipient`: a verified launch;
-  - `operator-ui`: the dashboard, whose inbox panel marks everything it shows
-    as handled;
-  - `unverified-reader`: an unproven caller.
+  - `operator-ui`: the dashboard. Its inbox panel is a pure observation (#1987):
+    opening it records nothing, never acknowledges and never clears the unread
+    count. A `read` fact would take the message out of awaiting-read, end its
+    wake re-arms and make it unretractable, and a cleared count would cancel
+    the agent's wake nudge, all for mail the agent has not seen. Only an
+    explicit handled-mark from the dashboard is recorded, as `acknowledged`.
+    A browser-shaped request that is not the agent's verified launch counts
+    as the dashboard for reads, so an auth gate in fallback (operator
+    unproven) does not turn viewing into an unverified read;
+  - `operator`: the operator outside the dashboard (an authenticated API call);
+  - `unverified-reader`: an unproven caller that is not browser-shaped.
 - **A message that needs no reply closes on acknowledgement**, whoever
   acknowledged it; the record names who.
 - **A reply-required message stays open until a reply arrives.** An
@@ -141,7 +150,18 @@ The wake monitor still nudges once per fresh-mail edge, and now:
 - **After a nudge, the monitor keeps judging the pane without typing**, so a
   later change in readiness is recorded.
 - **After a restart**, the monitor consults the recorded attempts before
-  treating mail as un-nudged, so a restart never sends an extra wake.
+  treating mail as un-nudged, so a restart never sends an extra wake. It asks
+  about each message in the inbox by its own Hub id (#2086). The Hub
+  redelivers mail that was never marked handled, so a message the recipient
+  already fetched comes back as unread. A message is the recipient's already
+  when its exchange shows the recipient read or acknowledged it, whether or
+  not it was ever nudged, or shows a nudge with no re-arm pending; a restart
+  is not a reason for another. A message the record cannot vouch for (no id,
+  no exchange, neither read nor nudged, or re-armed) makes the answer no, so
+  new mail is not hidden behind old. Mail with no exchange record, and
+  untracked mail the recipient has not fetched, are therefore nudged once per
+  server lifetime. The record is asked by the message body's `id`, which is
+  what arrivals and reads are recorded under.
 
 The watchdog re-arms a wake only on a durable trigger newer than the attempt:
 
@@ -168,10 +188,100 @@ the escalation that follows.
 The exception recovers from a lost Enter. It does not prevent one: why the Enter
 after the paste is sometimes lost has not been established.
 
+**Panes are read without blocking the server (#2086).** The monitor's tick
+runs its gates, asks tmux for the pane of every session holding mail at the
+same time, and returns. Each answer is judged when it arrives:
+
+- **Every gate runs again on the answer**, on the session as it is then. A
+  wrap or rotation that began, mail already read, a listener that dropped or
+  a wake recorded meanwhile refuses the nudge. A read for a session that has
+  ended, whose id names another pane, or whose workspace changed
+  (`pane-read-stale`) is discarded.
+- **A read is given 4 seconds.** A pane that does not answer is left alone for
+  10 seconds, then 30, then 60 (`pane-read-backoff`). One ordinary read ends
+  that. A hung pane delays no other session.
+- **One read per session at a time**, and none is acted on after the monitor
+  stops.
+- **A tick that got no look at a pane is not an observation of it.** A
+  timeout, a failed read, a backoff and an answer that took 3 seconds or more
+  each end the idle streak, and a nudge needs two fresh at-rest observations
+  at least 4 seconds apart.
+- **Judging an answer asks tmux nothing**, so a wedged tmux server cannot hold
+  the server through it.
+
+**Something happening asks for a look (#2086).** The monitor does not wait
+for its timer when one of these is recorded for a session: mail arrives, its
+listener returns to `listening`, its project's wrap finishes, or its
+coordinator rotation closes.
+
+- **A request is not a command.** It runs the same scan, through every gate,
+  and one look never nudges. A look that was asked for and finds the pane at
+  rest books a single follow-up 4 seconds later, and the timer leaves the
+  session alone until then. Mail for a pane at rest is nudged about 4.4
+  seconds after it arrives, where the timer alone took 5 to 10.
+- **Requests are bounded.** They are coalesced per session, and dropped when
+  the monitor is stopped, when the pane is being read, has a follow-up booked,
+  is backed off, or was observed less than 4 seconds ago.
+- **A busy pane coming to rest is still found by the timer.** No engine pushes
+  a "turn finished" event the monitor could use.
+- **Requests are in memory.** A restart loses them and the timer covers.
+
+None of this types anything a tick would not have typed. The measurements are
+in [medusa-wake-measurements.md](medusa-wake-measurements.md).
+
 **Elapsed time alone never re-arms and never spends the budget.** A nudge
 with no trigger stays unconfirmed and escalates by age instead. Re-arms back
 off (2, 4, then 8 minutes) up to 3 times. The count and the next eligible time
 are stored, so duplicate ticks and restarts re-arm nothing twice.
+
+## What a held wake means
+
+Every wake the monitor withholds has a reason code. A code says what was
+observed, not whether waiting will fix it. One classifier
+(`lib/medusa-delivery-disposition.js`) answers that, and both readers below
+use it (#2086):
+
+| Class | What it means | Examples |
+|---|---|---|
+| `actionable` | The recipient is live and the monitor retries by itself. Waiting fixes it. | A busy pane, a wrap in progress, a listener reconnecting |
+| `configuration` | The recipient is live and nothing changes until someone acts. | Wake not opted in, an engine with no wake profile, a listener that is off |
+| `historical` | The recipient session is not live. | A session that ended with mail deferred |
+
+- **`tc message status <workspace-id>`** prints the class and what to do
+  beside the reason. The peers route returns them as `class`, `nextAction` and
+  `nextActionMeaning`. A reason that is not a held wake (`nudged`, `no-mail`)
+  has the class `none`. When the wake monitor is not running, nothing is
+  retrying anything and the verdict is stale, so the answer is `configuration`,
+  to be investigated, whatever the last reason was. It never tells a sender to
+  wait for a monitor that is stopped.
+- **`GET /api/medusa/deliveries`** returns every session whose newest mail was
+  not nudged. `undelivered` is the whole list, as before. Each item now also
+  carries `class`, `live`, `reason`, `since`, `lastAssessedAt`, `ageMs`,
+  `nextAction` and `nextActionMeaning`, and the response adds `actionable`,
+  `configuration` and `historical` (the same items, partitioned) and
+  `summary` (counts, the oldest actionable age, and any reason code no class
+  is declared for).
+
+Two rules decide the doubtful cases. A reason code the classifier does not
+know is `configuration`, to be investigated, and is logged once. A row is
+`historical` only when something positively says its session is not live: the
+store holds no active session under that id. Where that cannot be established
+the row is `configuration`, never `historical`.
+
+`actionable` is a promise that the monitor retries by itself, so no row is
+`actionable` unless the monitor is positively running. With it stopped, a row
+that would have been is `configuration`, to be investigated, in the words the
+sender-facing answer uses. Rows that were already `configuration` or
+`historical` are classed as they were.
+
+The Project Master is the one exception to "not live means historical". It is
+a single identity that stops and starts, so a stopped Master holding mail is
+`configuration`, to be started, and its mail waits for it. A project session
+that ended is replaced by a different session, and stays `historical`.
+
+`since` is when the ledger recorded the current verdict. `lastAssessedAt` is
+when the monitor last looked at a live session, and is null until it has. The
+read writes nothing: old rows are classified, not removed.
 
 ## Escalation
 
@@ -182,7 +292,7 @@ server time, before its notices go out:
 |---|---|---|---|
 | **Aged**: the sender is told | 30 min | 5 min | at once |
 | **Escalated**: the route is told | — | 15 min | at once |
-| **Operator**: dashboard and activity log | — | 60 min | 5 min |
+| **Operator**: dashboard and activity log | 60 min, or at 30 min for a reason below | 60 min | 5 min |
 
 - **Timing.** Unread is measured from the send. Acknowledged but unanswered
   (reply required) is measured from the ack. For blocking mail nothing
@@ -214,7 +324,90 @@ server time, before its notices go out:
   as `medusaEscalations`. `GET /api/medusa/escalations` lists every escalated
   exchange with names, age and blocker. Each operator alert also writes an
   activity row, `medusa-escalation`.
+- **A notice says whether waiting will fix it (#2086).** Every notice carries
+  `class`, `nextAction` and `nextActionMeaning` from the classifier under
+  "What a held wake means": a busy recipient is `actionable`, one that never
+  opted in is `configuration`, and a message that was nudged and not yet read
+  is `none`. With the wake monitor stopped, no notice promises a retry: a hold
+  that would otherwise be `actionable` reads as `configuration` with
+  `investigate`. That applies to held wakes only. A message that was nudged,
+  read or acknowledged holds no wake and stays `none` whatever the monitor is
+  doing, and a `configuration` hold keeps its own next action.
+- **The exchange record's own codes are translated first.** A blocked or
+  pending exchange usually carries the monitor's reason, but the record
+  writes two codes itself: `rearmed` (the monitor will look again, read as
+  `not-observed`) and `awaiting-read` (the newest mail was already nudged,
+  read as `nudged`). One mapping in `lib/medusa-exchanges.js` owns them, and
+  the notice classifies what the code stands for, never the code itself.
+- **A nudge that was not accepted is not a nudge.** It waits on a re-arm, so
+  it reads as `actionable` while the watchdog can still re-arm it. Once the
+  re-arm budget (`maxRearms`) is spent nothing retries, and it reads as
+  `configuration` with `investigate`. A wake the monitor is still holding is
+  retried by the monitor and is not affected by that budget.
+- **A notice says what the message is waiting for.** `condition` is `unread`,
+  or `unanswered` for a message that was acknowledged and still owes a reply.
+  It is separate from `class`: an acknowledged message holds no wake, so its
+  class is `none`, and it is still plainly unanswered.
+- **Normal mail reaches the operator once.** It never reaches the escalation
+  route, and the sender is told once, at the aged step. It used to stop
+  there, which left the cases only an operator can resolve silent for ever.
+  After the aged step, each pass asks why the operator should be told, until
+  it has been:
+  - `configuration-hold`: nothing changes until someone acts. Told at the
+    aged step.
+  - `engine-thread-unknown-stalled`: the engine's own channel has not said
+    the session is idle for 10 minutes without a break, the same interval the
+    wake monitor's own stall alert uses, and the message has aged. A recipient
+    whose state only just became this is not stalled: the count starts when
+    the state does, and starts again if it ends and returns. The monitor still
+    retries, and the class stays `actionable`.
+  - `prolonged-actionable`, `prolonged-unread`: the recipient is merely busy,
+    or was nudged and has not read. Told at `operatorNormalMs`, and never
+    sooner than the aged step.
+  - `prolonged-unanswered`: the recipient acknowledged the message, a reply
+    is owed, and none has come for `operatorNormalMs` since the
+    acknowledgement.
+- **The operator alert is one fact and one activity row.** The
+  `operator_alerted` fact is recorded once, and the activity row is written in
+  the same transaction, only by the pass that recorded it. Repeated passes, a
+  restart and competing passes add neither. A row that cannot be written
+  leaves no fact, and the next pass records both: the row is written with a
+  store write that throws on a failed insert or trim, where the ordinary
+  activity write swallows its failures. The row is filed under the recipient
+  project when that project still exists, and without one otherwise, so a
+  deleted project cannot refuse it for ever. The row and the dashboard's
+  escalation list both carry `condition`. The fact keeps the blocker,
+  the condition, its class and next action, and why the operator was told, as
+  they were then. A later change of class neither repeats the alert nor rewrites it.
+- **An operator alert is not a message.** It wakes nobody and costs no turn.
+- **Untracked mail is not on the ladder.** A message to a workspace no live
+  session on this host holds cannot be supervised from here. Its own host
+  owns that.
 - **Retracted and closed exchanges never escalate.**
+
+### A send a TangleClaw component owns
+
+Most system messages are notices and make no exchange. One kind does: a message a TangleClaw
+component sends to a session on someone else's behalf and tracks, as the operator bridge's
+gateway does when it carries an operator's message to a project.
+
+Such a component can declare that it owns what it sends
+(`lib/medusa-exchanges.js#declareSystemOwner`). A send is then that component's when three things
+hold together: it has verified system provenance and no sending project, its sender is the
+component's listener, and its request id begins with the prefix the component declared.
+
+- **The watchdog does not raise it, at normal priority.** No aged notice, no escalation, no
+  operator alert. A blocking or critical send is escalated like anyone's. The
+  component decides what happens when it goes unread or unanswered. It is still re-armed, still
+  woken for, and still ended when its recipient retires.
+- **The component closes it,** in-process, and only its own
+  (`closeAsSystemOwner`). No route reaches that close. `POST .../exchanges/<id>/close` admits
+  the operator and the sending project's verified launch, as before, and nobody else.
+- **Nothing else is exempt.** A system send from a component that has declared nothing, or one
+  missing any of the three proofs, is an ordinary exchange.
+
+The operator bridge's gateway is the only declared owner. See
+[operator-bridge.md](operator-bridge.md), "The one status notice".
 
 ## Undeliverable and retired recipients
 
@@ -243,6 +436,7 @@ never used.
 | `agedNormalMs`, `agedBlockingMs` | 30 min, 5 min | The aged step |
 | `escalateBlockingMs` | 15 min | The escalated step for blocking |
 | `operatorBlockingMs`, `operatorCriticalMs` | 60 min, 5 min | The operator step |
+| `operatorNormalMs` | 60 min | When normal mail that is merely waiting reaches the operator. From 5 minutes to 48 hours. Never sooner than `agedNormalMs` |
 | `replyBlockingMs`, `replyCriticalMs` | 30 min, 15 min | Acknowledged-but-unanswered thresholds |
 
 ## Limits
@@ -257,6 +451,46 @@ never used.
 - **Nothing prunes these tables yet.** Retention is #1879.
 - **Retraction** is modelled (the `retracted` state and its guarded
   transition) but has no route yet; that is #1873.
+
+## What is proven, and what is not
+
+`test/medusa-wake-exchange-proof.test.js` runs the real wake monitor, the real
+exchange record and the real watchdog against a store on disk (#2086). Each
+server lifetime is a separate process on the same database, so nothing in
+memory crosses a restart. Only the tmux pane, the listener and Hub, and time
+are stand-ins. It holds that:
+
+- an eligible recipient gets one nudge, one recorded attempt and one nonce,
+  across any number of ticks and restarts;
+- a miss buys one re-arm, the backoff and the re-arm budget survive restarts,
+  and time alone re-arms nothing;
+- a receipt marks only the messages whose newest nudge it names;
+- a held wake is recorded once, survives a restart and is still delivered;
+- the aged notice and the operator alert are each sent once across restarts;
+- mail that was fetched but not marked handled is not nudged by a restart,
+  whether it was fetched after a nudge or before one was ever recorded, and
+  never hides new mail.
+
+Limits of that proof, which are not defects:
+
+- **No positive receipt.** The tmux transport can prove a miss only, so there
+  is no `wake_accepted` case for a project session.
+- **The delivery ledger is not exactly-once.** A held wake writes one more
+  `skipped` ledger row per restart. The exchange fact is not repeated.
+- **The operator alert is a snapshot.** A nudge that keeps missing alerts once
+  at the hour as `prolonged-actionable` while a re-arm is still pending, and a
+  budget that runs out later does not alert again.
+- **Real tmux, a real Hub and a real server restart are not exercised.**
+
+`test/medusa-wake-codex-fixtures.test.js` runs every Codex pane fixture
+against every answer the engine's channel can give. The fixtures carry the
+codex-cli version they were captured from. **The only version proven is
+0.155.1.** No other version is, and nothing infers that another behaves the
+same. Two further limits: the `thinking` pane was derived from Codex's help
+text and never captured, so what the gate does with it when the channel says
+idle is not asserted; and the channel's answers are TangleClaw's own
+normalized shape, so the Codex app-server protocol is not proven by these
+fixtures.
 
 ## Rolling back
 
@@ -276,3 +510,8 @@ without a rollback.
 `test/medusa-exchanges.test.js`, `test/api-medusa-exchanges.test.js`,
 `test/medusa-watchdog.test.js`, `test/medusa-escalation.test.js`,
 `test/medusa-watchdog-e2e.test.js`, `test/store-medusa-exchange-migration.test.js`.
+
+What each wake tick and watchdog pass cost is recorded in memory by `lib/tick-meter.js`
+(`medusaWake.tickMetrics()`, `medusaWatchdog.tickMetrics()`); it observes and decides nothing.
+[medusa-wake-measurements.md](medusa-wake-measurements.md) holds the scale and lifecycle
+measurements taken with it (#2086).

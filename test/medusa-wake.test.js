@@ -70,6 +70,8 @@ function installWorld(overrides = {}) {
     // Whether `lib/wrap-run-registry` says a wrap pipeline is running for this
     // project. False is the ordinary case.
     wrapRunning: false,
+    // Whether the project is a coordinator in managed context rotation (#2032).
+    rotating: false,
     // The Master's seams (#996). `null` = no Master to scan, which keeps every
     // project-only test exactly as it was; the Master tests set a record.
     masterRecord: null,
@@ -92,6 +94,7 @@ function installWorld(overrides = {}) {
   // resolve there too, so an unstubbed read makes this gate inert in every test
   // instead of exercised in one.
   wake._internal.wrapRunning = () => world.wrapRunning;
+  wake._internal.rotationOpen = () => world.rotating;
   wake._internal.getStatus = () => world.status;
   wake._internal.getMessages = () => world.inbox;
   wake._internal.capturePane = () => ({ lines: world.pane });
@@ -744,6 +747,29 @@ describe('medusa-wake — gates (each one blocks alone)', () => {
     assert.equal(world.injected.length, 1, 'the held nudge fires once the wrap is over');
   });
 
+  it('never nudges a coordinator in managed context rotation, and nudges once when it resumes (#2032)', () => {
+    // The rotation types its own /clear and delivers its own re-entry turn; a
+    // nudge typed into the pane meanwhile would land in the clear or on top of
+    // the reconciliation. Mail waits, and is nudged once after the resume.
+    const world = installWorld({ rotating: true });
+    tickThroughDebounce();
+    tickThroughDebounce();
+    assert.equal(world.injected.length, 0);
+    assert.ok(world.recorded.some((r) => r.skipReason === 'coordinator-rotating'), 'the hold is recorded, not silent');
+
+    world.rotating = false;
+    tickThroughDebounce();
+    tickThroughDebounce();
+    assert.equal(world.injected.length, 1, 'the waiting mail is nudged exactly once after the rotation resumes');
+  });
+
+  it('holds the nudge when the rotation record cannot be read (#2032)', () => {
+    const world = installWorld({ sessions: [claudeSession(7)] });
+    wake._internal.rotationOpen = () => { throw new Error('store locked'); };
+    tickThroughDebounce();
+    assert.equal(world.injected.length, 0);
+  });
+
   // #1314 — every test above stubs `_internal.wrapRunning`, so none of them can
   // see what the real seam answers. That is the gap the bug lived in: the gate
   // fails closed by design, so a permanently-true read is indistinguishable
@@ -1172,8 +1198,14 @@ describe('medusa-wake — peer reachability verdicts (#918)', () => {
     installWorld({ pane: [SECRET, '  Do you want to proceed?', '❯ 1. Yes', '  2. No'] });
     tickAt(0);
     const v = wake.peerReachability(PEER);
-    assert.deepEqual(Object.keys(v).sort(), ['local', 'meaning', 'monitorRunning', 'observedAt', 'reason', 'since', 'workspaceId']);
+    // #2086 added `class`, `nextAction` and `nextActionMeaning`: three more
+    // fixed fields, each taken from a declared table by the reason code.
+    assert.deepEqual(Object.keys(v).sort(), ['class', 'local', 'meaning', 'monitorRunning', 'nextAction', 'nextActionMeaning', 'observedAt', 'reason', 'since', 'workspaceId']);
     assert.equal(v.meaning, wake.PEER_REASON_MEANINGS['pane-no-prompt'], 'the meaning is the declared text for the code, nothing captured');
+    const disposition = require('../lib/medusa-delivery-disposition');
+    assert.equal(v.nextActionMeaning, disposition.NEXT_ACTIONS[v.nextAction], 'the next action is the declared text for its code, nothing captured');
+    assert.ok(Object.prototype.hasOwnProperty.call(disposition.NEXT_ACTIONS, v.nextAction));
+    assert.ok([...disposition.CLASSES, 'none'].includes(v.class));
     assert.ok(!JSON.stringify(v).includes(SECRET));
   });
 

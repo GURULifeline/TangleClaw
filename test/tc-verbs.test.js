@@ -231,9 +231,10 @@ describe('tc verb roster (lib/tc-verbs)', () => {
           { id: 3, kind: 'startup', status: 'active', enabled: 0, content: 'was Z' }
         ]
       });
-      assert.match(out, /\[#1 startup — active\] always X/);
-      assert.match(out, /\[#2 wrap — PROPOSED\] maybe Y/);
-      assert.match(out, /\[#3 startup — active but DISABLED\] was Z/);
+      // #2029: each row is named "Rule #<id>" from the DB id.
+      assert.match(out, /\[startup — active\] Rule #1 — always X/);
+      assert.match(out, /\[wrap — PROPOSED\] Rule #2 — maybe Y/);
+      assert.match(out, /\[startup — active but DISABLED\] Rule #3 — was Z/);
       assert.match(out, /PROPOSED rows await operator approval/);
     });
 
@@ -295,6 +296,23 @@ describe('tc verb roster (lib/tc-verbs)', () => {
       assert.match(res.stdout, /pane-no-prompt — the pane shows no input prompt/);
       assert.match(res.stdout, /Observed 2026-09-12T10:45:00.000Z; this has been the verdict since 2026-09-12T10:00:00.000Z/);
       assert.doesNotMatch(res.stdout, /not being refreshed/);
+      assert.doesNotMatch(res.stdout, /What to do/, 'an answer from a server that sends no next action prints none');
+    });
+
+    it('status prints what to do, in the server\'s words, with the class (#2086)', async () => {
+      const answer = (extra) => message.run({
+        env: {}, argv: ['status', 'peer-ws'],
+        getJson: async (p) => (p.startsWith('/api/tc/whoami')
+          ? { project: { id: 1, name: 'proj' } }
+          : { workspaceId: 'peer-ws', local: true, meaning: 'm', since: null, observedAt: null, monitorRunning: true, ...extra }),
+        postJson: async () => { throw new Error('status must not POST'); }
+      });
+      const waits = await answer({ reason: 'pane-turn-in-flight', class: 'actionable', nextAction: 'wait', nextActionMeaning: 'the server\'s sentence about waiting' });
+      assert.match(waits.stdout, /What to do \(actionable\): the server's sentence about waiting\./);
+      const acts = await answer({ reason: 'wake-not-opted-in', class: 'configuration', nextAction: 'enable-wake', nextActionMeaning: 'the server\'s sentence about opting in' });
+      assert.match(acts.stdout, /What to do \(configuration\): the server's sentence about opting in\./);
+      const fine = await answer({ reason: 'nudged', class: 'none', nextAction: 'none', nextActionMeaning: 'nothing is held' });
+      assert.match(fine.stdout, /What to do: nothing is held\./, 'no class label when nothing is held');
     });
 
     it('unresolved identity → exit 2 telling the agent not to guess a project name', async () => {

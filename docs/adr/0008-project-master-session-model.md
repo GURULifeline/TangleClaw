@@ -142,3 +142,25 @@ actions).
   when actions arrive.
 - Operators on a fresh install pay one-time ensure latency on first open (mkdir + CLAUDE.md +
   tmux + engine launch); subsequent opens attach instantly.
+
+## Amendment (2026-10-04): a verified credential for bridge routing
+
+ADR 0023 and #2031 change one thing this ADR said. The Master's API boundary was instructional:
+nothing verified that a request was the Master's. For the operator bridge, and only for it, the
+Master now holds a verified credential.
+
+- **What it is.** A generation-bound credential minted when the Master session is created. The
+  server stores its SHA-256 only. It is revoked when the Master is killed or relaunched.
+- **What it authorises.** The `/api/bridge/master/*` routes. Nothing else: no file-write tier
+  and no general mutation of TangleClaw's API. Every other boundary in this ADR is unchanged
+  and stays instructional.
+- **How it is delivered.** Through a one-shot FIFO read by the pane's launch command, never
+  through `tmux new-session -e` or `tmux set-environment`.
+- **What it does not defeat.** A process running as the same user can read the Master's
+  environment, and the Master's own shell can print the variable. These are the host's trust
+  boundary.
+- **Consent.** Launch-on-first-open is unchanged by this amendment. ADR 0023 Decision 19 moves
+  consent to the bridge opt-in when the gateway is built; nothing launches the Master from an
+  inbound message yet.
+
+[docs/operator-bridge.md](../operator-bridge.md) describes the mechanism.

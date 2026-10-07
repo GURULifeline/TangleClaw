@@ -102,6 +102,7 @@ active. None of these is a principal:
 | RELEASE a hold | Operator (any named hold); the hold's own issuer; or a principal the matrix delegates (`releaseDelegations`). **Never the target.** The PM and the Architect cannot clear each other's holds by role |
 | STOP | Operator or anyone in `authority.stop` (never the target) |
 | Close | Operator or anyone in `authority.lifecycle` |
+| Finalize the bound session headlessly (`tc finalize`, #2027) | The target session itself, or anyone in `authority.lifecycle`, never the operator. Only once the lane composes `AVAILABLE`, has no unresolved Medusa obligation and holds no work of its own. See [session-finalize.md](session-finalize.md) |
 | Acknowledge | The target's currently bound launch, for the current generation only |
 
 **Operator proof tier.** An operator-only command needs one of these:
@@ -196,11 +197,32 @@ before any work.
 
 When a project is governed, TangleClaw writes a machine-local marker and installs `pre-commit` and
 `pre-push` dispatchers where git reads hooks (`git rev-parse --git-path hooks`). The marker is
-`<git-dir>/tangleclaw-control.json`, which holds `{assignmentId, api}` and is never committed.
+`<git-dir>/tangleclaw-control.json`, which holds `{assignmentId, api}` (plus `caFile` on a direct-mode
+HTTPS install, below) and is never committed.
 
 - **Governed checkout.** The hook asks `GET /api/control/check`:
   - blocked: it refuses, with the code and generation;
-  - TangleClaw unreachable, or the marker unreadable: it **fails closed**.
+  - TangleClaw unreachable, the marker unreadable, or the API certificate untrusted: it **fails
+    closed**, and says which.
+- **HTTPS (#1947).** A direct-mode HTTPS install writes `https://localhost:<port>` into the marker.
+  Node's bundled roots do not include the operator's mkcert root, so a plain `fetch` refused every
+  governed commit, push and wrap. When TangleClaw can prove that its served certificate was issued by a
+  `rootCA.pem` in the mkcert CAROOT (`$CAROOT`, mkcert's platform default, then `mkcert -CAROOT`;
+  name *and* signature checked), it records that file as `caFile`. The hook then:
+  - uses `caFile` only after the origin's host is proven to be literally `localhost`, `127.0.0.1` or
+    `[::1]`. A `caFile` beside any other origin, or beside plain `http:`, is refused before any
+    connection is made;
+  - connects to the literal loopback address, so no DNS answer can move the request off this
+    machine, and verifies the chain and the hostname in full, trusting **only** `caFile` for that one
+    request. TLS is never relaxed;
+  - with no `caFile` (a plain `http:` origin, or a certificate TangleClaw cannot tie to the local
+    root), uses Node's default verification, as before.
+
+  *Threat rationale.* This trusts nothing the operator's own browser and `tc` do not already trust,
+  and only for a request that cannot leave the machine. It trusts the root rather than pinning the
+  leaf because a certificate regeneration from the same root would otherwise break every hook until
+  the next launch rewrote the marker. A marker written before this change has no `caFile`. Its hook
+  still fails closed, and relaunching the session rewrites the marker and the hook.
 - **Ungoverned checkout** (no marker): the hook only runs any chained hook.
 - **Linked worktrees.**
   - A governed *main* checkout also marks its common git dir, so worktrees the Builder creates under
@@ -270,6 +292,34 @@ A checkout with no marker is never refused, so removing the markers alone is eno
 commits. Removing the hooks restores the checkout exactly.
 
 `git commit --no-verify` and `git push --no-verify` also get past the hooks in an emergency.
+
+### Control state survives a rollback, and comes back on re-upgrade
+
+Removing the hooks and markers unblocks git. It does **not** clear the control state, and neither
+does the rollback:
+
+- **Rollback deletes nothing.** The assignments, holds, events and receipts stay in the database.
+  A server whose schema predates control state runs no migration against a newer database, so it
+  never reads those tables and never clears them.
+- **Re-upgrading makes them authoritative again,** exactly as they were left. A lane that was HELD
+  or STOPPED before the rollback is still HELD or STOPPED:
+  - its governed mutations are refused again;
+  - an ordinary launch into a stopped project is refused;
+  - the next launch of a governed project reinstalls its hooks and markers.
+
+  This is the safe behavior: a hold nobody released is still in force. But a refusal right after
+  an upgrade can look like a regression. It is not a regression. It is state carried over from
+  before the rollback.
+- **Resolve it through the control workflows, never by editing the database.**
+  - Inspect what came back: `GET /api/control/assignments` lists every open assignment (operator
+    only), and `GET /api/control/assignments/:id` shows one assignment's holds and events. From a
+    pane, `tc control status` shows that lane's own state.
+  - Release holds that no longer apply, with `expectedGeneration` and a reason code.
+  - After a STOP, create a successor assignment.
+  - Close an active assignment whose work is finished.
+
+  The events and receipts tables are append-only by design, and a hand edit to the others bypasses
+  the generations and the audit trail that make those decisions safe to trust.
 
 ## Code
 

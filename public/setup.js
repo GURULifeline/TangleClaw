@@ -192,7 +192,7 @@ function checkSetupWizard() {
  * Show the wizard overlay.
  */
 function showWizard() {
-  wizard.projectsDir = state.config ? state.config.projectsDir || '~/Documents/Projects' : '~/Documents/Projects';
+  wizard.projectsDir = state.config ? state.config.projectsDir || '~/Projects' : '~/Projects';
   wizard.engines = state.engines || [];
   // Seed from config, but never carry in a default this machine can't run — the
   // shipped config default is 'claude', which on a Codex-only machine had the
@@ -435,7 +435,7 @@ function renderProjectsDir(body) {
         <label class="form-label" for="setupProjectsDir">Projects Root</label>
         <input type="text" class="form-input" id="setupProjectsDir"
                value="${esc(wizard.projectsDir)}"
-               placeholder="~/Documents/Projects"
+               placeholder="~/Projects"
                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         <div class="form-hint">Full path or ~ for home directory</div>
         <div id="setupDirProtected" class="form-error hidden" role="status"></div>
@@ -554,8 +554,7 @@ async function wizardValidateDir() {
     err.classList.remove('hidden');
     // A folder that is merely ABSENT is the one failure the operator can fix
     // from here, in one click — and it is the one a stock Mac hits first, since
-    // the pre-filled ~/Documents/Projects does not exist until someone makes
-    // it. Telling them it is missing and stopping is accurate and useless.
+    // the pre-filled default does not exist until someone makes it. Telling them it is missing and stopping is accurate and useless.
     _showCreateDirOffer(dir, api.lastErrorCode === 'DIR_MISSING');
     return;
   }
@@ -674,7 +673,7 @@ function renderDetectProjects(body) {
       html += `
         <label class="setup-project-item">
           <input type="checkbox" ${checked}
-                 onchange="wizardToggleProject('${esc(p.name)}', this.checked)">
+                 onchange="wizardToggleProject(${jsArg(p.name)}, this.checked)">
           <div class="setup-project-info">
             <span class="setup-project-name">${esc(p.name)}</span>
             ${buildGitMeta(p.git)}
@@ -873,7 +872,7 @@ function _engineInstallOptionsHtml(list) {
       ? `<div class="setup-engine-install-cmd">
           <code>${esc(command)}</code>
           <button class="btn btn-small" type="button"
-                  onclick="wizardCopyInstall(${esc(JSON.stringify(command))})">Copy</button>
+                  onclick="wizardCopyInstall(${jsArg(command)})">Copy</button>
         </div>`
       : '';
     // rel="noopener" because target=_blank otherwise hands the opened page a
@@ -983,7 +982,7 @@ function _mkcertHelpHtml(probeFailed) {
     ${probeFailed ? '' : `<div class="setup-engine-install-cmd">
       <code>${esc(command)}</code>
       <button class="btn btn-small" type="button"
-              onclick="wizardCopyInstall(${esc(JSON.stringify(command))})">Copy</button>
+              onclick="wizardCopyInstall(${jsArg(command)})">Copy</button>
     </div>
     <a class="setup-engine-install-docs" href="https://github.com/FiloSottile/mkcert"
        target="_blank" rel="noopener noreferrer">Install instructions &rarr;</a>`}
@@ -1990,7 +1989,7 @@ function _renderProvisionScreen() {
   const p = wizard.provision || {};
   const url = p.url || '';
   const signIn = url
-    ? `<button class="btn btn-primary setup-btn" onclick="window.location.href='${esc(url)}'">Open ${esc(url)}</button>`
+    ? `<button class="btn btn-primary setup-btn" onclick="window.location.href=${jsArg(url)}">Open ${esc(url)}</button>`
     : '';
 
   if (p.phase === 'working') {
@@ -2206,7 +2205,7 @@ function _showRestartOverlay(redirectUrl, warnings, via) {
 function _renderRestartOverlay(redirectUrl, warnings, state, via) {
   const body = document.getElementById('setupBody');
   if (!body) return;
-  const go = `<button class="btn btn-primary setup-btn" onclick="window.location.href='${esc(redirectUrl)}'">Open ${esc(redirectUrl)}</button>`;
+  const go = `<button class="btn btn-primary setup-btn" onclick="window.location.href=${jsArg(redirectUrl)}">Open ${esc(redirectUrl)}</button>`;
   const panel = {
     waiting: `
         <div class="spinner"></div>

@@ -111,7 +111,8 @@ an Architect, some Builders, a PR reviewer — on a machine that already runs Ta
 ## Phase 2 — the agents
 
 4. Resolve the configured projects directory, then clone one per role into it. Do not assume
-   `~/Documents/Projects` — that is only the default, and the store records a tilde it does not
+   `~/Projects` — that is only the default for a new install (older installs may have
+   `~/Documents/Projects`), and the store records a tilde it does not
    expand for you:
 
    ```sh
@@ -190,9 +191,11 @@ an Architect, some Builders, a PR reviewer — on a machine that already runs Ta
    Expected: the response names each `.md` file found.
    If it returns `"Group has no sharedDir configured"`: step 7's verification was skipped — go back.
 
-10. Give **each** fleet project its own copy of the live-checkout rule naming `Acme-Core`, via the
-    dashboard's rules panel or `POST $TANGLECLAW_API/api/session-rules`.
-    Expected: `tc rules` in a launched pane of each project prints it.
+10. Give **each** fleet project its own copy of the live-checkout rule naming `Acme-Core`, from the
+    dashboard's rules panel. A pane can instead propose it for its own project with
+    `POST $TANGLECLAW_API/api/session-rules` and `"${BIND[@]}"`; that lands `proposed`, and you
+    approve it in the same panel. Only the operator can create a rule that governs sessions (#2013).
+    Expected: `tc rules` in a launched pane of each project prints it as active.
 
     > Repeating it per project is correct, not duplication. Global Rules bind *every* project on
     this install, which this does not; a shared doc is canon, not a Project Rule. Until
@@ -290,6 +293,49 @@ an Architect, some Builders, a PR reviewer — on a machine that already runs Ta
   — not that Builder's own path.
 - 10a's check prints `OWNERS_OK`: **exactly one** group member is `ask` (or `auto`) and every other
   member is `off`. Inspecting a single project does not establish this.
+
+## Phase 4 — running the fleet concurrently
+
+**Use this whenever two or more fleet roles work at the same time, not only at stand-up.**
+
+Evidenced two ways: an Architect pre-build assessment (2026-09-16) predicted these before any
+swarm existed; TangleClaw's own fleet then ran them for one real overnight shift (2026-10-06/07)
+and confirmed each one caught something real.
+
+1. **One writer per workspace.** Each concurrent role gets its own clone/worktree; no two roles
+   point at the same working directory.
+   Expected: `ls` on each role's project path shows a distinct directory.
+   If two roles share one: stop one before it writes — not a race to resolve after the fact.
+
+2. **One chunk per session.** A Builder clears (`/clear`) between build-plan chunks — never runs
+   two chunks of the same plan in one continuous session.
+   Expected: `tc sessions` shows the Builder's `started` time resets between chunks.
+   If a session has already run across multiple chunks: let it finish the current one, then clear
+   before the next starts. Don't interrupt mid-chunk to fix this.
+
+3. **Merge authority stays outside the Builder.** The Builder reports a chunk ready; the PM (or
+   the named release owner, step 10a) runs the merge — never the Builder itself.
+   Expected: `gh pr view --json mergedBy` on a Builder's PR is never that Builder's own session.
+
+4. **A review result is bound to the exact head it reviewed.** A later commit on the same branch
+   needs a fresh Critic/PR-review result, not a reused one.
+   Expected: the reviewed SHA in the evidence record matches the PR's current `headRefOid`.
+   If they differ: treat the review as stale and re-run it.
+
+5. **Route caller/auth-surface changes through the Architect before code, not after.** Any change
+   touching identity, permission, or privileged-mutation checks gets a design review before a
+   Builder branches. This caught three real gaps in one night, including a regression test whose
+   own setup silently proved nothing.
+
+6. **Verify a peer's claim before acting on it; don't relay it.** Hash a file yourself before
+   trusting a reported digest; re-derive a count before repeating it; check a "can't message"
+   report against the actual channel before treating a session as stuck. A stale self-report
+   looks identical to a stuck session from the outside until checked.
+
+> 🚧 **UNVERIFIED AT SCALE** — these six held for one overnight shift, 3–5 concurrent roles,
+> human-in-the-loop PM throughout. Not proven for a larger fleet or unattended operation — the
+> 2026-09-16 assessment's bounded-pilot sequence (one supervised job → controlled failure
+> experiments → a bounded unattended run) is still the right next step, not something to skip past.
 
 ## Adding one agent later
 
