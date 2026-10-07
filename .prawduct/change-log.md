@@ -63,6 +63,23 @@ Chunk 02 of the #1937 plan (revision 6, sections 4.3 and 4.4), on PM dispatch (M
 - **Contract change in an existing test.** `test/store-bridge-migration.test.js` pinned the store's schema version at 54 in three assertions. The bridge's own version is still asserted as exactly 54. Two of the three now assert that an upgraded store ends at `store.CURRENT_SCHEMA_VERSION`; the third asserts the store's version is no older than the bridge's.
 - **Carried from chunk 1's review.** The operator-path PATCH test sets its own state; `taskStepWithheld`'s JSDoc no longer claims every describer reads it; the A24 comment sentence on the GET is gone; the API reference has rows for the two routes.
 
+## 2026-10-06 — Governed hooks work on direct-mode HTTPS (#1947, salvaged from PR #1951)
+
+<!-- prawduct: type=bugfix | scope=hooks-https-trust-1947 -->
+
+The PM dispatched this over Medusa (ca09f1ad) as a salvage, not a rebase. PR #1951 carried two changes. Its release-notes gate shipped separately through #2085, so that half is dropped here: `.github/workflows/release.yml`, `scripts/release-notes-gate.js`, its two tests and `docs/release-process.md` are untouched by this branch. The hooks half was on no branch but #1951's, and is carried over unchanged onto a fresh branch from `main`.
+
+**Problem.** On a direct-mode HTTPS install `_apiOrigin` writes `https://localhost:<port>` into the governed marker, and the hook's plain `fetch` does not trust the operator's mkcert root, so every governed commit, push and wrap failed closed (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`).
+
+**The change.**
+- `lib/https-setup.js#localTrustAnchor` returns the `rootCA.pem` (from `$CAROOT`, mkcert's platform default, then `mkcert -CAROOT`) only when it provably issued the served certificate, by name and signature.
+- `syncControlHooks` records it as the marker's `caFile`, and logs where it looked when none is found.
+- The dispatcher check is a self-contained `_controlCheck` function embedded by its source. `caFile` is used only after the host is proven literally `localhost`, `127.0.0.1` or `[::1]`. The request goes to the literal loopback address with `ca` replacing the default roots and full verification on. A non-loopback or `http:` origin with `caFile` is refused before connecting. An untrusted certificate is reported as untrusted, not as unreachable.
+
+**Tests.** `test/control-hooks-https.test.js`, with a throwaway CA made by openssl: HTTPS allow and hold, 127.0.0.1, untrusted, wrong CA, unreachable, non-loopback names with a hit counter proving no connection, `caFile` beside http or unreadable, push to a bare remote, the wrap commit step allowed and held, the marker, `localTrustAnchor`, and an in-process HTTPS instance end to end.
+
+**History.** #1951's own review (cumulative rev-20260927T160500Z-d2ccab90, 0 blocking) covered these files on the old base; the silent-null-anchor finding from it is the `log.warn` in `syncControlHooks`. This branch is reviewed again on the new base.
+
 ## 2026-10-06 — #1937: a held launch is not asked for what the gate refuses; the operator chooses the recovery mode
 
 <!-- prawduct: type=bugfix | scope=1937-recovery-gate-salvage -->
