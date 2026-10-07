@@ -84,37 +84,91 @@ describe('no test creates a real tmux session under a fixed name (#1983)', () =>
   // the scan below is what finds it.
   const REAL_SESSION_FILES = ['activity-observer.test.js', 'tmux-draft-capture.test.js', 'tmux.test.js'];
 
-  /** Matches a call that starts a real session: the lib helper, or tmux itself. */
-  const STARTS_REAL_SESSION = /\btmux\.createSession\(|['"`]new-session['"`]\s*,/;
+  /**
+   * Matches a call that starts a real session: the lib helper, or tmux itself
+   * as an argv element or inside a shell string. A `createSession` pulled out
+   * of the module by destructuring is not seen; no test does that, and the
+   * fakes several suites define under that name would be read as real ones.
+   */
+  const CALLS_LIB = /\btmux\.createSession\(/;
+  const SPAWNS_TMUX = /['"`]new-session['"`]\s*,|\b(?:exec|execSync|execFileSync|spawn|spawnSync)\(\s*['"`][^'"`\n]*\btmux new-session\b/;
 
   it('knows every test file that starts one', () => {
-    // `tmux.createSession` is stubbed or poisoned in most suites (#902), so only
-    // files that call it for real, or spawn `tmux new-session` themselves, count.
     const found = fs.readdirSync(__dirname)
       .filter((f) => f.endsWith('.test.js') && f !== path.basename(__filename))
       .filter((f) => {
         const src = stripComments(fs.readFileSync(path.join(__dirname, f), 'utf8'));
-        if (!STARTS_REAL_SESSION.test(src)) return false;
-        // Suites that install the guard cannot reach the real createSession, and
-        // the guard's own test calls it only to watch it throw.
-        return !/installTmuxGuard\(/.test(src);
+        // Spawning tmux directly is always real: the #902 guard poisons only
+        // `tmux.createSession`, so installing it excuses that call and no other.
+        if (SPAWNS_TMUX.test(src)) return true;
+        return CALLS_LIB.test(src) && !/installTmuxGuard\(/.test(src);
       })
       .sort();
     assert.deepEqual(found, REAL_SESSION_FILES,
       'a test file that starts a real tmux session must be listed here and take its names from uniqueSessionName');
   });
 
+  /**
+   * The names a file hands to tmux when it starts a session, as written.
+   * @param {string} src - Comment-free source
+   * @returns {string[]} Each name expression: an identifier, or a quoted or template literal
+   */
+  function sessionNameExpressions(src) {
+    const out = [];
+    const arg = '([A-Za-z_$][\\w$]*|\'[^\']*\'|"[^"]*"|`[^`]*`)';
+    for (const m of src.matchAll(new RegExp(`\\btmux\\.createSession\\(\\s*${arg}`, 'g'))) out.push(m[1]);
+    for (const m of src.matchAll(new RegExp(`['"\`]new-session['"\`]\\s*,[^\\]]*?['"\`]-s['"\`]\\s*,\\s*${arg}`, 'g'))) out.push(m[1]);
+    return out;
+  }
+
+  /**
+   * Whether a name expression can only ever hold a factory name.
+   * @param {string} expr - One entry from `sessionNameExpressions`
+   * @param {string} src - Comment-free source of the file it came from
+   * @returns {boolean} True when the name is a factory name, a name derived from one, or one tmux never sees
+   */
+  function isFactoryName(expr, src) {
+    const derived = /^`\$\{([A-Za-z_$][\w$]*)\}[\w-]*`$/.exec(expr);
+    if (derived) return isFactoryName(derived[1], src);
+    if (/^(['"`])[^'"`]*\1$/.test(expr)) {
+      // A literal is acceptable only where createSession refuses it before
+      // spawning anything, which is what the invalid-name tests pass.
+      return !expr.includes('${') && !tmux.isValidSessionName(expr.slice(1, -1));
+    }
+    // Anything else that is not a plain identifier is an expression built in
+    // place (a concatenation, a call), which cannot be traced to the factory.
+    if (!/^[A-Za-z_$][\w$]*$/.test(expr)) return false;
+    const decl = new RegExp(`\\b(?:const|let|var)\\s+${expr.replace(/\$/g, '\\$')}\\s*=\\s*([^;\\n]+)`, 'g');
+    const values = [...src.matchAll(decl)].map((m) => m[1].trim());
+    return values.length > 0 && values.every((v) => /^uniqueSessionName\(/.test(v) || (v !== expr && isFactoryName(v, src)));
+  }
+
   for (const file of REAL_SESSION_FILES) {
-    it(`${file} takes its session names from the factory`, () => {
+    it(`${file} gives tmux only names that come from the factory`, () => {
       const src = stripComments(fs.readFileSync(path.join(__dirname, file), 'utf8'));
-      assert.match(src, /require\('\.\/_tmux-session-names'\)/);
-      // THE MUTATION THIS CATCHES: a session name written as a literal again.
-      // Names that are only ever probed for absence are spelled `__nonexistent_`
-      // or `__never_existed_` and are not sessions.
-      const literals = src.match(/['"`]__tc_test_[^'"`]*['"`]/g) || [];
-      assert.deepEqual(literals, [], `${file} names a real session with a literal`);
-      assert.doesNotMatch(src, /`tc-[a-z0-9-]+-\$\{process\.pid\}`/,
-        `${file} builds a session name from the pid alone`);
+      const exprs = sessionNameExpressions(src);
+      assert.ok(exprs.length > 0, `${file} is listed as starting real sessions but no start was found`);
+      // THE MUTATION THIS CATCHES: a session started under a literal, a
+      // pid-built template, or a variable assigned anything but a factory name.
+      const offenders = [...new Set(exprs)].filter((e) => !isFactoryName(e, src));
+      assert.deepEqual(offenders, [], `${file} starts a real session under a name that is not from uniqueSessionName`);
+      // A name inside a shell string cannot be traced, so that form is not allowed here.
+      assert.doesNotMatch(src, /\btmux new-session\b[^'"`\n]*\s-s\s/,
+        `${file} starts a session from a shell string; pass the name as an argv element or use tmux.createSession`);
     });
   }
+
+  it('the name check rejects the shapes it exists to catch', () => {
+    const bad = (body) => {
+      const src = stripComments(body);
+      return sessionNameExpressions(src).filter((e) => !isFactoryName(e, src));
+    };
+    assert.deepEqual(bad("tmux.createSession('__tc_test_fixed__', {});"), ["'__tc_test_fixed__'"]);
+    assert.deepEqual(bad('tmux.createSession("my-fixed-session");'), ['"my-fixed-session"']);
+    assert.deepEqual(bad('const n = `tc-x-${process.pid}`;\ntmux.createSession(n);'), ['n']);
+    assert.deepEqual(bad("const n = 'tcx-' + process.pid;\nexecFileSync('tmux', ['new-session', '-d', '-s', n]);"), ['n']);
+    assert.deepEqual(bad("tmux.createSession(undeclared);"), ['undeclared']);
+    assert.deepEqual(bad("const n = uniqueSessionName('a');\nconst m = `${n}-longer`;\ntmux.createSession(m);\n" +
+      "execFileSync('tmux', ['new-session', '-d', '-s', `${n}-x`]);\ntmux.createSession('invalid name!');\ntmux.createSession('');"), []);
+  });
 });
