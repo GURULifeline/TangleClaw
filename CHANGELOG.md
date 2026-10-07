@@ -20,7 +20,7 @@ All notable changes to TangleClaw are documented in this file.
 
 ### Changed
 
-- **New installs default the projects directory to `~/Projects`, not `~/Documents/Projects`** (#880). The setup wizard warns about `~/Documents`, `~/Desktop` and `~/Downloads`, which macOS protects, and the old default sat under `~/Documents`, so every fresh Mac opened the wizard with a caution about its own pre-filled value. The new default draws no caution, and the wizard's Create-it offer makes it. Typing a protected folder still draws the caution. **Existing installs keep the directory they chose.** The protected-folder list and its wording now come from one place (`lib/tcc-folders.js`) for every server-side message. The installer and the browser keep their own copies, and a test holds them to the shipped default.
+- **New installs default the projects directory to `~/Projects`, not `~/Documents/Projects`** (#880). The setup wizard warns about `~/Documents`, `~/Desktop` and `~/Downloads`, which macOS protects, and the old default sat under `~/Documents`, so every fresh Mac opened the wizard with a caution about its own pre-filled value. The new default draws no caution, and the wizard's Create-it offer makes it. Typing a protected folder still draws the caution. **Existing installs keep the directory they chose.** That includes an install whose `config.json` never recorded a `projectsDir`: it stays on `~/Documents/Projects`, where it has been all along, and the installer's protected-folder note reads it the same way. The protected-folder list and its wording now come from one place (`lib/tcc-folders.js`) for every server-side message. The installer and the browser keep their own copies, and a test holds them to the shipped default.
 
 ### Security
 

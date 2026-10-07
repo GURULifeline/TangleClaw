@@ -99,6 +99,8 @@ The PM dispatched this over Medusa. Plan: `.tangleclaw/plans/880-default-project
 
 **Evidence.** The full suite is green on the final tree, after the merges of main (the last clean run is recorded tree-valid in the evidence store). An earlier run's single failure was a load flake in `test/projects.test.js` (a real 5 s scan deadline at load average 20-27; it passes 3 of 3 alone), filed as #1993. Mutation check: dropping `~/Downloads` from the EACCES hint turns the copies test red.
 
+**Added 2026-10-06, before merge.** Review found "existing installs keep their directory" asserted but unpinned: `config.load()` merges defaults, so a `config.json` with no `projectsDir` key would have moved to `~/Projects` on upgrade, with its projects still on disk and none listed. `load()` now gives a file that exists but lacks the key `LEGACY_PROJECTS_DIR` (`~/Documents/Projects`), and the next save writes it out. Only a missing file, a new install, gets the new default. `deploy/install.sh` read the same file with the new default as its keyless fallback, which would have silenced its protected-folder note for that same install; it now answers the way the server does. Tests: `test/projects-dir-upgrade.test.js`, and an executed case in `test/install-sh.test.js` that runs the installer's inline reader against real files. One assertion there changed on purpose: it refused any `Documents/Projects` in the block, and now allows exactly one, the keyless fallback. Removing either guard fails two tests. `public/` is unchanged from the diff the Architect cleared under A24.
+
 ## 2026-10-04 — Panel fold toggles keep keyboard focus (#1946)
 
 <!-- prawduct: type=bugfix | scope=panel-toggle-focus-1946 -->
