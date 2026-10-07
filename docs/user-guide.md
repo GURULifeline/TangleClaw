@@ -705,6 +705,27 @@ Every plan or design doc a session writes to `<project>/.tangleclaw/plans/<name>
   A car may carry `state`: `open`, `in-progress` (amber), `in-review` (purple: a pull request is open for review), `blocked` (red), `closed` (green) or `dropped` (grey and struck through: the issue was closed as not planned). It must agree with `closed`: `closed` and `dropped` need `"closed": true`, and every other state needs `"closed": false`. Without `state`, `closed` alone decides, as before, so a closed car is only drawn as dropped when the block says so. Each car is labelled with its state in words, so colour is never the only signal.
 
   A dropped car is left out of the count on both sides: a train of five cars with one dropped and two closed reads **(2/4)**, and the expanded card adds **1 dropped**. A train whose cars were all dropped reads **(0/0)**.
+- A **release panel** is a fenced block tagged `tc-release`. It draws one planned release as a single panel: a header with the version, a status badge and the count, then one train card per workstream, in the order written. Every row shows without a click, and each card still opens to its own thesis, issue table and sequencing note.
+
+  ```tc-release
+  {
+    "version": "5.32.0",
+    "status": "planned",
+    "trains": [
+      { "kind": "train", "train": 31, "title": "Recovery", "cars": [{ "issue": 2101, "closed": true }] },
+      { "kind": "bucket", "title": "Install safety", "cars": [{ "issue": 2140, "closed": false, "state": "in-review" }] }
+    ]
+  }
+  ```
+
+  - `version` is required and is three numbers, such as `5.32.0`: no `v`, no leading zero, no suffix. The panel adds the `v`.
+  - `status` is optional and takes the same values as a train's.
+  - `trains` holds 1 to 50 workstreams. Each is written exactly like a `tc-train` block and held to the same rules, with three more. `kind` must be written out and be `train` or `bucket`; a pilot or an unconfigured milestone is not release work. A workstream must have no `version`, because the release states it. No train identity may appear twice, and no two buckets may share a title (case and surrounding spaces are ignored). A release holds at most 1,000 cars in all.
+  - No other key is allowed, so a block cannot supply its own total.
+
+  The header counts the cars of every workstream, Topic Buckets included: **2/4 cars · 2 workstreams · 1 dropped** means two cars closed out of four still planned, with one more dropped and left out of both figures. A release whose cars were all dropped reads **0/0 cars** with its dropped count.
+
+  One mistake anywhere refuses the whole block, which is then shown as code with the reason, naming the workstream (`trains[1].cars[0].href must be an absolute https URL`). A panel is never drawn with a row missing.
 - The **new cards queue** is a fenced block tagged `tc-queue`: `{"newDays": 14, "issues": [{"issue": 1932, "title": "…", "href": "https://…", "type": "bug", "labels": ["…"], "createdAt": "2026-09-27T09:30:00Z"}]}`, with an optional `title`.
   - It lists every open issue that is not in a train, newest first.
   - Issues filed within `newDays` are marked **new** and appear as blue pills on the card.

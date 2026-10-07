@@ -643,3 +643,285 @@ describe('in-review and dropped cars, and the owning lane (#2165)', () => {
     assert.match(render(train({ owner: 'x'.repeat(trainCard.LIMITS.owner) })), /class="train-owner"/);
   });
 });
+
+describe('release panels (#2165)', () => {
+  /**
+   * A valid release holding one train and one Topic Bucket, with overrides.
+   * @param {object} [over] - Fields to replace.
+   * @returns {object}
+   */
+  function release(over = {}) {
+    return {
+      version: '5.32.0',
+      status: 'planned',
+      trains: [
+        train({ kind: 'train', train: 31 }),
+        {
+          kind: 'bucket',
+          title: 'Install safety',
+          cars: [
+            { issue: 20, closed: true },
+            { issue: 21, closed: false, state: 'in-review' },
+            { issue: 22, closed: true, state: 'dropped' }
+          ]
+        }
+      ],
+      ...over
+    };
+  }
+
+  /**
+   * A release with one of its workstreams replaced.
+   * @param {*} entry - The workstream to put first.
+   * @returns {object}
+   */
+  const withEntry = (entry) => release({ trains: [entry] });
+
+  /**
+   * Render one `tc-release` block through the plan renderer.
+   * @param {object|string} body - Release object, or raw block text.
+   * @returns {string}
+   */
+  function renderRelease(body) {
+    const text = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+    return planDocs.renderPlanBody(`\`\`\`tc-release\n${text}\n\`\`\``);
+  }
+
+  /**
+   * Assert a release block is refused whole: no panel, no card, the code fallback and a reason matching `why`.
+   * @param {object|string} body - Block.
+   * @param {RegExp} why - Expected reason.
+   * @returns {string} The HTML.
+   */
+  function refusedRelease(body, why) {
+    const html = renderRelease(body);
+    assert.doesNotMatch(html, /class="release-panel"|class="train-card"/);
+    assert.match(html, /<p class="block-error">Release block not rendered: /);
+    assert.match(html, /<pre><code class="language-tc-release">/);
+    assert.match(html, why);
+    return html;
+  }
+
+  describe('a valid block', () => {
+    it('draws one panel with the version, the status badge and one card per workstream in order', () => {
+      const html = renderRelease(release());
+      assert.equal(html.match(/<section class="release-panel"/g).length, 1);
+      assert.match(html, /<section class="release-panel" aria-label="Release 5\.32\.0"><div class="release-head"><span class="release-version">v5\.32\.0<\/span><span class="train-status status-planned">planned<\/span>/);
+      assert.equal(html.match(/<details class="train-card">/g).length, 2);
+      assert.ok(html.indexOf('Train 31: First Install, Completed') < html.indexOf('Topic Bucket: Install safety'));
+      assert.match(html, /<\/details><\/section>$/);
+    });
+
+    it('draws each workstream exactly as a tc-train block draws it, issue table included', () => {
+      const entry = train({ kind: 'train', train: 31 });
+      assert.ok(renderRelease(withEntry(entry)).includes(render(entry)));
+    });
+
+    it('counts the header from the cars of every workstream, buckets included, and says workstreams', () => {
+      // Train: one closed of two. Bucket: one closed, one in review, one dropped.
+      assert.match(renderRelease(release()),
+        /<span class="release-count" aria-label="2 of 4 cars done across 2 workstreams, 1 dropped">2\/4 cars · 2 workstreams · 1 dropped<\/span>/);
+    });
+
+    it('leaves dropped out of the header when no car is dropped, and writes one workstream in the singular', () => {
+      assert.match(renderRelease(withEntry(train({ kind: 'train' }))),
+        /<span class="release-count" aria-label="1 of 2 cars done across 1 workstream">1\/2 cars · 1 workstream<\/span>/);
+    });
+
+    it('reads 0/0 with the dropped count when every car is dropped', () => {
+      const html = renderRelease(withEntry({
+        kind: 'bucket', title: 'Abandoned', cars: [{ issue: 1, closed: true, state: 'dropped' }, { issue: 2, closed: true, state: 'dropped' }]
+      }));
+      assert.match(html, /aria-label="0 of 0 cars done across 1 workstream, 2 dropped">0\/0 cars · 1 workstream · 2 dropped</);
+    });
+
+    it('draws no status badge in the header when the release has no status', () => {
+      const { status, ...rest } = release();
+      assert.equal(status, 'planned');
+      assert.match(renderRelease(rest), /<span class="release-version">v5\.32\.0<\/span><span class="release-count"/);
+    });
+
+    it('accepts a release at the workstream bound', () => {
+      const trains = Array.from({ length: trainCard.LIMITS.releaseTrains }, (_, i) => train({ kind: 'train', train: i + 1, cars: [] }));
+      assert.match(renderRelease(release({ trains })), /across 50 workstreams/);
+    });
+
+    it('keeps a number and a string ID apart, and a train apart from a bucket of the same title', () => {
+      const html = renderRelease(release({
+        trains: [
+          train({ kind: 'train', train: 16 }),
+          train({ kind: 'train', train: 'A16' }),
+          { kind: 'bucket', title: 'First Install, Completed', cars: [] }
+        ]
+      }));
+      assert.equal(html.match(/<details class="train-card">/g).length, 3);
+    });
+
+    it('styles the panel from the page stylesheet', () => {
+      const page = planDocs.renderPlanPage({
+        project: { id: 1, name: 'p' }, file: 'x.md', relative: 'x.md', modifiedAt: '2026-09-27T00:00:00.000Z', markdown: '', timeZone: 'UTC'
+      });
+      assert.match(page, /section\.release-panel\{border:1px solid var\(--border\)/);
+      assert.match(page, /\.release-head\{display:flex/);
+    });
+  });
+
+  describe('the release schema is closed', () => {
+    it('refuses a body that is not JSON, or not an object', () => {
+      refusedRelease('{ not json', /block is not valid JSON/);
+      refusedRelease('[]', /block must be a JSON object/);
+    });
+
+    it('refuses an unknown top-level key, so a total or a done figure cannot be supplied', () => {
+      refusedRelease(release({ total: 99 }), /unknown key &quot;total&quot;/);
+      refusedRelease(release({ done: 99 }), /unknown key &quot;done&quot;/);
+      refusedRelease(release({ title: 'Recovery' }), /unknown key &quot;title&quot;/);
+    });
+
+    for (const bad of ['v5.32.0', '5.32', '05.32.0', '5.32.0-rc1', '5.32.0 ', '', '1'.repeat(20) + '.0.0', 5, undefined]) {
+      it(`refuses the version ${JSON.stringify(bad)}`, () => {
+        refusedRelease(release({ version: bad }), /version must be three numbers such as 5\.32\.0/);
+      });
+    }
+
+    it('refuses a status outside the list', () => {
+      refusedRelease(release({ status: 'done' }), /status must be one of planned, ready, in-progress, blocked, shipped, sunset/);
+    });
+
+    it('refuses trains that are missing, empty, not an array, or over the bound', () => {
+      const { trains, ...rest } = release();
+      assert.equal(trains.length, 2);
+      refusedRelease(rest, /trains must be a non-empty array/);
+      refusedRelease(release({ trains: [] }), /trains must be a non-empty array/);
+      refusedRelease(release({ trains: { 0: train() } }), /trains must be a non-empty array/);
+      const many = Array.from({ length: trainCard.LIMITS.releaseTrains + 1 }, (_, i) => train({ kind: 'train', train: i + 1, cars: [] }));
+      refusedRelease(release({ trains: many }), /trains has more than 50 entries/);
+    });
+
+    it('refuses more cars in total than the bound, though each workstream is within its own', () => {
+      const cars = Array.from({ length: 400 }, (_, i) => ({ issue: i + 1, closed: false }));
+      const trains = [1, 2, 3].map((id) => train({ kind: 'train', train: id, cars }));
+      refusedRelease(release({ trains }), /trains hold more than 1000 cars in total/);
+    });
+
+    it('refuses a body over the block bound before parsing it', () => {
+      refusedRelease(JSON.stringify(release()) + ' '.repeat(trainCard.LIMITS.body), /block is larger than 200000 characters/);
+    });
+  });
+
+  describe('a workstream is held to the train rules, at its own path', () => {
+    it('refuses a workstream that is not an object', () => {
+      refusedRelease(withEntry('Train 31'), /trains\[0\] must be an object/);
+      refusedRelease(withEntry(null), /trains\[0\] must be an object/);
+      refusedRelease(withEntry([]), /trains\[0\] must be an object/);
+    });
+
+    it('refuses an unknown key, a missing title and a malformed car, naming the workstream', () => {
+      refusedRelease(release({ trains: [train({ kind: 'train' }), train({ kind: 'train', train: 2, colour: 'red' })] }),
+        /trains\[1\] has unknown key &quot;colour&quot;/);
+      refusedRelease(withEntry(train({ kind: 'train', title: undefined })), /trains\[0\]\.title must be a non-empty string/);
+      refusedRelease(withEntry(train({ kind: 'train', cars: [{ issue: 1 }] })), /trains\[0\]\.cars\[0\]\.closed must be true or false/);
+      refusedRelease(withEntry(train({ kind: 'train', cars: [{ issue: 1, closed: false, state: 'dropped' }] })),
+        /trains\[0\]\.cars\[0\]\.state must agree with closed/);
+      refusedRelease(withEntry(train({ kind: 'train', cars: 'none' })), /trains\[0\]\.cars must be an array/);
+    });
+
+    it('refuses a kind that is absent, a pilot or an unconfigured milestone', () => {
+      refusedRelease(withEntry(train()), /trains\[0\]\.kind must be written out as one of train, bucket/);
+      refusedRelease(withEntry(train({ kind: 'pilot', train: 'B2' })), /trains\[0\]\.kind must be written out as one of train, bucket/);
+      refusedRelease(withEntry({ kind: 'unconfigured', title: 'Later', cars: [] }), /trains\[0\]\.kind must be written out as one of train, bucket/);
+      refusedRelease(withEntry(train({ kind: 'release' })), /trains\[0\]\.kind must be one of train, bucket, pilot, unconfigured/);
+    });
+
+    it('refuses a version on a workstream, because the release states it', () => {
+      refusedRelease(withEntry(train({ kind: 'train', version: '5.32.0' })), /trains\[0\]\.version must be absent inside a release/);
+      refusedRelease(withEntry({ kind: 'bucket', title: 'B', version: 'v6', cars: [] }), /trains\[0\]\.version must be absent inside a release/);
+    });
+
+    it('refuses a train with no identity and a bucket with one', () => {
+      refusedRelease(withEntry(train({ kind: 'train', train: undefined })), /trains\[0\]\.train must be an integer or a number/);
+      refusedRelease(withEntry({ kind: 'bucket', train: 4, title: 'B', cars: [] }), /trains\[0\]\.train must be absent when kind is bucket/);
+    });
+
+    it('refuses a train identity used twice, however the number is written', () => {
+      const entry = (id) => `{"kind":"train","train":${id},"title":"T","cars":[]}`;
+      refusedRelease(`{"version":"5.32.0","trains":[${entry('16')},${entry('16.0')}]}`,
+        /trains\[1\]\.train repeats another train in this release/);
+      refusedRelease(release({ trains: [train({ kind: 'train', train: 'C-E' }), train({ kind: 'train', train: 'C-E' })] }),
+        /trains\[1\]\.train repeats another train in this release/);
+    });
+
+    it('refuses two buckets whose titles differ only by case or surrounding spaces', () => {
+      refusedRelease(release({
+        trains: [{ kind: 'bucket', title: 'Install Safety', cars: [] }, { kind: 'bucket', title: '  install safety ', cars: [] }]
+      }), /trains\[1\]\.title repeats another bucket in this release/);
+    });
+
+    for (const bad of [
+      'javascript:alert(1)', 'JAVASCRIPT:alert(1)', 'data:text/html,x', 'http://example.com/',
+      '//evil.example/x', '/\\evil.example', 'https:\\\\evil.example', '/relative', 'relative.md',
+      '\u0001javascript:alert(1)', 'https://exa mple.com', 'https:///x', ''
+    ]) {
+      it(`refuses the href ${JSON.stringify(bad)} on a workstream and on its car`, () => {
+        refusedRelease(withEntry(train({ kind: 'train', href: bad })), /trains\[0\]\.href must be an absolute https URL/);
+        refusedRelease(withEntry(train({ kind: 'train', cars: [{ issue: 1, closed: false, href: bad }] })),
+          /trains\[0\]\.cars\[0\]\.href must be an absolute https URL/);
+      });
+    }
+  });
+
+  describe('escaping — nothing in a release becomes markup', () => {
+    const evil = '<script>alert(1)</script><img src=x onerror=alert(1)>"\'&';
+
+    it('escapes every string of a workstream and its cars', () => {
+      const html = renderRelease(withEntry(train({
+        kind: 'train', train: 'A-1', title: evil, thesis: evil, sequencing: evil, owner: evil.slice(0, 60),
+        cars: [{ issue: 1, closed: false, type: evil.slice(0, 40), title: evil }]
+      })));
+      assert.match(html, /class="release-panel"/);
+      assert.doesNotMatch(html, /<script|<img/);
+      assert.match(html, /Train A-1: &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    });
+
+    it('refuses a string train ID carrying markup, and shows it only as escaped code', () => {
+      const html = refusedRelease(withEntry(train({ kind: 'train', train: 'A<b>' })), /trains\[0\]\.train must be an integer or a number/);
+      assert.doesNotMatch(html, /<b>/);
+    });
+
+    it('does not echo a refused value into the reason, and shows the source only as escaped code', () => {
+      const html = refusedRelease(release({ version: '<img src=x onerror=alert(1)>' }), /version must be three numbers/);
+      assert.doesNotMatch(html, /<img/);
+      assert.doesNotMatch(html.split('</p>')[0], /onerror/);
+      const key = refusedRelease(withEntry({ ...train({ kind: 'train' }), '<b>x</b>': 1 }), /trains\[0\] has unknown key &quot;&lt;b&gt;x&lt;\/b&gt;&quot;/);
+      assert.doesNotMatch(key, /<b>/);
+    });
+  });
+
+  describe('beside the other cards', () => {
+    it('leaves a tc-train and a tc-queue block on the same page as they were', () => {
+      const queue = { newDays: 14, issues: [{ issue: 9, createdAt: '2026-09-27T09:30:00Z' }] };
+      const now = Date.parse('2026-09-28T00:00:00Z');
+      const fence = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
+      const alone = [fence('tc-train', train()), fence('tc-queue', queue)].map((md) => planDocs.renderPlanBody(md, 0, { now }));
+      const page = planDocs.renderPlanBody(
+        [fence('tc-train', train()), fence('tc-release', release()), fence('tc-queue', queue)].join('\n\n'), 0, { now });
+      assert.ok(page.includes(alone[0]));
+      assert.ok(page.includes(alone[1]));
+      assert.equal(page.match(/<section class="release-panel"/g).length, 1);
+    });
+
+    it('does not let a refused release stop the cards around it', () => {
+      const fence = (info, body) => `\`\`\`${info}\n${JSON.stringify(body)}\n\`\`\``;
+      const page = planDocs.renderPlanBody([fence('tc-release', release({ version: 'v1' })), fence('tc-train', train())].join('\n\n'));
+      assert.match(page, /Release block not rendered: /);
+      assert.equal(page.match(/<details class="train-card">/g).length, 1);
+    });
+
+    it('exports the block name, the kinds and the bounds', () => {
+      assert.equal(trainCard.RELEASE_BLOCK_INFO, 'tc-release');
+      assert.deepEqual([...trainCard.RELEASE_KINDS], ['train', 'bucket']);
+      assert.equal(trainCard.LIMITS.releaseTrains, 50);
+      assert.equal(trainCard.LIMITS.releaseCars, 1000);
+    });
+  });
+});
