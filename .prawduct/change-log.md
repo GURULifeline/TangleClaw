@@ -35,6 +35,20 @@ Tag-line conventions (ART-4K9M, ratified 2026-07-17):
 
 <!-- Older entries live in .prawduct/change-log-archive/YYYY-MM.md, moved there verbatim by `prawduct-hook archive-change-log`. -->
 
+## 2026-10-08 — #2165 follow-up: the hidden-state-word test checked nothing; fallback claims reworded
+
+<!-- prawduct: type=bugfix | scope=2165-state-word-test-reach -->
+
+A small test-and-docs follow-up to PR #2179, on the PM's dispatch, for three notes the Architect accepted as non-blocking at its exact-head review (A153).
+
+**The test.** "never hides the state word by any style" matched only selectors containing `.car-state`. The stylesheet has no such rule, because the word needs none, so the assertion ran against an empty set and could not fail. What can hide the word is a rule on a box it sits in. The test now selects every rule whose selector names the card, the row of cars, the car's disclosure, the pill or one of its states, leaves out rules on pseudo-elements (they style the disclosure's marker or its content, not the summary), requires that set to contain the boxes it claims to cover, and refuses `display:none`, `visibility`, `opacity`, a zero font size, any `overflow`, `clip` or `clip-path`, `text-indent`, a fixed or maximum width or height, absolute or fixed positioning, a transparent colour and `content-visibility`. A companion test feeds the same pattern each of those and a set of the stylesheet's real declarations, so the pattern is shown to catch what it names and to leave the real rules alone. Six mutations of the stylesheet (opacity on one state, overflow and max-width on the summary, visibility on the row, `display:none` on the disclosure, a clipped `.car-state` rule, a transparent colour) each turn a test red.
+
+**Root cause.** I wrote the test from the selector I had just added to the markup, not from the question it was meant to answer. A negative assertion over a filtered set needs the set shown to be non-empty.
+
+**The fallback.** A test comment and a sentence in `FEATURES.md` stated that where a browser cannot style `::details-content` the detail is the full-line item itself. That is what the CSS is meant to do; nobody has run it in such a browser. Both now say so. Issue #2207's first step, which expected a closed car to omit its state, is updated for the visible state word.
+
+No renderer or stylesheet change.
+
 ## 2026-10-07 — #2165: release panels, two more car states, a car-state legend and car details on served plan pages
 
 <!-- prawduct: type=feature | scope=2165-release-panel -->
