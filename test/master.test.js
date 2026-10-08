@@ -2845,7 +2845,7 @@ describe('ensureMasterSession — Codex daemon isolation (#1895)', () => {
     }
   }
 
-  for (const version of ['0.156.1', '0.157.1']) {
+  for (const version of ['0.156.1', '0.157.1', '0.161.0']) {
     it(`isolates a Codex ${version} Master from the shared daemon, probing the exact executable`, () => {
       codexAnswers(`codex-cli ${version}\n`);
       const { result, command } = ensureWith({ engine: 'codex' });
