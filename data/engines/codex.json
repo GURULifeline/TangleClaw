@@ -114,7 +114,8 @@
       "receipt": "`clientUserMessageId` echoed as the user item's `clientId` WITH content whose bytes hash to the prompt's text digest is accepted (from `item/completed` or a `thread/turns/list` read-back, re-read on an interval); `turn/completed {completed}` on that turn, after acceptance, is applied; `failed` and `interrupted` are named.",
       "blockers": "Pre-send: untrusted directory (`trust_required`), no account (`auth_required`), exhausted usage with no usable credits (`quota_exhausted`), version disagreement (`version_mismatch`), no single idle thread (`engine_not_ready`), an unreadable answer (`readiness_unknown`). In-turn: `waitingOnApproval` and `waitingOnUserInput` keep the fire accepted under `approval_pending` / `user_input_pending`; the operator answers in the pane.",
       "verifiedVersions": [
-        "0.156.1"
+        "0.156.1",
+        "0.161.0"
       ],
       "evidence": {
         "adapter": {

@@ -180,7 +180,7 @@ describe('startupControl resolve', () => {
     const codex = require('../lib/startup-control-codex');
     const p = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'engines', 'codex.json'), 'utf8'));
     assert.deepEqual(sc.blockErrors(p.capabilities.startupControl), []);
-    assert.deepEqual(p.capabilities.startupControl.verifiedVersions, ['0.156.1']);
+    assert.deepEqual(p.capabilities.startupControl.verifiedVersions, ['0.156.1', '0.161.0']);
     const saved = codex._internal._version.version;
     try {
       codex._internal._version.version = null;
@@ -191,6 +191,12 @@ describe('startupControl resolve', () => {
       const r = sc.resolve(p);
       assert.equal(r.supported, true);
       assert.equal(r.adapter, codex);
+      // Regression: codex-cli 0.161.0 launched every Codex session without a native channel
+      // (version_unverified) until it was listed, which held every wake as engine-channel-absent.
+      codex._internal._version.version = '0.161.0';
+      assert.equal(sc.resolve(p).supported, true, '0.161.0 is verified');
+      codex._internal._version.version = '0.161.1';
+      assert.equal(sc.resolve(p).reasonCode, 'version_unverified', 'a patch release beyond the listed ones stays unsupported');
     } finally {
       codex._internal._version.version = saved;
     }
