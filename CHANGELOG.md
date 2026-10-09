@@ -7,6 +7,7 @@ All notable changes to TangleClaw are documented in this file.
 ### Fixed
 
 - `tc` now refuses a project-scoped call when its shell inherited another tmux session's TangleClaw identity, preventing wrong-project calls while the command-shell inheritance bug tracked in #2241 is repaired.
+- Codex 0.162.0 launches now opt out of the shared background daemon, preventing tool shells from inheriting another project's launch identity.
 
 ## [5.31.0] - 2026-10-06
 

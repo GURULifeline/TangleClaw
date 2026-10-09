@@ -1030,6 +1030,8 @@ describe('Codex startupControl adapter', () => {
           'codex --ask-for-approval never --sandbox workspace-write --no-daemon'
         );
         assert.equal(codex.legacyLaunchCommand('codex --no-daemon'), 'codex --no-daemon');
+        codex._internal._version.version = '0.162.0';
+        assert.equal(codex.legacyLaunchCommand('codex'), 'codex --no-daemon');
         codex._internal._version.version = '0.158.0';
         assert.equal(codex.legacyLaunchCommand('codex'), 'codex', 'future versions are not guessed compatible');
       } finally {
