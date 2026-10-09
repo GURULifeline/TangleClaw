@@ -27,11 +27,14 @@ const { execFile, spawnSync } = require('node:child_process');
  * the server waits on the loop the sync wait is blocking.
  * @param {string[]} args
  * @param {object} env
+ * @param {boolean} [preserveTmux] - Keep the caller's tmux binding for identity-guard tests.
  * @returns {Promise<{code: number, stdout: string, stderr: string}>}
  */
-function runTc(args, env) {
+function runTc(args, env, preserveTmux = false) {
   return new Promise((resolve) => {
-    execFile(TC_BIN, args, { env, encoding: 'utf8' }, (err, stdout, stderr) => {
+    const childEnv = { ...env };
+    if (!preserveTmux) { delete childEnv.TMUX; delete childEnv.TMUX_PANE; }
+    execFile(TC_BIN, args, { env: childEnv, encoding: 'utf8' }, (err, stdout, stderr) => {
       resolve({ code: err ? err.code : 0, stdout, stderr });
     });
   });
@@ -44,6 +47,28 @@ const store = require('../lib/store');
 const { createServer } = require('../server');
 
 const TC_BIN = path.join(__dirname, '..', 'bin', 'tc');
+
+describe('tc pane identity guard', () => {
+  it('refuses a shell bound to another tmux session before any API request', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tc-pane-identity-'));
+    try {
+      const tmux = path.join(dir, 'tmux');
+      fs.writeFileSync(tmux, '#!/bin/sh\ncase "$1" in\n  display-message) echo project-80 ;;\n  show-environment) printf "TANGLECLAW_PROJECT_ID=80\\nTANGLECLAW_LAUNCH_ID=launch-80\\n" ;;\nesac\n', { mode: 0o755 });
+      const res = await runTc(['whoami'], {
+        PATH: `${dir}:${process.env.PATH}`,
+        TMUX: '/tmp/tmux-socket,1,1',
+        TANGLECLAW_API: 'http://127.0.0.1:1',
+        TANGLECLAW_PROJECT_ID: '16',
+        TANGLECLAW_LAUNCH_ID: 'launch-16'
+      }, true);
+      assert.equal(res.code, 2);
+      assert.match(res.stderr, /PANE_IDENTITY_MISMATCH/);
+      assert.match(res.stderr, /No request was sent/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 /** Same request helper shape as the other api-*.test.js files. */
 function request(server, method, urlPath, headers = {}) {

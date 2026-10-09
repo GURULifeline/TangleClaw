@@ -27,7 +27,35 @@
  */
 
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { VERB_ROSTER, renderUsage, receiptVerbLabel, renderBodyTooLarge, renderControlBanner, bridgeCredentialHeader } = require(path.join(__dirname, '..', 'lib', 'tc-verbs.js'));
+
+/**
+ * Refuse a tool shell that inherited another pane's TangleClaw identity.
+ * tmux is the source of the launch environment; a mismatch must be resolved
+ * by the host rather than letting a project-scoped call reach the wrong lane.
+ * @param {NodeJS.ProcessEnv} env - The command process environment.
+ * @returns {string|null} A refusal message, or null when no mismatch was observed.
+ */
+function paneIdentityMismatch(env) {
+  if (!env.TMUX || !env.TANGLECLAW_LAUNCH_ID) return null;
+  let paneEnv;
+  try {
+    const session = execFileSync('tmux', ['display-message', '-p', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (!session) return null;
+    paneEnv = execFileSync('tmux', ['show-environment', '-t', session], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null; // tmux may be unavailable in a sandbox; the API still validates the launch.
+  }
+  const values = Object.fromEntries(paneEnv.split('\n').filter((line) => line.startsWith('TANGLECLAW_') && line.includes('=')).map((line) => {
+    const equals = line.indexOf('=');
+    return [line.slice(0, equals), line.slice(equals + 1)];
+  }));
+  const keys = ['TANGLECLAW_PROJECT_ID', 'TANGLECLAW_LAUNCH_ID', 'TANGLECLAW_WORKSPACE_ID'];
+  if (!keys.some((key) => values[key] && values[key] !== env[key])) return null;
+  return `this shell's TangleClaw identity disagrees with its attached tmux session. `
+    + 'No request was sent. The session host must repair the shell environment; restarting or wrapping this pane is not a remedy.';
+}
 
 async function main() {
   const verb = process.argv[2];
@@ -42,6 +70,12 @@ async function main() {
   if (!entry) {
     process.stderr.write(`tc: unknown verb '${verb}'\n${renderUsage()}`);
     process.exit(1);
+  }
+
+  const identityMismatch = paneIdentityMismatch(process.env);
+  if (identityMismatch) {
+    process.stderr.write(`tc: identity mismatch [PANE_IDENTITY_MISMATCH] — ${identityMismatch}\n`);
+    process.exit(2);
   }
 
   const api = process.env.TANGLECLAW_API;
