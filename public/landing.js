@@ -229,12 +229,12 @@ async function loadServerInfo() {
   // #227: the clone is behind origin/main. Rendered before the stale-server
   // branches below because those `return` — and a checkout that is both
   // behind upstream and ahead of the running process must show both.
-  renderBehindOriginBanner(data.behindOrigin);
-  // #1839: Medusa messages the delivery watchdog escalated to the operator.
-  renderMedusaEscalationBanner(data.medusaEscalations);
-  // #993: what the served checkout is on. Before the stale branches too, for
-  // the same reason — a feature branch checked out here is itself a deploy.
-  renderLiveCheckoutBanner(data.liveCheckout, data.behindOrigin);
+  // Operator choice (local patch, 2026-10-08): the behind-origin, Medusa
+  // escalation and live-checkout banners are hidden on this install. Passing
+  // null takes each renderer's own hide path.
+  renderBehindOriginBanner(null);
+  renderMedusaEscalationBanner(null);
+  renderLiveCheckoutBanner(null, null);
 
   // A new `startedAt` means a different process is answering. The update beacon
   // is derived from the old one and can now be advertising an update that has
